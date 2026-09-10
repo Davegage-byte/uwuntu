@@ -210,25 +210,39 @@ runtime_module_transaction_commit() {
 }
 
 runtime_module_transaction_rollback() {
-    local index target restored
+    local index target restored rollback_failed=0
 
     [ -n "$RUNTIME_MODULE_TRANSACTION_DIR" ] || return 0
     for index in "${!RUNTIME_MODULE_TARGETS[@]}"; do
         target="${RUNTIME_MODULE_TARGETS[$index]}"
-        rm -f -- "${target}.new.$$" "${target}.rollback.$$"
+        if ! rm -f -- "${target}.new.$$" "${target}.rollback.$$"; then
+            rollback_failed=1
+        fi
         if [ -e "$RUNTIME_MODULE_TRANSACTION_DIR/$index.existed" ]; then
             restored="${target}.rollback.$$"
-            if cp -a -- "$RUNTIME_MODULE_TRANSACTION_DIR/$index.file" "$restored"; then
-                mv -f -- "$restored" "$target"
-            else
-                rm -f -- "$restored"
+            if ! cp -a -- "$RUNTIME_MODULE_TRANSACTION_DIR/$index.file" "$restored" \
+                || ! mv -f -- "$restored" "$target"
+            then
+                rollback_failed=1
             fi
         else
-            rm -f -- "$target"
+            if ! rm -f -- "$target"; then
+                rollback_failed=1
+            fi
         fi
     done
-    rm -rf -- "$RUNTIME_MODULE_TRANSACTION_DIR"
+
+    if [ "$rollback_failed" -ne 0 ]; then
+        echo "KRITISCH: Runtime-Modul-Rollback konnte nicht vollständig durchgeführt werden." >&2
+        return 1
+    fi
+
+    if ! rm -rf -- "$RUNTIME_MODULE_TRANSACTION_DIR"; then
+        echo "KRITISCH: Runtime-Modul-Rollback konnte nicht vollständig durchgeführt werden." >&2
+        return 1
+    fi
     RUNTIME_MODULE_TRANSACTION_DIR=""
+    return 0
 }
 
 stage_runtime_module() {
@@ -1816,7 +1830,9 @@ apply_update_noninteractive() {
     # install_kiosk ist jetzt der zentrale ALLES-Installer und installiert
     # Network/Wipe sowie sämtliche übrigen Module selbst.
     if ! install_kiosk; then
-        runtime_module_transaction_rollback
+        if ! runtime_module_transaction_rollback; then
+            update_bootstrap_log "KRITISCH: Runtime-Module konnten nach dem fehlgeschlagenen Update nicht vollständig wiederhergestellt werden. Sicherungen: $RUNTIME_MODULE_TRANSACTION_DIR"
+        fi
         return 1
     fi
 
