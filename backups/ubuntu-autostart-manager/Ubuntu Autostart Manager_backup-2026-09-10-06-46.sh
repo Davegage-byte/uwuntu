@@ -2,7 +2,7 @@
 set -u
 
 # ============================================================
-# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.74 + Wipe Auto v3.32 + Audio Test v1.20
+# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.73 + Wipe Auto v3.32 + Audio Test v1.20
 # ============================================================
 
 USER_AUTOSTART="$HOME/.config/autostart"
@@ -43,7 +43,7 @@ MANAGER_INSTALL_PATH="$BIN_DIR/Ubuntu Autostart Manager.sh"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026090908
+MANAGER_BUILD=2026090907
 AUTO_MODE=0
 
 mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config"
@@ -2303,62 +2303,9 @@ window#touch_host {
 """
 
 
-# TOUCH_LAYOUT_START
-def calculate_touch_layout(width, height):
-    """Berechne das Layout vollständig in logischen GTK-Koordinaten.
-
-    size-allocate, set_size_request() und Gtk.Fixed.move() verwenden dieselbe
-    Koordinatenbasis. Der GDK-Skalierungsfaktor wird erst bei der Ausgabe in
-    Gerätepixel umgesetzt und darf auch unter XWayland/Fractional Scaling
-    nicht ein zweites Mal in diese Rechnung einfließen.
-    """
-    sw, sh = max(1, int(width)), max(1, int(height))
-    scale = min(sw / 1366.0, sh / 768.0, 1.25)
-
-    margin_x = min(max(0, int(round(125 * scale))), sw // 4)
-    margin_y = min(max(0, int(round(85 * scale))), sh // 4)
-    target_w = min(max(1, int(round(160 * scale))), max(1, sw - 2 * margin_x))
-    target_h = min(max(1, int(round(115 * scale))), max(1, sh - 2 * margin_y))
-    # Gleiche Parität ermöglicht auch bei ganzzahligen GTK-Koordinaten ein
-    # mathematisch exakt zentriertes mittleres Feld.
-    if target_w % 2 != sw % 2 and target_w > 1:
-        target_w -= 1
-    if target_h % 2 != sh % 2 and target_h > 1:
-        target_h -= 1
-
-    center_x = max(0, (sw - target_w) // 2)
-    center_y = max(0, (sh - target_h) // 2)
-    left_x = min(margin_x, max(0, sw - target_w))
-    right_x = max(left_x, sw - margin_x - target_w)
-    top_y = min(margin_y, max(0, sh - target_h))
-    bottom_y = max(top_y, sh - margin_y - target_h)
-
-    gap = min(max(0, int(round(22 * scale))), center_y // 4)
-    panel_w = min(max(1, int(round(350 * scale))), sw)
-    panel_h = min(max(1, int(round(105 * scale))), max(1, center_y - gap))
-    panel_x = max(0, (sw - panel_w) // 2)
-    panel_y = max(0, center_y - gap - panel_h)
-
-    return {
-        "window": (sw, sh),
-        "scale": scale,
-        "target_size": (target_w, target_h),
-        "panel_size": (panel_w, panel_h),
-        "positions": {
-            "top-left": (left_x, top_y),
-            "top-right": (right_x, top_y),
-            "center": (center_x, center_y),
-            "bottom-left": (left_x, bottom_y),
-            "bottom-right": (right_x, bottom_y),
-        },
-        "panel_position": (panel_x, panel_y),
-        "margins": (margin_x, margin_y),
-        "gap": gap,
-    }
-# TOUCH_LAYOUT_END
-
-
 class TouchTarget(Gtk.EventBox):
+    W = 160
+    H = 115
 
     def __init__(self, owner, target_id):
         super().__init__()
@@ -2367,6 +2314,7 @@ class TouchTarget(Gtk.EventBox):
         self.done = False
         self.touch_down = False
 
+        self.set_size_request(self.W, self.H)
         self.set_visible_window(True)
         self.add_events(Gdk.EventMask.TOUCH_MASK)
 
@@ -2417,7 +2365,6 @@ class TouchWindow(Gtk.Window):
         self.finished = False
         self.front_attempts = 0
         self.completed = 0
-        self.layout_key = None
 
         # GTK3/X11 specific: explicitly request a visual with an alpha channel.
         screen = self.get_screen()
@@ -2469,7 +2416,6 @@ class TouchWindow(Gtk.Window):
         print(f"Touch-Tester Backend: X11/XWayland ({display_name})")
         print(f"RGBA-Visual: {'JA' if self.rgba_ok else 'NEIN'}")
         print(f"Compositor: {'JA' if screen.is_composited() else 'NEIN'}")
-        print(f"GTK/GDK-Skalierungsfaktor: {self.get_scale_factor()}")
 
         if not self.rgba_ok:
             write_state(
@@ -2500,6 +2446,7 @@ class TouchWindow(Gtk.Window):
 
     def build_panel(self):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        outer.set_size_request(350, 105)
         outer.get_style_context().add_class("title-panel")
 
         title = Gtk.Label(label="TOUCH-TESTER")
@@ -2516,39 +2463,24 @@ class TouchWindow(Gtk.Window):
         return outer
 
     def on_size_allocate(self, widget, allocation):
-        layout = calculate_touch_layout(allocation.width, allocation.height)
-        tw, th = layout["target_size"]
-        pw, ph = layout["panel_size"]
-        layout_key = (layout["window"], tw, th, pw, ph)
+        sw, sh = allocation.width, allocation.height
+        tw, th = TouchTarget.W, TouchTarget.H
+        mx, my = 125, 85
 
-        if layout_key != self.layout_key:
-            self.layout_key = layout_key
-            for target in self.targets.values():
-                target.set_size_request(tw, th)
-            self.panel.set_size_request(pw, ph)
-
-            # CSS-Inhaltsminima skalieren mit, damit GTK die dynamischen
-            # Größenwünsche nicht wegen fester Fonts/Paddings vergrößert.
-            scale = layout["scale"]
-            border = max(1, int(round(5 * scale)))
-            radius = max(2, int(round(14 * scale)))
-            panel_border = max(1, int(round(2 * scale)))
-            pad_y = max(1, int(round(13 * scale)))
-            pad_x = max(2, int(round(20 * scale)))
-            self.panel.set_spacing(max(0, int(round(4 * scale))))
-            dynamic_css = CSS + f"""
-.touch-target {{ border-width: {border}px; border-radius: {radius}px; }}
-.title-panel {{ border-width: {panel_border}px; border-radius: {radius}px;
-                padding: {pad_y}px {pad_x}px; }}
-.main-title {{ font-size: {max(8, int(round(30 * scale)))}px; }}
-.progress {{ font-size: {max(7, int(round(15 * scale)))}px; }}
-.hint {{ font-size: {max(6, int(round(11 * scale)))}px; }}
-""".encode()
-            self._provider.load_from_data(dynamic_css)
-
-        for key, (x, y) in layout["positions"].items():
+        pos = {
+            "top-left": (mx, my),
+            "top-right": (max(mx, sw - mx - tw), my),
+            "center": ((sw - tw)//2, (sh - th)//2),
+            "bottom-left": (mx, max(my, sh - my - th)),
+            "bottom-right": (max(mx, sw - mx - tw), max(my, sh - my - th)),
+        }
+        for key, (x, y) in pos.items():
             self.fixed.move(self.targets[key], x, y)
-        self.fixed.move(self.panel, *layout["panel_position"])
+
+        pw, ph = 350, 105
+        center_y = (sh - th)//2
+        gap = 22
+        self.fixed.move(self.panel, (sw - pw)//2, max(12, center_y - ph - gap))
 
     def update_progress(self):
         self.completed = sum(1 for t in self.targets.values() if t.done)
@@ -8116,14 +8048,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.74")
+        self.window.set_title("Hardware Check v4.5.73")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.74")
+        title_label = Gtk.Label(label="Hardware Check v4.5.73")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
