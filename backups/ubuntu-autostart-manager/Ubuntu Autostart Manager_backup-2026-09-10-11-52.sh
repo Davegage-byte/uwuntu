@@ -2,7 +2,7 @@
 set -u
 
 # ============================================================
-# Ubuntu / GNOME Autostart Manager + modularer 4-Tile-Diagnose-Kiosk
+# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.74 + Wipe Auto v3.32 + Audio Test v1.21
 # ============================================================
 
 USER_AUTOSTART="$HOME/.config/autostart"
@@ -40,12 +40,10 @@ CLOSE_APPS_SCRIPT="$BIN_DIR/close-diagnostic-apps.sh"
 FORCE_UPDATE_SCRIPT="$BIN_DIR/uwuntu-force-update.sh"
 MANAGER_PATH_FILE="$HOME/.config/uwuntu-manager-path"
 MANAGER_INSTALL_PATH="$BIN_DIR/Ubuntu Autostart Manager.sh"
-RUNTIME_MANIFEST_DIR="$HOME/.local/share/uwuntu"
-RUNTIME_MANIFEST_PATH="$RUNTIME_MANIFEST_DIR/runtime-manifest.json"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026090911
+MANAGER_BUILD=2026090910
 AUTO_MODE=0
 
 # Die Laufzeitprogramme werden als eigenstaendige Repository-Module gepflegt.
@@ -61,16 +59,6 @@ RAW_MANAGER_PATH="Ubuntu%20Autostart%20Manager.sh"
 RUNTIME_MODULES_READY=0
 APPLY_UPDATE_MODE=0
 RUNTIME_MODULE_TRANSACTION_DIR=""
-STAGED_RUNTIME_MANIFEST=""
-
-# Robuste Bootstrap-Werte fuer Installationen ohne Manifest. Sobald ein
-# gueltiges lokales oder gestagtes Manifest vorliegt, kommen sichtbare
-# Komponentenstaende ausschliesslich daraus.
-VERSION_NC="2.28"
-VERSION_WA="3.32"
-VERSION_HC="4.5.74"
-VERSION_CA="1.20"
-VERSION_AU="1.21"
 
 RUNTIME_MODULE_PATHS=(
     "apps/network-check.sh"
@@ -97,91 +85,7 @@ RUNTIME_MODULE_TARGETS=(
     "$FORCE_UPDATE_SCRIPT"
 )
 
-mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config" "$RUNTIME_MANIFEST_DIR"
-
-validate_runtime_manifest() {
-    local manifest="$1"
-    python3 - "$manifest" <<'PY'
-import json
-import re
-import sys
-
-expected = ("network_check", "wipe_auto", "hardware_check", "camera_test", "audio_test")
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if data.get("schema") != 1 or isinstance(data.get("runtime_build"), bool):
-        raise ValueError
-    if not isinstance(data.get("runtime_build"), int) or data["runtime_build"] <= 0:
-        raise ValueError
-    components = data.get("components")
-    if not isinstance(components, dict) or any(name not in components for name in expected):
-        raise ValueError
-    if any(not isinstance(components[name], str) or
-           not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", components[name])
-           for name in expected):
-        raise ValueError
-except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
-    raise SystemExit(1)
-PY
-}
-
-load_runtime_versions() {
-    local manifest="$1"
-    validate_runtime_manifest "$manifest" || return 1
-    read -r VERSION_NC VERSION_WA VERSION_HC VERSION_CA VERSION_AU < <(
-        python3 - "$manifest" <<'PY'
-import json
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as handle:
-    components = json.load(handle)["components"]
-print(*(components[name] for name in
-        ("network_check", "wipe_auto", "hardware_check", "camera_test", "audio_test")))
-PY
-    )
-}
-
-stage_runtime_manifest() {
-    local source_ref="${UWUNTU_SOURCE_REF:-main}"
-    local local_manifest="$LOCAL_MODULE_ROOT/manifest.json"
-    local url
-
-    [ -z "$STAGED_RUNTIME_MANIFEST" ] || return 0
-    STAGED_RUNTIME_MANIFEST="$(mktemp /tmp/uwuntu-runtime-manifest.XXXXXX.json)" || return 1
-
-    if [ -z "${UWUNTU_SOURCE_REF:-}" ] && [ -f "$local_manifest" ]; then
-        cp -- "$local_manifest" "$STAGED_RUNTIME_MANIFEST" || return 1
-    else
-        command -v curl >/dev/null 2>&1 || return 1
-        url="${REMOTE_MODULE_BASE}/${source_ref}/modules/ubuntu-autostart-manager/manifest.json"
-        echo "Runtime-Manifest von GitHub ($source_ref)"
-        curl --fail --location --silent --show-error --retry 2 --retry-delay 1 \
-            --connect-timeout 8 --max-time 45 --output "$STAGED_RUNTIME_MANIFEST" "$url" || return 1
-    fi
-
-    if ! load_runtime_versions "$STAGED_RUNTIME_MANIFEST"; then
-        echo "FEHLER: Runtime-Manifest ist ungueltig."
-        return 1
-    fi
-}
-
-install_staged_runtime_manifest() {
-    local new_manifest="${RUNTIME_MANIFEST_PATH}.new.$$"
-    [ -n "$STAGED_RUNTIME_MANIFEST" ] && validate_runtime_manifest "$STAGED_RUNTIME_MANIFEST" || return 1
-    mkdir -p -- "$RUNTIME_MANIFEST_DIR" || return 1
-    cp -- "$STAGED_RUNTIME_MANIFEST" "$new_manifest" \
-        && chmod 0644 "$new_manifest" \
-        && mv -f -- "$new_manifest" "$RUNTIME_MANIFEST_PATH"
-}
-
-cleanup_staged_runtime_manifest() {
-    [ -z "$STAGED_RUNTIME_MANIFEST" ] || rm -f -- "$STAGED_RUNTIME_MANIFEST"
-    STAGED_RUNTIME_MANIFEST=""
-}
-
-if [ -f "$RUNTIME_MANIFEST_PATH" ]; then
-    load_runtime_versions "$RUNTIME_MANIFEST_PATH" || true
-fi
+mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config"
 
 runtime_module_index() {
     local wanted="$1" index
@@ -297,15 +201,6 @@ runtime_module_transaction_begin() {
             : > "$RUNTIME_MODULE_TRANSACTION_DIR/$index.existed"
         fi
     done
-
-    if [ -e "$RUNTIME_MANIFEST_PATH" ]; then
-        if ! cp -a -- "$RUNTIME_MANIFEST_PATH" "$RUNTIME_MODULE_TRANSACTION_DIR/runtime-manifest.json"; then
-            rm -rf -- "$RUNTIME_MODULE_TRANSACTION_DIR"
-            RUNTIME_MODULE_TRANSACTION_DIR=""
-            return 1
-        fi
-        : > "$RUNTIME_MODULE_TRANSACTION_DIR/runtime-manifest.existed"
-    fi
 }
 
 runtime_module_transaction_commit() {
@@ -336,22 +231,6 @@ runtime_module_transaction_rollback() {
             fi
         fi
     done
-
-
-    if ! rm -f -- "${RUNTIME_MANIFEST_PATH}.new.$$" "${RUNTIME_MANIFEST_PATH}.rollback.$$"; then
-        rollback_failed=1
-    fi
-    if [ -e "$RUNTIME_MODULE_TRANSACTION_DIR/runtime-manifest.existed" ]; then
-        restored="${RUNTIME_MANIFEST_PATH}.rollback.$$"
-        if ! mkdir -p -- "$RUNTIME_MANIFEST_DIR" \
-            || ! cp -a -- "$RUNTIME_MODULE_TRANSACTION_DIR/runtime-manifest.json" "$restored" \
-            || ! mv -f -- "$restored" "$RUNTIME_MANIFEST_PATH"
-        then
-            rollback_failed=1
-        fi
-    elif ! rm -f -- "$RUNTIME_MANIFEST_PATH"; then
-        rollback_failed=1
-    fi
 
     if [ "$rollback_failed" -ne 0 ]; then
         echo "KRITISCH: Runtime-Modul-Rollback konnte nicht vollständig durchgeführt werden." >&2
@@ -1207,7 +1086,7 @@ install_camera_test_app() {
 [Desktop Entry]
 Type=Application
 Name=Uwuntu Kamera Test
-Comment=Cleaner Uwuntu Kamera-Test v$VERSION_CA
+Comment=Cleaner Uwuntu Kamera-Test v1.20
 Exec=$CAMERA_TEST_SCRIPT
 Icon=camera-photo-symbolic
 Terminal=false
@@ -1230,7 +1109,7 @@ EOF
         update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
     fi
 
-    echo "OK: Kamera-Test v$VERSION_CA installiert/aktualisiert."
+    echo "OK: Kamera-Test v1.20 installiert/aktualisiert."
     echo "App-ID:   com.david.UwuntuCameraTest"
     echo "Programm: $CAMERA_TEST_SCRIPT"
     echo "Desktop:  $CAMERA_TEST_APP_DESKTOP"
@@ -1349,7 +1228,7 @@ EOF
         update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
     fi
 
-    echo "OK: Uwuntu Audio Test v$VERSION_AU installiert/aktualisiert."
+    echo "OK: Uwuntu Audio Test v1.21 installiert/aktualisiert."
     echo "Programm: $AUDIO_TEST_SCRIPT"
     echo "Desktop-Slot: $AUDIO_TEST_APP_DESKTOP"
     return 0
@@ -1422,12 +1301,6 @@ install_kiosk() {
 
     if ! install_all_dependencies; then
         echo "FEHLER: Uwuntu Basis-Abhängigkeiten konnten nicht vollständig installiert werden."
-        pause
-        return 1
-    fi
-
-    if ! stage_runtime_manifest; then
-        echo "FEHLER: Runtime-Manifest konnte nicht bereitgestellt und validiert werden."
         pause
         return 1
     fi
@@ -1530,15 +1403,6 @@ X-GNOME-Autostart-enabled=true
 Hidden=false
 NoDisplay=false
 EOF
-
-    # Das Manifest beschreibt nur einen vollstaendig installierten Runtime-Satz
-    # und wird deshalb als allerletzter produktiver Installationsschritt ersetzt.
-    if ! install_staged_runtime_manifest; then
-        echo "FEHLER: Lokales Runtime-Manifest konnte nicht installiert werden."
-        pause
-        return 1
-    fi
-    cleanup_staged_runtime_manifest
     echo
     echo "OK: 4-Felder-Kiosk eingerichtet."
     echo
@@ -1643,7 +1507,7 @@ write_network_check_desktop() {
 [Desktop Entry]
 Type=Application
 Name=Network Check + Wipe Auto
-Comment=Network Check v$VERSION_NC und Wipe Auto v$VERSION_WA
+Comment=Network Check v2.28 und Wipe Auto v3.32
 Exec=$NETWORK_CHECK_SCRIPT
 Icon=network-transmit-receive-symbolic
 Terminal=false
@@ -1671,7 +1535,7 @@ install_network_check() {
     echo "Network Check installieren / aktualisieren"
     echo "------------------------------------------------------------"
     echo
-    echo "Installiere Network Check v$VERSION_NC + Wipe Auto v$VERSION_WA im gemeinsamen Fenster."
+    echo "Installiere Network Check v2.28 + Wipe Auto v3.32 im gemeinsamen Fenster."
     echo "Network Check und Wipe Auto teilen sich künftig das obere linke Fenster."
     echo
 
@@ -1961,7 +1825,7 @@ apply_update_noninteractive() {
 
     # Auch ein unerwartetes Prozessende darf keine nur halb abgeschlossene
     # Runtime-Transaktion hinterlassen. Nach Commit ist der Handler ein No-op.
-    trap 'runtime_module_transaction_rollback; cleanup_staged_runtime_manifest' EXIT
+    trap 'runtime_module_transaction_rollback' EXIT
 
     # install_kiosk ist jetzt der zentrale ALLES-Installer und installiert
     # Network/Wipe sowie sämtliche übrigen Module selbst.
@@ -1973,7 +1837,6 @@ apply_update_noninteractive() {
     fi
 
     runtime_module_transaction_commit
-    cleanup_staged_runtime_manifest
     trap - EXIT
     return 0
 }
