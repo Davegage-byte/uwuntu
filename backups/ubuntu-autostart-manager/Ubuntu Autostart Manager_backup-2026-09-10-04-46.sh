@@ -43,7 +43,7 @@ MANAGER_INSTALL_PATH="$BIN_DIR/Ubuntu Autostart Manager.sh"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026090905
+MANAGER_BUILD=2026090904
 AUTO_MODE=0
 
 mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config"
@@ -589,10 +589,10 @@ install_force_update_helper() {
 #!/usr/bin/env bash
 set -u
 
-RAW_URL="https://raw.githubusercontent.com/Davegage-byte/uwuntu/refs/heads/main/Ubuntu%20Autostart%20Manager.sh"
-REF_API_URL="https://api.github.com/repos/Davegage-byte/uwuntu/git/ref/heads/main"
-RAW_COMMIT_BASE="https://raw.githubusercontent.com/Davegage-byte/uwuntu"
-RAW_MANAGER_PATH="Ubuntu%20Autostart%20Manager.sh"
+RAW_URL="https://raw.githubusercontent.com/Davegage-byte/voltune/refs/heads/main/uwuntu/Ubuntu%20Autostart%20Manager.sh"
+REF_API_URL="https://api.github.com/repos/Davegage-byte/voltune/git/ref/heads/main"
+RAW_COMMIT_BASE="https://raw.githubusercontent.com/Davegage-byte/voltune"
+RAW_MANAGER_PATH="uwuntu/Ubuntu%20Autostart%20Manager.sh"
 PATH_FILE="$HOME/.config/uwuntu-manager-path"
 DEFAULT_TARGET="$HOME/.local/bin/Ubuntu Autostart Manager.sh"
 LOG="$HOME/uwuntu_force_update.log"

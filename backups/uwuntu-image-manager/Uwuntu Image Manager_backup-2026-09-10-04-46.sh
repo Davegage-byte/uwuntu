@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.10"
+APP_VERSION="1.9"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,17 +94,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.10"
+APP_VERSION = "1.9"
 FORMAT_VERSION = "uwuntu-image-v1"
 
 UPDATE_API_URL = (
     "https://api.github.com/repos/"
-    "Davegage-byte/uwuntu/contents/"
-    "Uwuntu%20Image%20Manager.sh?ref=main"
+    "Davegage-byte/voltune/contents/"
+    "uwuntu/Uwuntu%20Image%20Manager.sh?ref=main"
 )
 UPDATE_RAW_URL = (
     "https://raw.githubusercontent.com/"
-    "Davegage-byte/uwuntu/main/"
+    "Davegage-byte/voltune/main/uwuntu/"
     "Uwuntu%20Image%20Manager.sh"
 )
 MAX_UPDATE_BYTES = 4 * 1024 * 1024
@@ -2082,7 +2082,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.10"
+VERSION = "1.9"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -2091,17 +2091,17 @@ LOG_FILE = STATE_DIR / "manager.log"
 ROOT_HELPER = "/usr/local/libexec/uwuntu-image-manager-root"
 
 UPDATE_PAGE_URL = (
-    "https://github.com/Davegage-byte/uwuntu/blob/main/"
-    "Uwuntu%20Image%20Manager.sh"
+    "https://github.com/Davegage-byte/voltune/blob/main/"
+    "uwuntu/Uwuntu%20Image%20Manager.sh"
 )
 UPDATE_API_URL = (
     "https://api.github.com/repos/"
-    "Davegage-byte/uwuntu/contents/"
-    "Uwuntu%20Image%20Manager.sh?ref=main"
+    "Davegage-byte/voltune/contents/"
+    "uwuntu/Uwuntu%20Image%20Manager.sh?ref=main"
 )
 UPDATE_RAW_URL = (
     "https://raw.githubusercontent.com/"
-    "Davegage-byte/uwuntu/main/"
+    "Davegage-byte/voltune/main/uwuntu/"
     "Uwuntu%20Image%20Manager.sh"
 )
 MAX_UPDATE_BYTES = 4 * 1024 * 1024
