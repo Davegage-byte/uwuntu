@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.11"
+APP_VERSION="1.10"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.11"
+APP_VERSION = "1.10"
 FORMAT_VERSION = "uwuntu-image-v1"
 
 UPDATE_API_URL = (
@@ -2082,7 +2082,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.11"
+VERSION = "1.10"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
