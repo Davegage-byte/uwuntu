@@ -2,7 +2,7 @@
 set -u
 
 # ============================================================
-# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.74 + Wipe Auto v3.32 + Audio Test v1.21
+# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.74 + Wipe Auto v3.32 + Audio Test v1.20
 # ============================================================
 
 USER_AUTOSTART="$HOME/.config/autostart"
@@ -43,7 +43,7 @@ MANAGER_INSTALL_PATH="$BIN_DIR/Ubuntu Autostart Manager.sh"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026090909
+MANAGER_BUILD=2026090908
 AUTO_MODE=0
 
 mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config"
@@ -4256,7 +4256,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_21.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_20.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -4337,7 +4337,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Gio
 
 
-VERSION = "v1.21"
+VERSION = "v1.20"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
@@ -4394,10 +4394,9 @@ COL_GRID = (58, 66, 76, 255)
 COL_CENTER = (145, 153, 165, 255)
 COL_BORDER = (78, 87, 98, 255)
 
-COL_RED = (255, 76, 76, 255)
-COL_ORANGE = (245, 166, 35, 255)
-COL_BLUE = (90, 162, 255, 255)
-COL_GREEN = (97, 211, 107, 255)
+COL_RED = (242, 55, 55, 255)
+COL_ORANGE = (255, 150, 18, 255)
+COL_GREEN = (45, 220, 100, 255)
 
 
 def calc_rms(samples):
@@ -4814,8 +4813,6 @@ class WaveRenderer:
 
         if color_name == "green":
             color = COL_GREEN
-        elif color_name == "blue":
-            color = COL_BLUE
         elif color_name == "orange":
             color = COL_ORANGE
         else:
@@ -5229,11 +5226,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.quick_play_enabled = False
         self.hardware_refresh_stamp = hardware_refresh_stamp()
 
-        # Die Waveform zeigt den Testzustand unabhängig vom momentanen Pegel.
-        # Ein einmal erreichter 3/3-Erfolg bleibt bis zum Schließen gelatcht.
-        self.waveform_state = "orange"
-        self.all_speakers_passed = False
-
         # Sichtzustände merken, damit ein schneller Links/Rechts-Spaßton
         # während der Wiedergabe blau werden und danach wieder auf das
         # Testergebnis (grün/rot) zurückspringen kann.
@@ -5419,7 +5411,6 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             # Waveform bleibt trotzdem sichtbar; bei fehlendem Mikrofon
             # können die Lautsprechertests nur nicht automatisch bestehen.
-            self.waveform_state = "red"
             write_mic_state("missing")
 
         self.speaker_tester = SpeakerTester(
@@ -5538,8 +5529,6 @@ class MainWindow(Gtk.ApplicationWindow):
             self.result_states.get(side) == "green"
             for side in ("left", "both", "right")
         ):
-            self.all_speakers_passed = True
-            self.waveform_state = "green"
             self.set_button_state("auto", "green")
             self.quick_play_enabled = True
             write_mic_state("tested" if self.analyzer.running else "missing")
@@ -5608,16 +5597,9 @@ class MainWindow(Gtk.ApplicationWindow):
         return Gdk.Texture.new_for_pixbuf(pixbuf)
 
     def update_picture(self):
-        if not self.analyzer.running:
-            waveform_color = "red"
-        elif self.all_speakers_passed:
-            waveform_color = "green"
-        else:
-            waveform_color = self.waveform_state
-
         image = self.renderer.render(
             self.analyzer.waveform,
-            waveform_color
+            self.analyzer.color_name
         )
 
         texture = self.pil_to_texture(image)
@@ -5646,8 +5628,6 @@ class MainWindow(Gtk.ApplicationWindow):
             self.quick_play_enabled = False
             self.reset_side_buttons()
             self.set_button_state("auto", "blue")
-            if not self.all_speakers_passed:
-                self.waveform_state = "orange"
             write_mic_state("auto" if self.analyzer.running else "missing")
             return False
 
@@ -5657,8 +5637,6 @@ class MainWindow(Gtk.ApplicationWindow):
         if event == "playing":
             if side in ("left", "both", "right"):
                 self.set_button_state(side, "blue")
-                if not self.all_speakers_passed:
-                    self.waveform_state = "blue"
 
             return False
 
@@ -5669,13 +5647,6 @@ class MainWindow(Gtk.ApplicationWindow):
             if side in ("left", "both", "right"):
                 self.result_states[side] = "green"
                 self.set_button_state(side, "green")
-                self.waveform_state = "green"
-
-                if all(
-                    self.result_states.get(name) == "green"
-                    for name in ("left", "both", "right")
-                ):
-                    self.all_speakers_passed = True
 
                 # Nach einem AUTO-Fehler kann ein einzelner erfolgreicher
                 # Nachtest den Gesamtstatus vervollständigen.
@@ -5687,8 +5658,6 @@ class MainWindow(Gtk.ApplicationWindow):
             if side in ("left", "both", "right"):
                 self.result_states[side] = "red"
                 self.set_button_state(side, "red")
-                if not self.all_speakers_passed:
-                    self.waveform_state = "red"
                 if self.quick_play_enabled:
                     self.update_auto_from_individual_results()
             return False
@@ -5697,16 +5666,12 @@ class MainWindow(Gtk.ApplicationWindow):
         # Gesamter Auto-Test
         # ----------------------------------------------------
         if event == "auto_pass":
-            self.all_speakers_passed = True
-            self.waveform_state = "green"
             self.set_button_state("auto", "green")
             self.quick_play_enabled = True
             write_mic_state("tested" if self.analyzer.running else "missing")
             return False
 
         if event in ("auto_fail", "auto_weak"):
-            if not self.all_speakers_passed:
-                self.waveform_state = "red"
             self.set_button_state("auto", "red")
             write_mic_state("detected" if self.analyzer.running else "missing")
 
@@ -5835,7 +5800,7 @@ EOF
         update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
     fi
 
-    echo "OK: Uwuntu Audio Test v1.21 installiert/aktualisiert."
+    echo "OK: Uwuntu Audio Test v1.20 installiert/aktualisiert."
     echo "Programm: $AUDIO_TEST_SCRIPT"
     echo "Desktop-Slot: $AUDIO_TEST_APP_DESKTOP"
     return 0
