@@ -2,7 +2,7 @@
 set -u
 
 # ============================================================
-# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.73 + Wipe Auto v3.32 + Audio Test v1.20
+# Ubuntu / GNOME Autostart Manager + 4-Tile Diagnose-Kiosk + Network Check v2.28 + Hardware Check v4.5.72 + Wipe Auto v3.32 + Audio Test v1.20
 # ============================================================
 
 USER_AUTOSTART="$HOME/.config/autostart"
@@ -43,7 +43,7 @@ MANAGER_INSTALL_PATH="$BIN_DIR/Ubuntu Autostart Manager.sh"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026090907
+MANAGER_BUILD=2026090906
 AUTO_MODE=0
 
 mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config"
@@ -5837,6 +5837,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gtk, Gdk, GLib, Pango
+import pyatspi
 from pathlib import Path
 import glob
 import json
@@ -7955,13 +7956,12 @@ class App(Gtk.Application):
         self.touch_proc = None
         self.touch_launch_guard_until = 0.0
 
-        # AT-SPI läuft ausschließlich in einem persistenten Helper. Der
-        # Hauptprozess liest für Audio-Pfeiltasten nur diesen lokalen Cache.
+        # Cache für die AT-SPI-Erkennung des GNOME-Power-Dialogs.
+        # Die eigentliche Prüfung läuft vollständig asynchron im Hintergrund.
+        # Audio-Pfeiltasten dürfen dadurch niemals auf AT-SPI warten.
+        self.power_dialog_cache_at = 0.0
         self.power_dialog_cache_value = False
-        self.power_dialog_helper_proc = None
-        self.power_dialog_helper_thread = None
-        self.power_dialog_helper_stopping = False
-        self.power_dialog_helper_restart_source = None
+        self.power_dialog_probe_running = False
         self.display_state_file = Path.home() / ".local/state/uwuntu/display_test_status.json"
         self.display_script = Path.home() / ".local/bin/uwuntu-display-test.sh"
         self.display_test_active = False
@@ -8048,14 +8048,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.73")
+        self.window.set_title("Hardware Check v4.5.72")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.73")
+        title_label = Gtk.Label(label="Hardware Check v4.5.72")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -8102,7 +8102,9 @@ class App(Gtk.Application):
         GLib.timeout_add(500, self.poll_display_status)
         GLib.timeout_add(400, self.poll_media_status)
         GLib.timeout_add(1000, self.poll_sensors)
-        self.start_power_dialog_helper()
+        # GNOME-Powerdialog im Hintergrund beobachten. Dieser Timer blockiert
+        # niemals die Pfeiltasten; der eigentliche AT-SPI-Scan läuft im Thread.
+        GLib.timeout_add(250, self.poll_power_dialog_status)
         self.start_global_input_listener()
 
         log("Hardware Check gestartet")
@@ -10322,17 +10324,9 @@ class App(Gtk.Application):
         ).start()
         return False
 
-    def start_power_dialog_helper(self):
-        """Genau einen persistenten, isolierten AT-SPI-Helper starten."""
-        if self.power_dialog_helper_stopping:
-            return False
-        if (
-            self.power_dialog_helper_proc is not None
-            and self.power_dialog_helper_proc.poll() is None
-        ):
-            return False
-
-        helper_code = r"""
+    def _power_dialog_probe_worker(self):
+        """AT-SPI-Powerdialog-Prüfung isoliert und ohne UI-Blockierung."""
+        probe_code = r"""
 import pyatspi
 
 cancel_tokens = ("abbrechen", "cancel")
@@ -10358,15 +10352,13 @@ def walk(obj, depth=0):
         yield from walk(child, depth + 1)
 
 
-last_detected = None
-
-
-def detect():
+def main():
     try:
         desktop = pyatspi.Registry.getDesktop(0)
         app_count = desktop.childCount
     except Exception:
-        return False
+        print("0")
+        return
 
     for app_index in range(app_count):
         try:
@@ -10404,148 +10396,57 @@ def detect():
                 any(token in haystack for token in cancel_tokens)
                 and any(token in haystack for token in power_tokens)
             ):
-                return True
+                print("1")
+                return
 
-    return False
-
-
-def publish():
-    global last_detected
-    detected = detect()
-    if detected != last_detected:
-        print(f"power-dialog {1 if detected else 0}", flush=True)
-        last_detected = detected
+    print("0")
 
 
-def on_relevant_event(event):
-    publish()
-
-
-def main():
-    publish()
-    for event_name in (
-        "window:create",
-        "window:destroy",
-        "window:activate",
-        "window:deactivate",
-        "object:state-changed:showing",
-    ):
-        pyatspi.Registry.registerEventListener(on_relevant_event, event_name)
-    pyatspi.Registry.start()
-
-try:
-    main()
-except Exception:
-    raise SystemExit(1)
+main()
 """
+        detected = False
         try:
-            proc = subprocess.Popen(
-                [sys.executable, "-u", "-c", helper_code],
+            result = subprocess.run(
+                [sys.executable, "-c", probe_code],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                bufsize=1,
+                timeout=0.40,
+                check=False,
             )
+            detected = result.returncode == 0 and result.stdout.strip() == "1"
+        except subprocess.TimeoutExpired:
+            log("Power-Dialog-Probe: Timeout im Hintergrund")
         except Exception as exc:
-            log(f"Powerdialog-Helper konnte nicht starten: {exc}")
-            self.schedule_power_dialog_helper_restart()
+            log(f"Power-Dialog-Probe Fehler: {exc}")
+
+        def finish_probe():
+            self.power_dialog_cache_value = detected
+            self.power_dialog_cache_at = time.monotonic()
+            self.power_dialog_probe_running = False
             return False
 
-        self.power_dialog_helper_proc = proc
-        self.power_dialog_helper_thread = threading.Thread(
-            target=self._read_power_dialog_helper,
-            args=(proc,),
-            name="uwuntu-power-dialog-helper-reader",
+        GLib.idle_add(finish_probe)
+
+    def poll_power_dialog_status(self):
+        """Powerdialog-Cache aktualisieren, ohne GTK oder Hotkeys zu blockieren."""
+        if self.power_dialog_probe_running:
+            return True
+
+        self.power_dialog_probe_running = True
+        threading.Thread(
+            target=self._power_dialog_probe_worker,
+            name="uwuntu-power-dialog-probe",
             daemon=True,
-        )
-        self.power_dialog_helper_thread.start()
-        log("Persistenter Powerdialog-Helper gestartet")
-        return False
-
-    def _read_power_dialog_helper(self, proc):
-        """Zustandsänderungen lesen; niemals im GTK-/Hotkey-Pfad warten."""
-        try:
-            for line in proc.stdout:
-                value = line.strip()
-                if value == "power-dialog 1":
-                    GLib.idle_add(self._set_power_dialog_cache, True)
-                elif value == "power-dialog 0":
-                    GLib.idle_add(self._set_power_dialog_cache, False)
-        except Exception as exc:
-            if not self.power_dialog_helper_stopping:
-                log(f"Powerdialog-Helper Lesefehler: {exc}")
-        finally:
-            try:
-                proc.wait()
-            except Exception:
-                pass
-            GLib.idle_add(self._power_dialog_helper_exited, proc)
-
-    def _set_power_dialog_cache(self, detected):
-        self.power_dialog_cache_value = bool(detected)
-        return False
-
-    def _power_dialog_helper_exited(self, proc):
-        if proc is not self.power_dialog_helper_proc:
-            return False
-        if proc.stdout is not None:
-            try:
-                proc.stdout.close()
-            except Exception:
-                pass
-        self.power_dialog_helper_proc = None
-        self.power_dialog_helper_thread = None
-        # Bei Ausfall nicht unnötig blockieren; Neustart frühestens nach 2 s.
-        self.power_dialog_cache_value = False
-        if not self.power_dialog_helper_stopping:
-            log("Powerdialog-Helper beendet; Neustart mit 2 s Backoff")
-            self.schedule_power_dialog_helper_restart()
-        return False
-
-    def schedule_power_dialog_helper_restart(self):
-        if self.power_dialog_helper_stopping:
-            return
-        if self.power_dialog_helper_restart_source is not None:
-            return
-        self.power_dialog_helper_restart_source = GLib.timeout_add(
-            2000, self._restart_power_dialog_helper
-        )
-
-    def _restart_power_dialog_helper(self):
-        self.power_dialog_helper_restart_source = None
-        self.start_power_dialog_helper()
-        return False
-
-    def stop_power_dialog_helper(self):
-        self.power_dialog_helper_stopping = True
-        if self.power_dialog_helper_restart_source is not None:
-            GLib.source_remove(self.power_dialog_helper_restart_source)
-            self.power_dialog_helper_restart_source = None
-
-        proc = self.power_dialog_helper_proc
-        self.power_dialog_helper_proc = None
-        if proc is None:
-            return
-        try:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=1.0)
-        except Exception as exc:
-            log(f"Powerdialog-Helper Shutdown-Fehler: {exc}")
-        finally:
-            if proc.stdout is not None:
-                try:
-                    proc.stdout.close()
-                except Exception:
-                    pass
+        ).start()
+        return True
 
     def system_power_dialog_open(self):
-        """Ausschließlich den Cache lesen – ohne Prozess, Scan oder Wartezeit."""
+        """Nur den bereits ermittelten Cache lesen – ohne jede Wartezeit."""
+        # Falls der periodische Timer noch nicht gelaufen ist, Prüfung nebenbei
+        # anstoßen. Der aktuelle Pfeiltastendruck wird dadurch NICHT verzögert.
+        self.poll_power_dialog_status()
         return bool(self.power_dialog_cache_value)
 
     def send_audio_action(self, action):
@@ -12469,7 +12370,6 @@ except Exception:
         self.mark_keyboard_alias(name, pressed=False)
 
     def do_shutdown(self):
-        self.stop_power_dialog_helper()
         self.restore_super_after_keyboard_test()
         self.restore_desktop_shortcuts_after_keyboard_test()
         self.restore_alt_space_after_keyboard_test()
