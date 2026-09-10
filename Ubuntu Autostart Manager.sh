@@ -5229,9 +5229,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.quick_play_enabled = False
         self.hardware_refresh_stamp = hardware_refresh_stamp()
 
-        # Die Waveform zeigt den Testzustand unabhängig vom momentanen Pegel.
-        # Ein einmal erreichter 3/3-Erfolg bleibt bis zum Schließen gelatcht.
-        self.waveform_state = "orange"
+        # Nur ein tatsächlich laufender, gemessener Lautsprechertest
+        # übersteuert die Live-Farbe des Mikrofons vorübergehend mit Blau.
+        self.speaker_scan_active = False
         self.all_speakers_passed = False
 
         # Sichtzustände merken, damit ein schneller Links/Rechts-Spaßton
@@ -5419,7 +5419,6 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             # Waveform bleibt trotzdem sichtbar; bei fehlendem Mikrofon
             # können die Lautsprechertests nur nicht automatisch bestehen.
-            self.waveform_state = "red"
             write_mic_state("missing")
 
         self.speaker_tester = SpeakerTester(
@@ -5539,7 +5538,6 @@ class MainWindow(Gtk.ApplicationWindow):
             for side in ("left", "both", "right")
         ):
             self.all_speakers_passed = True
-            self.waveform_state = "green"
             self.set_button_state("auto", "green")
             self.quick_play_enabled = True
             write_mic_state("tested" if self.analyzer.running else "missing")
@@ -5610,10 +5608,12 @@ class MainWindow(Gtk.ApplicationWindow):
     def update_picture(self):
         if not self.analyzer.running:
             waveform_color = "red"
+        elif self.speaker_scan_active:
+            waveform_color = "blue"
         elif self.all_speakers_passed:
             waveform_color = "green"
         else:
-            waveform_color = self.waveform_state
+            waveform_color = self.analyzer.color_name
 
         image = self.renderer.render(
             self.analyzer.waveform,
@@ -5644,10 +5644,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # ----------------------------------------------------
         if event == "auto_start":
             self.quick_play_enabled = False
+            self.speaker_scan_active = False
+            self.all_speakers_passed = False
             self.reset_side_buttons()
             self.set_button_state("auto", "blue")
-            if not self.all_speakers_passed:
-                self.waveform_state = "orange"
             write_mic_state("auto" if self.analyzer.running else "missing")
             return False
 
@@ -5657,8 +5657,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if event == "playing":
             if side in ("left", "both", "right"):
                 self.set_button_state(side, "blue")
-                if not self.all_speakers_passed:
-                    self.waveform_state = "blue"
+                self.speaker_scan_active = True
 
             return False
 
@@ -5666,10 +5665,10 @@ class MainWindow(Gtk.ApplicationWindow):
         # Einzeltest fertig
         # ----------------------------------------------------
         if event == "pass":
+            self.speaker_scan_active = False
             if side in ("left", "both", "right"):
                 self.result_states[side] = "green"
                 self.set_button_state(side, "green")
-                self.waveform_state = "green"
 
                 if all(
                     self.result_states.get(name) == "green"
@@ -5684,11 +5683,10 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
 
         if event in ("fail", "weak", "error"):
+            self.speaker_scan_active = False
             if side in ("left", "both", "right"):
                 self.result_states[side] = "red"
                 self.set_button_state(side, "red")
-                if not self.all_speakers_passed:
-                    self.waveform_state = "red"
                 if self.quick_play_enabled:
                     self.update_auto_from_individual_results()
             return False
@@ -5697,16 +5695,15 @@ class MainWindow(Gtk.ApplicationWindow):
         # Gesamter Auto-Test
         # ----------------------------------------------------
         if event == "auto_pass":
+            self.speaker_scan_active = False
             self.all_speakers_passed = True
-            self.waveform_state = "green"
             self.set_button_state("auto", "green")
             self.quick_play_enabled = True
             write_mic_state("tested" if self.analyzer.running else "missing")
             return False
 
         if event in ("auto_fail", "auto_weak"):
-            if not self.all_speakers_passed:
-                self.waveform_state = "red"
+            self.speaker_scan_active = False
             self.set_button_state("auto", "red")
             write_mic_state("detected" if self.analyzer.running else "missing")
 
@@ -5716,6 +5713,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
 
         if event == "idle":
+            self.speaker_scan_active = False
             # Buttons bleiben grundsätzlich bedienbar. Während ein Test läuft
             # ignoriert SpeakerTester weitere Starts über sein busy-Flag; direkt
             # nach Ende kann derselbe Test sofort erneut gedrückt werden.
