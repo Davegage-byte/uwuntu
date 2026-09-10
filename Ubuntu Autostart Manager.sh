@@ -54,7 +54,11 @@ MANAGER_SOURCE_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 MANAGER_SOURCE_DIR="$(dirname "$MANAGER_SOURCE_PATH")"
 LOCAL_MODULE_ROOT="$MANAGER_SOURCE_DIR/modules/ubuntu-autostart-manager"
 REMOTE_MODULE_BASE="https://raw.githubusercontent.com/Davegage-byte/uwuntu"
+REF_API_URL="https://api.github.com/repos/Davegage-byte/uwuntu/git/ref/heads/main"
+RAW_MANAGER_PATH="Ubuntu%20Autostart%20Manager.sh"
 RUNTIME_MODULES_READY=0
+APPLY_UPDATE_MODE=0
+RUNTIME_MODULE_TRANSACTION_DIR=""
 
 RUNTIME_MODULE_PATHS=(
     "apps/network-check.sh"
@@ -92,6 +96,139 @@ runtime_module_index() {
         fi
     done
     return 1
+}
+
+update_bootstrap_log() {
+    local message="$1"
+    printf '%s\n' "$message"
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" \
+        >> "$HOME/uwuntu_force_update.log" 2>/dev/null || true
+}
+
+resolve_apply_update_source_ref() {
+    local ref_tmp manager_tmp cache_bust latest_sha="" download_ref="main"
+
+    # Zukuenftige Updates erhalten den exakten Ref bereits vom neuen Helper.
+    # Nur der erste Wechsel von einem alten Helper benoetigt den Bootstrap.
+    if [ -n "${UWUNTU_SOURCE_REF:-}" ]; then
+        update_bootstrap_log "Uwuntu-Modulquelle vom Updater: $UWUNTU_SOURCE_REF"
+        return 0
+    fi
+
+    command -v curl >/dev/null 2>&1 || {
+        update_bootstrap_log "FEHLER: Erster modularer U-Update-Bootstrap benoetigt curl."
+        return 1
+    }
+
+    ref_tmp="$(mktemp /tmp/uwuntu-bootstrap-ref.XXXXXX.json)" || return 1
+    manager_tmp="$(mktemp /tmp/uwuntu-bootstrap-manager.XXXXXX.sh)" || {
+        rm -f -- "$ref_tmp"
+        return 1
+    }
+    cache_bust="$(date +%s%N)-$$"
+
+    if curl --fail --location --silent --show-error --retry 1 --retry-delay 1 \
+        --connect-timeout 6 --max-time 15 \
+        --header 'Accept: application/vnd.github+json' \
+        --header 'Cache-Control: no-cache, no-store, max-age=0' \
+        --output "$ref_tmp" "${REF_API_URL}?uwuntu_cache_bust=${cache_bust}"
+    then
+        latest_sha="$(python3 - "$ref_tmp" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    value = str(data.get("object", {}).get("sha", "")).strip()
+    if len(value) == 40 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+        print(value)
+except Exception:
+    pass
+PY
+        )"
+        if [ -z "$latest_sha" ]; then
+            update_bootstrap_log "GitHub-main-Ref nicht auswertbar - ausdruecklicher RAW-main-Fallback fuer Manager und Module."
+        else
+            download_ref="$latest_sha"
+            update_bootstrap_log "Erster modularer U-Update-Bootstrap: GitHub main Commit $latest_sha"
+        fi
+    else
+        update_bootstrap_log "GitHub-Ref-API nicht verfuegbar - ausdruecklicher RAW-main-Fallback fuer Manager und Module."
+    fi
+
+    if ! curl --fail --location --silent --show-error --retry 2 --retry-delay 1 \
+        --connect-timeout 8 --max-time 45 \
+        --header 'Cache-Control: no-cache, no-store, max-age=0' \
+        --output "$manager_tmp" \
+        "${REMOTE_MODULE_BASE}/${download_ref}/${RAW_MANAGER_PATH}?uwuntu_cache_bust=${cache_bust}"
+    then
+        rm -f -- "$ref_tmp" "$manager_tmp"
+        update_bootstrap_log "FEHLER: Manager-Abgleich fuer den modularen U-Update-Bootstrap fehlgeschlagen."
+        return 1
+    fi
+
+    if [ ! -s "$manager_tmp" ] || ! bash -n "$manager_tmp" >/dev/null 2>&1 \
+        || ! cmp -s -- "$MANAGER_SOURCE_PATH" "$manager_tmp"
+    then
+        rm -f -- "$ref_tmp" "$manager_tmp"
+        update_bootstrap_log "FEHLER: main zeigt bereits auf einen anderen Manager; Update wird ohne Modul-Mischung abgebrochen."
+        return 1
+    fi
+
+    rm -f -- "$ref_tmp" "$manager_tmp"
+    UWUNTU_SOURCE_REF="$download_ref"
+    export UWUNTU_SOURCE_REF
+    update_bootstrap_log "Commitgenaue Modulquelle bestaetigt: $UWUNTU_SOURCE_REF"
+    return 0
+}
+
+runtime_module_transaction_begin() {
+    local index target
+
+    [ -z "$RUNTIME_MODULE_TRANSACTION_DIR" ] || return 1
+    RUNTIME_MODULE_TRANSACTION_DIR="$(mktemp -d /tmp/uwuntu-runtime-transaction.XXXXXX)" \
+        || return 1
+
+    for index in "${!RUNTIME_MODULE_TARGETS[@]}"; do
+        target="${RUNTIME_MODULE_TARGETS[$index]}"
+        if [ -e "$target" ]; then
+            if ! cp -a -- "$target" "$RUNTIME_MODULE_TRANSACTION_DIR/$index.file"; then
+                rm -rf -- "$RUNTIME_MODULE_TRANSACTION_DIR"
+                RUNTIME_MODULE_TRANSACTION_DIR=""
+                return 1
+            fi
+            : > "$RUNTIME_MODULE_TRANSACTION_DIR/$index.existed"
+        fi
+    done
+}
+
+runtime_module_transaction_commit() {
+    [ -n "$RUNTIME_MODULE_TRANSACTION_DIR" ] || return 0
+    rm -rf -- "$RUNTIME_MODULE_TRANSACTION_DIR"
+    RUNTIME_MODULE_TRANSACTION_DIR=""
+}
+
+runtime_module_transaction_rollback() {
+    local index target restored
+
+    [ -n "$RUNTIME_MODULE_TRANSACTION_DIR" ] || return 0
+    for index in "${!RUNTIME_MODULE_TARGETS[@]}"; do
+        target="${RUNTIME_MODULE_TARGETS[$index]}"
+        rm -f -- "${target}.new.$$" "${target}.rollback.$$"
+        if [ -e "$RUNTIME_MODULE_TRANSACTION_DIR/$index.existed" ]; then
+            restored="${target}.rollback.$$"
+            if cp -a -- "$RUNTIME_MODULE_TRANSACTION_DIR/$index.file" "$restored"; then
+                mv -f -- "$restored" "$target"
+            else
+                rm -f -- "$restored"
+            fi
+        else
+            rm -f -- "$target"
+        fi
+    done
+    rm -rf -- "$RUNTIME_MODULE_TRANSACTION_DIR"
+    RUNTIME_MODULE_TRANSACTION_DIR=""
 }
 
 stage_runtime_module() {
@@ -1148,6 +1285,20 @@ install_kiosk() {
     echo "  unten rechts = Hardware Check"
     echo
 
+    if ! install_all_dependencies; then
+        echo "FEHLER: Uwuntu Basis-Abhängigkeiten konnten nicht vollständig installiert werden."
+        pause
+        return 1
+    fi
+
+    if [ "$APPLY_UPDATE_MODE" -eq 1 ]; then
+        if ! runtime_module_transaction_begin; then
+            echo "FEHLER: Runtime-Modultransaktion konnte nicht gestartet werden."
+            pause
+            return 1
+        fi
+    fi
+
     echo "--- Uwuntu-Laufzeitmodule vollstaendig bereitstellen ---"
     if ! install_runtime_modules; then
         echo "FEHLER: Kein Modul wurde ersetzt; die bisherige Installation bleibt erhalten."
@@ -1155,12 +1306,6 @@ install_kiosk() {
         return 1
     fi
     RUNTIME_MODULES_READY=1
-
-    if ! install_all_dependencies; then
-        echo "FEHLER: Uwuntu Basis-Abhängigkeiten konnten nicht vollständig installiert werden."
-        pause
-        return 1
-    fi
 
     # Menüpunkt 1 ist ab jetzt wirklich "ALLES": Network/Wipe wird zuerst
     # installiert/aktualisiert, danach Kamera, Touch, Display, Audio, Hardware
@@ -1658,10 +1803,25 @@ main_menu() {
 
 apply_update_noninteractive() {
     AUTO_MODE=1
+    APPLY_UPDATE_MODE=1
+
+    if ! resolve_apply_update_source_ref; then
+        return 1
+    fi
+
+    # Auch ein unerwartetes Prozessende darf keine nur halb abgeschlossene
+    # Runtime-Transaktion hinterlassen. Nach Commit ist der Handler ein No-op.
+    trap 'runtime_module_transaction_rollback' EXIT
 
     # install_kiosk ist jetzt der zentrale ALLES-Installer und installiert
     # Network/Wipe sowie sämtliche übrigen Module selbst.
-    install_kiosk || return 1
+    if ! install_kiosk; then
+        runtime_module_transaction_rollback
+        return 1
+    fi
+
+    runtime_module_transaction_commit
+    trap - EXIT
     return 0
 }
 
