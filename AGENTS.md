@@ -134,6 +134,13 @@ Wenn eine Modulversion erhöht werden muss und der Root-Manager sichtbare Versio
 - Beim Uwuntu Image Manager alle zusammengehörigen Versionsstellen konsistent halten.
 - Nach jeder Änderung klar ausgeben, welche Komponenten-Versionen sich tatsächlich geändert haben.
 
+### Runtime-Build
+
+- Jede produktive Änderung unter `modules/ubuntu-autostart-manager/apps/**` oder `modules/ubuntu-autostart-manager/helpers/**` muss im selben Commit `modules/ubuntu-autostart-manager/manifest.json` mit einer erhöhten `runtime_build` enthalten.
+- Reine Dokumentationsänderungen lösen keine Erhöhung der `runtime_build` aus.
+- Eine Komponenten-Version im Manifest wird nur geändert, wenn genau diese fachliche Komponente versioniert wird.
+- Eine reine Moduländerung erfordert grundsätzlich weder eine Änderung an `Ubuntu Autostart Manager.sh` noch eine Erhöhung von `MANAGER_BUILD`.
+
 ## Updatefunktion schützen
 
 - Die Updatefunktion per `U` muss funktionsfähig bleiben.
@@ -214,16 +221,27 @@ Beide Hauptmanager nicht in einem generischen Commit vermischen. Technisch untre
 
 Alle Commit-Texte und Pull-Request-Beschreibungen auf Deutsch verfassen.
 
-Kurze Commit-Texte für produktive Uwuntu-Änderungen enthalten weiterhin die vollständige kompakte Versionsübersicht aller Hauptkomponenten sowie einen sichtbaren Bereichsmarker:
+Kurze Commit-Texte nennen nur die tatsächlich geänderte Komponente beziehungsweise die tatsächlich geänderten Komponenten. Bei einem Versionswechsel wird die Änderung bevorzugt mit einem Pfeil dargestellt, zum Beispiel:
 
-- Ubuntu Autostart Manager und dessen Runtime-Module: `· AUTO ·`
-- Uwuntu Image Manager: `· IMAGE ·`
+- `NC2.28→NC2.29 · LAN-Erkennung verbessert`
+- `HC4.5.74→HC4.5.75 · Keyboard-Shortcuts abgesichert`
+- `AU1.21→AU1.22 · Waveform geglättet`
+- `CA1.20→CA1.21 · Webcam-Erkennung verbessert`
+- `WA3.32→WA3.33 · SSD-Erkennung verbessert`
 
-Beispiele:
+Sind mehrere Komponenten Teil derselben fachlich zusammengehörigen Änderung, werden nur deren Versionen genannt, zum Beispiel:
 
-`NC2.28-WA3.32-HC4.5.75-CA1.20-AU1.21 · IM1.11 · MB2026090911 · AUTO · Keyboard-Shortcuts abgesichert`
+`NC2.28→NC2.29 · WA3.32→WA3.33 · Gemeinsame Laufwerkserkennung angepasst`
 
-`NC2.28-WA3.32-HC4.5.75-CA1.20-AU1.21 · IM1.12 · MB2026090911 · IMAGE · Restore verbessert`
+Unveränderte NC-/WA-/HC-/CA-/AU-/IM-/MB-Werte gehören nicht in Modul-Kurzcommits.
+
+Für Helper- oder Kiosk-Änderungen ohne eigene Fachversion wird ein passender Bereich verwendet, zum Beispiel `KIOSK · Welcome-Sound entfernt` oder `UPDATE · Runtime-Prüfung korrigiert`. Dafür wird keine künstliche Komponenten-Version erhöht. Die notwendige Erhöhung der `runtime_build` wird im Extended Commit erwähnt, muss aber nicht im Kurztitel stehen.
+
+Wenn der Root-Manager selbst geändert wird, enthält der Kurztitel den Wechsel von `MANAGER_BUILD` und den Marker `· AUTO ·`, zum Beispiel `MB2026090910→MB2026090911 · AUTO · Runtime-Manifest für Modulupdates`. Der Extended Commit darf dafür zusätzlich eine kompakte Gesamtübersicht aller aktuellen Uwuntu-Versionen und des Runtime Builds enthalten.
+
+Der Extended Commit eines einzelnen Runtime-Moduls beginnt mit dessen neuer Version, zum Beispiel `Network Check v2.29`, und behandelt ausschließlich dieses Modul sowie die zwingend zugehörige Manifest-Metadatenänderung. Unveränderte Komponenten werden nicht aufgelistet.
+
+Ein reiner Image-Manager-Commit verwendet den Marker `· IMAGE ·`, zum Beispiel `IM1.11→IM1.12 · IMAGE · Restore verbessert`, und enthält keine vollständige NC-/WA-/HC-/CA-/AU-Kette.
 
 Wenn ausschließlich `AGENTS.md` oder andere Dokumentation geändert wird, ist keine Komponenten-Versionsübersicht erforderlich.
 
