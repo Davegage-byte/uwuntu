@@ -685,21 +685,5 @@ else
     echo "WARNUNG: LÖSCHEN konnte nicht sicher fokussiert werden."
 fi
 restore_accessibility
-# ------------------------------------------------------------
-# Begrüßungs-/Bereitschaftssound
-# ------------------------------------------------------------
-# Der Sound kommt ganz am Ende. Damit ist er gleichzeitig das Signal:
-# Wipe Auto ist bereit und LÖSCHEN sollte den Tastaturfokus haben.
-LOGIN_SOUND="/usr/share/sounds/Yaru/stereo/desktop-login.oga"
-if [ "$FOCUS_OK" -eq 1 ]; then
-    if command -v paplay >/dev/null 2>&1 && [ -f "$LOGIN_SOUND" ]; then
-        echo "Spiele Bereitschaftssound ..."
-        paplay "$LOGIN_SOUND" >/dev/null 2>&1 &
-    else
-        echo "Hinweis: Bereitschaftssound nicht verfügbar."
-    fi
-else
-    echo "Kein Bereitschaftssound: LÖSCHEN hat keinen bestätigten Fokus."
-fi
 
 echo "Kiosk fertig: $(date)"
