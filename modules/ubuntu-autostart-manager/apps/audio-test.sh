@@ -67,7 +67,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_22.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_23.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -148,7 +148,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Gio
 
 
-VERSION = "v1.22"
+VERSION = "v1.23"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
@@ -344,6 +344,32 @@ def resolve_pulse_source(source_name, devices):
     return partial[0] if len(partial) == 1 else None
 
 
+def sounddevice_default_input(devices):
+    """Den konfigurierten generischen PortAudio-Default-Input ermitteln."""
+    try:
+        default_index = int(sd.default.device[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+    device_names = dict(devices)
+    name = device_names.get(default_index)
+    if name is None:
+        return None
+
+    normalized = " ".join(name.strip().lower().split())
+    if any(marker in normalized for marker in INVALID_CAPTURE_MARKERS):
+        return None
+
+    generic_names = GENERIC_CAPTURE_NAMES | {
+        "alsa default",
+        "alsa-default",
+        "sysdefault",
+    }
+    if normalized in generic_names or normalized.startswith("default:"):
+        return default_index
+    return None
+
+
 def choose_sounddevice_fallback(devices):
     """Ohne pactl nur eindeutig als Capture erkennbaren Input verwenden."""
     capture_markers = (
@@ -372,13 +398,24 @@ def select_capture_device():
         devices = sounddevice_input_devices()
     except Exception as exc:
         reason = f"sounddevice-Geräteliste nicht verfügbar: {exc}"
-        return default_source, None, None, reason
+        return default_source, None, None, None, reason
 
     if default_source is not None or sources:
         source_name = choose_pulse_capture_source(default_source, sources)
         if source_name is None:
             reason = "keine gültige Capture-Source in pactl gefunden"
-            return default_source, None, None, reason
+            return default_source, None, None, None, reason
+
+        if source_name == default_source:
+            default_device = sounddevice_default_input(devices)
+            if default_device is not None:
+                return (
+                    default_source,
+                    source_name,
+                    default_device,
+                    "validated-default",
+                    None,
+                )
 
         device = resolve_pulse_source(source_name, devices)
         if device is None:
@@ -386,15 +423,15 @@ def select_capture_device():
                 f"Capture-Source {source_name!r} keinem sounddevice-Gerät "
                 "eindeutig zuordenbar"
             )
-            return default_source, source_name, None, reason
-        return default_source, source_name, device, None
+            return default_source, source_name, None, None, reason
+        return default_source, source_name, device, "explicit-fallback", None
 
     device, name = choose_sounddevice_fallback(devices)
     if device is not None:
-        return default_source, name, device, pulse_error
+        return default_source, name, device, "explicit-fallback", pulse_error
 
     reason = pulse_error or "keine eindeutig echte Aufnahmequelle gefunden"
-    return default_source, None, None, reason
+    return default_source, None, None, None, reason
 
 
 def calc_rms(samples):
@@ -521,7 +558,7 @@ class AudioAnalyzer:
                 pass
 
     def start(self):
-        default_source, capture_source, capture_device, reason = (
+        default_source, capture_source, capture_device, capture_path, reason = (
             select_capture_device()
         )
         default_label = default_source or "nicht ermittelt"
@@ -540,6 +577,7 @@ class AudioAnalyzer:
             "Audio-Eingang: "
             f"Default Source={default_label!r}; "
             f"Capture-Quelle={capture_source!r}; "
+            f"Pfad={capture_path}; "
             f"sounddevice={capture_device}",
             file=sys.stderr,
         )
