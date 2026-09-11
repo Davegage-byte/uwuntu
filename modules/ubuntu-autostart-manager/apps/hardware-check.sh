@@ -5978,6 +5978,12 @@ except Exception:
             except Exception:
                 self.super_restore_helper = None
 
+            # Die Seite kann während des gsettings-set verlassen worden sein.
+            # Erst nach Anlage des Crash-Wächters den normalen Restore-Pfad
+            # verwenden; der Wächter endet nur bei erfolgreichem Restore.
+            if self.stack.get_visible_child_name() != "keyboard":
+                self.restore_keyboard_shortcuts_with_retries()
+
             log("Tastatur-Test: einzelne SUPER-Taste für GNOME blockiert")
         except Exception as exc:
             log(f"SUPER-Blockierung Fehler: {exc}")
@@ -6459,10 +6465,23 @@ except Exception:
         )
         return False
 
-    def restore_keyboard_shortcuts_with_retries(self):
+    def restore_keyboard_shortcuts_with_retries(self, force=False):
         """Alle HC-Sperren mit kurzen Wiederholungsversuchen restaurieren."""
         pauses = (0.15, 0.30)
         for attempt in range(3):
+            # Ein alter asynchroner Restore darf einen sofort erneut
+            # geöffneten Keyboard-Test nicht entsperren. Die bestehenden
+            # Flags und Crash-Wächter bleiben für das spätere Verlassen aktiv.
+            if (
+                not force
+                and self.stack.get_visible_child_name() == "keyboard"
+            ):
+                log(
+                    "Keyboard-Test: Shortcut-Restore ausgesetzt, weil der "
+                    "Keyboard-Test wieder aktiv ist"
+                )
+                return False
+
             try:
                 self.restore_super_after_keyboard_test()
                 self.restore_desktop_shortcuts_after_keyboard_test()
@@ -6779,7 +6798,7 @@ except Exception:
 
     def do_shutdown(self):
         self.stop_power_dialog_helper()
-        self.restore_keyboard_shortcuts_with_retries()
+        self.restore_keyboard_shortcuts_with_retries(force=True)
         self.restore_alt_space_after_keyboard_test()
         self.restore_super_arrows_after_keyboard_test()
         if self.info_window is not None:
