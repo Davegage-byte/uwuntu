@@ -78,8 +78,10 @@ from pathlib import Path
 import ast
 import glob
 import json
+import math
 import os
 import fcntl
+import random
 import re
 import shutil
 import signal
@@ -2287,14 +2289,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.80")
+        self.window.set_title("Hardware Check v4.5.81")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.80")
+        title_label = Gtk.Label(label="Hardware Check v4.5.81")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5398,6 +5400,9 @@ except Exception:
         )
         self.ram_activity.set_visible(False)
         self.ram_visual_state = "idle"
+        self.ram_activity_values = [0.0] * (40 * 8)
+        self.ram_activity_targets = [0.0] * (40 * 8)
+        self.ram_activity_hotspots = []
         body.append(self.ram_activity)
         progress_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -5432,7 +5437,7 @@ except Exception:
             self.benchmark_result.add_css_class("status-" + color)
 
     def draw_ram_activity(self, area, cr, width, height):
-        """Zeichnet eine ruhige, rein optische Defrag-Kachelfläche."""
+        """Zeichnet eine organisch driftende, rein optische Kachelfläche."""
         columns = 40
         rows = 8
         gap = 3.0
@@ -5440,10 +5445,6 @@ except Exception:
         tile_width = max(2.0, (width - 2 * padding - gap * (columns - 1)) / columns)
         tile_height = max(2.0, (height - 2 * padding - gap * (rows - 1)) / rows)
         total = columns * rows
-        fraction = self.benchmark_progress.get_fraction()
-        completed = min(total, int(fraction * total))
-        scan = min(total - 1, completed + int(time.monotonic() * 5) % 4)
-
         cr.set_source_rgb(0.035, 0.055, 0.075)
         cr.rectangle(0, 0, width, height)
         cr.fill()
@@ -5453,22 +5454,96 @@ except Exception:
             x = padding + column * (tile_width + gap)
             y = padding + row * (tile_height + gap)
 
-            if self.ram_visual_state == "error" and index >= completed:
+            intensity = self.ram_activity_values[index]
+            if self.ram_visual_state == "error":
                 color = (0.68, 0.12, 0.16)
-            elif self.ram_visual_state == "cancelled" and index >= completed:
+            elif self.ram_visual_state == "cancelled":
                 color = (0.72, 0.34, 0.06)
-            elif index < completed:
+            elif self.ram_visual_state == "complete":
                 color = (0.12, 0.56, 0.30)
-                if completed - index <= 3:
-                    color = (0.91, 0.43, 0.08)
-            elif index == scan or index == scan + 1:
-                color = (0.05, 0.68, 0.88)
             else:
-                color = (0.08, 0.12, 0.16)
+                base = (0.065, 0.10, 0.135)
+                cool = (0.04, 0.48, 0.68)
+                warm = (0.88, 0.38, 0.07)
+                glow = min(1.0, intensity * 1.35)
+                accent = max(0.0, (intensity - 0.62) / 0.38)
+                color = tuple(
+                    base[channel] * (1.0 - glow)
+                    + cool[channel] * glow * (1.0 - accent)
+                    + warm[channel] * accent
+                    for channel in range(3)
+                )
 
             cr.set_source_rgb(*color)
             cr.rectangle(x, y, tile_width, tile_height)
             cr.fill()
+
+    def reset_ram_activity_field(self):
+        total = 40 * 8
+        self.ram_activity_values = [random.uniform(0.02, 0.16) for _ in range(total)]
+        self.ram_activity_targets = list(self.ram_activity_values)
+        self.ram_activity_hotspots = [
+            {
+                "x": random.uniform(0.0, 39.0),
+                "y": random.uniform(0.0, 7.0),
+                "vx": random.uniform(-0.38, 0.38),
+                "vy": random.uniform(-0.16, 0.16),
+                "strength": random.uniform(0.48, 0.95),
+            }
+            for _ in range(4)
+        ]
+
+    def step_ram_activity_field(self):
+        """Bewegt weiche Hotspots und lässt ihre Aktivität langsam nachglühen."""
+        columns = 40
+        rows = 8
+        if not self.ram_activity_hotspots:
+            self.reset_ram_activity_field()
+
+        for hotspot in self.ram_activity_hotspots:
+            hotspot["x"] = (hotspot["x"] + hotspot["vx"]) % columns
+            hotspot["y"] += hotspot["vy"]
+            if hotspot["y"] < 0.0 or hotspot["y"] > rows - 1:
+                hotspot["vy"] *= -1.0
+                hotspot["y"] = min(rows - 1.0, max(0.0, hotspot["y"]))
+            hotspot["vx"] = min(
+                0.48, max(-0.48, hotspot["vx"] + random.uniform(-0.045, 0.045))
+            )
+            hotspot["vy"] = min(
+                0.22, max(-0.22, hotspot["vy"] + random.uniform(-0.025, 0.025))
+            )
+            hotspot["strength"] = min(
+                1.0, max(0.4, hotspot["strength"] + random.uniform(-0.06, 0.06))
+            )
+
+        raw_targets = []
+        for row in range(rows):
+            for column in range(columns):
+                activity = random.uniform(0.015, 0.12)
+                for hotspot in self.ram_activity_hotspots:
+                    dx = abs(column - hotspot["x"])
+                    dx = min(dx, columns - dx)
+                    dy = row - hotspot["y"]
+                    activity += hotspot["strength"] * math.exp(
+                        -(dx * dx / 20.0 + dy * dy / 3.2)
+                    )
+                if random.random() < 0.025:
+                    activity += random.uniform(0.18, 0.42)
+                raw_targets.append(min(1.0, activity))
+
+        for index, target in enumerate(raw_targets):
+            row, column = divmod(index, columns)
+            neighbours = []
+            for d_row, d_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                near_row = row + d_row
+                near_column = (column + d_column) % columns
+                if 0 <= near_row < rows:
+                    neighbours.append(raw_targets[near_row * columns + near_column])
+            smoothed = target * 0.72 + sum(neighbours) / len(neighbours) * 0.28
+            self.ram_activity_targets[index] = smoothed
+            current = self.ram_activity_values[index]
+            blend = 0.24 if smoothed > current else 0.10
+            self.ram_activity_values[index] += (smoothed - current) * blend
 
     def update_ram_activity(self, state=None):
         if not hasattr(self, "ram_activity"):
@@ -5477,6 +5552,10 @@ except Exception:
         self.ram_activity.set_visible(is_ram)
         if state is not None:
             self.ram_visual_state = state
+            if is_ram and state == "running":
+                self.reset_ram_activity_field()
+        if is_ram and self.ram_visual_state == "running":
+            self.step_ram_activity_field()
         if is_ram:
             self.ram_activity.queue_draw()
 
