@@ -92,8 +92,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.32"
-DISK = "/dev/nvme0n1"
+VERSION = "3.33"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -127,6 +126,166 @@ def run_text(args, timeout=8):
 
 def sudo_cmd(args, timeout=30):
     return run_text(["sudo", "-n"] + args, timeout=timeout)
+
+
+def _lsblk_snapshot():
+    """Liest die Blockgeräte nur ein; diese Funktion verändert nichts."""
+    columns = (
+        "PATH,NAME,KNAME,PKNAME,TYPE,ROTA,RM,TRAN,MODEL,SIZE,"
+        "MOUNTPOINTS,MAJ:MIN,SERIAL,WWN"
+    )
+    rc, out, err = run_text(["lsblk", "-Jb", "-o", columns])
+    if rc != 0:
+        log(f"Zielerkennung: lsblk fehlgeschlagen: {err or rc}")
+        return []
+    try:
+        import json
+        return json.loads(out).get("blockdevices", [])
+    except Exception as exc:
+        log(f"Zielerkennung: ungültige lsblk-Ausgabe: {exc}")
+        return []
+
+
+def _flatten_devices(devices, parent=None):
+    flat = []
+    for raw in devices:
+        item = dict(raw)
+        item["_parent"] = parent
+        children = item.pop("children", []) or []
+        flat.append(item)
+        flat.extend(_flatten_devices(children, item))
+    return flat
+
+
+def _mounted_sources():
+    sources = set()
+    rc, out, _ = run_text(["findmnt", "-rn", "-o", "SOURCE,TARGET"])
+    if rc == 0:
+        for line in out.splitlines():
+            parts = line.split(None, 1)
+            if parts and parts[0].startswith("/dev/"):
+                sources.add(os.path.realpath(parts[0]))
+
+    # Live-Systeme haben oft overlay als /; /cdrom bzw. Persistence tauchen
+    # jedoch als Blockquelle in mountinfo oder /proc/mounts auf.
+    for filename in ("/proc/self/mountinfo", "/proc/mounts"):
+        try:
+            text = Path(filename).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for source in re.findall(r"(?:^|\s)(/dev/[^\s]+)", text):
+            sources.add(os.path.realpath(source.replace("\\040", " ")))
+    return sources
+
+
+def _udev_properties(path):
+    rc, out, _ = run_text(
+        ["udevadm", "info", "--query=property", f"--name={path}"]
+    )
+    if rc != 0:
+        return {}
+    return dict(
+        line.split("=", 1) for line in out.splitlines() if "=" in line
+    )
+
+
+def _device_identity(device):
+    return (
+        str(device.get("maj:min") or ""),
+        str(device.get("serial") or ""),
+        str(device.get("wwn") or ""),
+        os.path.realpath(str(device.get("path") or "")),
+    )
+
+
+def _is_certainly_internal_ssd(device):
+    path = str(device.get("path") or "")
+    name = str(device.get("name") or "")
+    dtype = str(device.get("type") or "")
+    tran = str(device.get("tran") or "").strip().lower()
+    if dtype != "disk" or not path.startswith("/dev/"):
+        return False
+    if device.get("rm") not in (False, 0, "0"):
+        return False
+    if device.get("rota") not in (False, 0, "0"):
+        return False
+    if tran == "usb" or tran not in ("", "nvme", "sata", "ata"):
+        return False
+    if re.match(r"^(loop|zram|dm-|md|sr|ram|fd|nbd|rbd)", name):
+        return False
+
+    if tran in ("nvme", "sata", "ata"):
+        return True
+
+    # Ein leeres TRAN ist nur mit einem zweiten, eindeutig internen Signal
+    # zulässig. RM=0 allein ist ausdrücklich kein solches Signal.
+    sys_path = os.path.realpath(f"/sys/class/block/{name}")
+    if "/virtual/" in sys_path or "/usb" in sys_path.lower():
+        return False
+    props = _udev_properties(path)
+    bus = props.get("ID_BUS", "").lower()
+    id_path = props.get("ID_PATH", "").lower()
+    if bus in ("ata", "nvme"):
+        return True
+    return "/nvme/" in sys_path.lower() and "pci" in id_path
+
+
+def detect_wipe_candidates():
+    """Gibt sichere Kandidaten zurück und führt nie Destruktivbefehle aus."""
+    flat = _flatten_devices(_lsblk_snapshot())
+    by_path = {
+        os.path.realpath(str(item.get("path") or "")): item
+        for item in flat if item.get("path")
+    }
+    system_disks = set()
+    mounted = _mounted_sources()
+
+    for item in flat:
+        mountpoints = item.get("mountpoints") or []
+        if isinstance(mountpoints, str):
+            mountpoints = [mountpoints]
+        item_path = os.path.realpath(str(item.get("path") or ""))
+        if not any(mountpoints) and item_path not in mounted:
+            continue
+        current = item
+        while current is not None:
+            if current.get("type") == "disk":
+                system_disks.add(os.path.realpath(str(current.get("path"))))
+                break
+            current = current.get("_parent")
+
+    # findmnt kann Alias-Pfade liefern; deren lsblk-Knoten ebenfalls bis zum
+    # gesamten Parent-Datenträger hochlaufen.
+    for source in mounted:
+        current = by_path.get(source)
+        while current is not None:
+            if current.get("type") == "disk":
+                system_disks.add(os.path.realpath(str(current.get("path"))))
+                break
+            current = current.get("_parent")
+
+    candidates = []
+    for item in flat:
+        path = os.path.realpath(str(item.get("path") or ""))
+        if path in system_disks or not _is_certainly_internal_ssd(item):
+            continue
+        candidates.append(item)
+    return candidates
+
+
+def detect_wipe_target():
+    candidates = detect_wipe_candidates()
+    return candidates[0] if len(candidates) == 1 else None, len(candidates)
+
+
+def validate_wipe_target(path, identity):
+    """Validiert genau das bestätigte Gerät; wählt nie Ersatz."""
+    if not path or not Path(path).exists():
+        return False
+    for candidate in detect_wipe_candidates():
+        if candidate.get("path") == path:
+            return _device_identity(candidate) == identity
+    return False
 
 def compact_battery_time(seconds):
     if seconds is None:
@@ -306,12 +465,12 @@ def battery_info():
         power_w,
     )
 
-def disk_details():
-    if not Path(DISK).exists():
+def disk_details(disk):
+    if not disk or not Path(disk).exists():
         return None
 
     rc, out, _ = run_text(
-        ["lsblk", "-dn", "-o", "SIZE,MODEL", DISK]
+        ["lsblk", "-dn", "-o", "SIZE,MODEL", disk]
     )
     if rc != 0:
         return {"size": "--", "model": "--"}
@@ -321,19 +480,19 @@ def disk_details():
     model = parts[1].strip() if len(parts) > 1 else "--"
     return {"size": size, "model": model}
 
-def disk_is_clean():
+def disk_is_clean(disk):
     # 1) Keine bekannten Signaturen mehr auf dem Hauptgerät.
     # Das Lesen der Signaturen auf einem Blockgerät benötigt ebenfalls
     # Root-Rechte. Im persistenten Live-System funktioniert sudo -n
     # passwortlos.
-    rc, signatures, err = sudo_cmd(["wipefs", "-n", DISK], timeout=10)
+    rc, signatures, err = sudo_cmd(["wipefs", "-n", disk], timeout=10)
     if rc != 0:
         return False, f"Prüfung fehlgeschlagen: {err or 'sudo wipefs -n'}"
 
     if signatures.strip():
         return False, "Es sind noch Datenträger-Signaturen vorhanden."
     # 2) Keine Partitionen mehr unterhalb des NVMe-Geräts.
-    rc, out, err = run_text(["lsblk", "-nr", "-o", "NAME,TYPE", DISK])
+    rc, out, err = run_text(["lsblk", "-nr", "-o", "NAME,TYPE", disk])
     if rc != 0:
         return False, f"Prüfung fehlgeschlagen: {err or 'lsblk'}"
 
@@ -355,6 +514,10 @@ class WipeAutoApp(Gtk.Application):
         self.wiping = False
         self.soh_alert_active = False
         self.soh_blink_on = False
+        self.disk = None
+        self.disk_info = None
+        self.confirmed_disk = None
+        self.confirmed_identity = None
 
         # Letzte erkannte Größe + Modellbezeichnung der SSD.
         # Diese Information bleibt nach dem Wipe sichtbar.
@@ -496,7 +659,7 @@ class WipeAutoApp(Gtk.Application):
         dhead.append(dtitle)
         dhead.append(self.disk_badge)
         self.disk_card.append(dhead)
-        self.disk_device = Gtk.Label(label=DISK)
+        self.disk_device = Gtk.Label(label="--")
         self.disk_device.set_xalign(0)
         self.disk_device.add_css_class("interface")
         self.disk_card.append(self.disk_device)
@@ -896,14 +1059,27 @@ class WipeAutoApp(Gtk.Application):
     def refresh_all(self):
         self.refresh_battery()
         # Datenträger
-        details = disk_details()
-        if details is None:
+        target, candidate_count = detect_wipe_target()
+        self.disk_info = target
+        self.disk = target.get("path") if target else None
+        self.disk_device.set_text(self.disk or "--")
+        details = disk_details(self.disk)
+        if candidate_count > 1:
+            self.disk_badge.set_text("AMBIGUOUS")
+            self.set_class(self.disk_badge, "warn")
+            self.disk_value.set_text("MEHRERE DATENTRÄGER GEFUNDEN")
+            self.set_class(self.disk_value, "warn")
+            self.disk_note.set_text(
+                "Mehrere interne SSDs erkannt – automatische Auswahl gesperrt."
+            )
+            self.wipe_button.set_sensitive(False)
+        elif details is None:
             self.disk_badge.set_text("NOT FOUND")
             self.set_class(self.disk_badge, "warn")
             self.disk_value.set_text("SSD NICHT GEFUNDEN")
             self.set_class(self.disk_value, "warn")
             self.disk_note.set_text(
-                f"{DISK} ist nicht vorhanden – Hardware prüfen."
+                "Kein sicherer interner Datenträger erkannt."
             )
             self.wipe_button.set_sensitive(False)
         else:
@@ -932,7 +1108,7 @@ class WipeAutoApp(Gtk.Application):
         self.window.set_default_widget(self.wipe_button)
 
     def on_wipe_clicked(self, button):
-        if self.wiping:
+        if self.wiping or not self.disk or not self.disk_info:
             return
 
         self.clear_action_area()
@@ -966,7 +1142,7 @@ class WipeAutoApp(Gtk.Application):
         self.disk_badge.set_text("CONFIRM")
         self.set_class(self.disk_badge, "warn")
         self.disk_note.set_text(
-            f"Alle Partitions-/Dateisystem-Signaturen auf {DISK} werden entfernt."
+            f"Alle Partitions-/Dateisystem-Signaturen auf {self.disk} werden entfernt."
         )
 
     def on_cancel_wipe(self, button):
@@ -977,9 +1153,13 @@ class WipeAutoApp(Gtk.Application):
         GLib.idle_add(self.focus_wipe_button)
 
     def on_confirm_wipe(self, button):
-        if self.wiping:
+        if self.wiping or not self.disk or not self.disk_info:
             return
 
+        # Pfad und Kernel-/Hardwareidentität exakt festhalten. Der Worker
+        # darf unter keinen Umständen auf einen neu erkannten Ersatz wechseln.
+        self.confirmed_disk = self.disk
+        self.confirmed_identity = _device_identity(self.disk_info)
         self.wiping = True
         self.refresh_button.set_sensitive(False)
 
@@ -997,21 +1177,29 @@ class WipeAutoApp(Gtk.Application):
         self.set_class(self.disk_value, "live")
         self.disk_note.set_text("Bitte warten.")
 
-        thread = threading.Thread(target=self.wipe_worker, daemon=True)
+        thread = threading.Thread(
+            target=self.wipe_worker,
+            args=(self.confirmed_disk, self.confirmed_identity),
+            daemon=True,
+        )
         thread.start()
 
-    def wipe_worker(self):
-        log(f"Wipe gestartet: {DISK}")
-        # Sicherheitscheck: Zielgerät muss existieren und ein block device sein.
-        if not Path(DISK).exists():
+    def wipe_worker(self, disk, identity):
+        log(f"Wipe angefordert: {disk}")
+        # Unmittelbar vor dem ersten Unmount/destruktiven Befehl erneut exakt
+        # das bestätigte Ziel prüfen. Keine automatische Ersatzauswahl.
+        if not validate_wipe_target(disk, identity):
+            log(f"Wipe abgebrochen: Ziel nicht mehr sicher: {disk}")
             GLib.idle_add(
                 self.finish_wipe_error,
-                f"{DISK} wurde nicht gefunden."
+                f"{disk or 'Ziel'} ist nicht mehr sicher – Wipe abgebrochen."
             )
             return
 
+        log(f"Wipe gestartet: {disk}")
+
         # Alle Child-Partitionen zuerst aushängen.
-        rc, out, _ = run_text(["lsblk", "-nrpo", "NAME,TYPE", DISK])
+        rc, out, _ = run_text(["lsblk", "-nrpo", "NAME,TYPE", disk])
         if rc == 0:
             children = []
             for line in out.splitlines()[1:]:
@@ -1023,11 +1211,11 @@ class WipeAutoApp(Gtk.Application):
                 sudo_cmd(["umount", part], timeout=10)
                 sudo_cmd(["fuser", "-k", part], timeout=10)
         # Hauptgerät vorsichtshalber ebenfalls unmount/fuser.
-        sudo_cmd(["umount", DISK], timeout=10)
-        sudo_cmd(["fuser", "-k", DISK], timeout=10)
+        sudo_cmd(["umount", disk], timeout=10)
+        sudo_cmd(["fuser", "-k", disk], timeout=10)
 
         # Eigentliche destruktive Aktion.
-        rc, out, err = sudo_cmd(["wipefs", "-a", DISK], timeout=30)
+        rc, out, err = sudo_cmd(["wipefs", "-a", disk], timeout=30)
         if rc != 0:
             log(f"wipefs FEHLER rc={rc}: {err}")
             GLib.idle_add(
@@ -1037,9 +1225,9 @@ class WipeAutoApp(Gtk.Application):
             return
 
         # Kernel-Partitionstabelle neu einlesen.
-        sudo_cmd(["partprobe", DISK], timeout=15)
+        sudo_cmd(["partprobe", disk], timeout=15)
 
-        clean, reason = disk_is_clean()
+        clean, reason = disk_is_clean(disk)
         if not clean:
             log(f"Verifikation FEHLER: {reason}")
             GLib.idle_add(
@@ -1048,10 +1236,10 @@ class WipeAutoApp(Gtk.Application):
             )
             return
 
-        log(f"Wipe erfolgreich verifiziert: {DISK}")
-        GLib.idle_add(self.finish_wipe_success)
+        log(f"Wipe erfolgreich verifiziert: {disk}")
+        GLib.idle_add(self.finish_wipe_success, disk)
 
-    def finish_wipe_success(self):
+    def finish_wipe_success(self, disk):
         self.wiping = False
         self.refresh_button.set_sensitive(True)
 
@@ -1067,7 +1255,7 @@ class WipeAutoApp(Gtk.Application):
         self.set_class(self.disk_value, "good")
 
         self.disk_note.set_text(
-            f"{DISK}: keine Signaturen und keine Partitionen mehr erkannt."
+            f"{disk}: keine Signaturen und keine Partitionen mehr erkannt."
         )
 
         self.clear_action_area()
@@ -1093,6 +1281,7 @@ class WipeAutoApp(Gtk.Application):
         self.disk_note.set_text(message)
 
         self.restore_wipe_button()
+        self.wipe_button.set_sensitive(False)
         return False
 
     def on_key_pressed(self, controller, keyval, keycode, state):
