@@ -2287,14 +2287,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.77")
+        self.window.set_title("Hardware Check v4.5.78")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.77")
+        title_label = Gtk.Label(label="Hardware Check v4.5.78")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4873,6 +4873,10 @@ except Exception:
         self.last_global_hotkey_at[action] = now
 
         if action.startswith("audio-"):
+            if visible == "keyboard":
+                log("Audio-Hotkey blockiert: Keyboard-Test aktiv")
+                return False
+
             # Solange der GNOME-Power-/Ausschalt-Dialog offen ist, gehören die
             # Pfeiltasten ausschließlich diesem Systemdialog. Die Erkennung
             # stammt aus einem asynchron gepflegten Cache und verzögert den
