@@ -67,7 +67,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_21.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_22.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -148,7 +148,7 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Gio
 
 
-VERSION = "v1.21"
+VERSION = "v1.22"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
@@ -209,6 +209,192 @@ COL_RED = (255, 76, 76, 255)
 COL_ORANGE = (245, 166, 35, 255)
 COL_BLUE = (90, 162, 255, 255)
 COL_GREEN = (97, 211, 107, 255)
+
+
+INVALID_CAPTURE_MARKERS = (
+    ".monitor",
+    "monitor",
+    "loopback",
+    "stereo mix",
+    "stereo-mix",
+    "stereomix",
+    "auto_null",
+    "auto-null",
+    "alsa_output",
+    "dummy",
+    "null",
+    "null sink",
+    "null-sink",
+    "schein-ausgabe",
+    "scheinausgabe",
+)
+
+GENERIC_CAPTURE_NAMES = {
+    "default",
+    "default source",
+    "pipewire",
+    "pulse",
+    "pulseaudio",
+}
+
+
+def is_valid_capture_name(name):
+    """Nur Namen akzeptieren, die nicht auf Output/Loopback hindeuten."""
+    normalized = " ".join(str(name or "").strip().lower().split())
+    if not normalized or normalized in GENERIC_CAPTURE_NAMES:
+        return False
+    return not any(marker in normalized for marker in INVALID_CAPTURE_MARKERS)
+
+
+def choose_pulse_capture_source(default_source, source_names):
+    """Echten Pulse-/PipeWire-Eingang wählen; gültigen Default bevorzugen."""
+    sources = []
+    for name in source_names:
+        name = str(name or "").strip()
+        if name and name not in sources:
+            sources.append(name)
+
+    default_source = str(default_source or "").strip()
+    if (
+        is_valid_capture_name(default_source)
+        and default_source in sources
+    ):
+        return default_source
+
+    candidates = [name for name in sources if is_valid_capture_name(name)]
+    if not candidates:
+        return None
+
+    def capture_rank(name):
+        lowered = name.lower()
+        markers = (
+            "alsa_input",
+            "mic__source",
+            "microphone",
+            "capture",
+            "headset",
+            "usb",
+            "mic",
+        )
+        return next(
+            (index for index, marker in enumerate(markers) if marker in lowered),
+            len(markers),
+        )
+
+    return min(candidates, key=capture_rank)
+
+
+def query_pulse_sources():
+    """Default und Sources einmalig per pactl abfragen."""
+    try:
+        default_result = subprocess.run(
+            ["pactl", "get-default-source"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        sources_result = subprocess.run(
+            ["pactl", "list", "short", "sources"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        return None, [], f"pactl nicht verfügbar: {exc}"
+
+    default_source = (
+        default_result.stdout.strip() if default_result.returncode == 0 else ""
+    )
+    sources = []
+    if sources_result.returncode == 0:
+        for line in sources_result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) < 2:
+                fields = line.split()
+            if len(fields) >= 2:
+                sources.append(fields[1].strip())
+
+    if not default_source and not sources:
+        return None, [], "pactl lieferte keine verwertbaren Sources"
+    return default_source or None, sources, None
+
+
+def sounddevice_input_devices():
+    devices = []
+    for index, device in enumerate(sd.query_devices()):
+        if int(device.get("max_input_channels", 0)) > 0:
+            devices.append((index, str(device.get("name", ""))))
+    return devices
+
+
+def resolve_pulse_source(source_name, devices):
+    """Eine validierte Pulse-Source einem expliziten PortAudio-Gerät zuordnen."""
+    wanted = source_name.casefold()
+    exact = [index for index, name in devices if name.casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+
+    partial = [
+        index
+        for index, name in devices
+        if wanted in name.casefold() or name.casefold() in wanted
+    ]
+    return partial[0] if len(partial) == 1 else None
+
+
+def choose_sounddevice_fallback(devices):
+    """Ohne pactl nur eindeutig als Capture erkennbaren Input verwenden."""
+    capture_markers = (
+        "alsa_input",
+        "mic__source",
+        "microphone",
+        "capture",
+        "headset",
+        "usb",
+        " mic",
+        "mic ",
+    )
+    for index, name in devices:
+        lowered = name.lower()
+        if (
+            is_valid_capture_name(name)
+            and any(marker in lowered for marker in capture_markers)
+        ):
+            return index, name
+    return None, None
+
+
+def select_capture_device():
+    default_source, sources, pulse_error = query_pulse_sources()
+    try:
+        devices = sounddevice_input_devices()
+    except Exception as exc:
+        reason = f"sounddevice-Geräteliste nicht verfügbar: {exc}"
+        return default_source, None, None, reason
+
+    if default_source is not None or sources:
+        source_name = choose_pulse_capture_source(default_source, sources)
+        if source_name is None:
+            reason = "keine gültige Capture-Source in pactl gefunden"
+            return default_source, None, None, reason
+
+        device = resolve_pulse_source(source_name, devices)
+        if device is None:
+            reason = (
+                f"Capture-Source {source_name!r} keinem sounddevice-Gerät "
+                "eindeutig zuordenbar"
+            )
+            return default_source, source_name, None, reason
+        return default_source, source_name, device, None
+
+    device, name = choose_sounddevice_fallback(devices)
+    if device is not None:
+        return default_source, name, device, pulse_error
+
+    reason = pulse_error or "keine eindeutig echte Aufnahmequelle gefunden"
+    return default_source, None, None, reason
 
 
 def calc_rms(samples):
@@ -335,8 +521,32 @@ class AudioAnalyzer:
                 pass
 
     def start(self):
+        default_source, capture_source, capture_device, reason = (
+            select_capture_device()
+        )
+        default_label = default_source or "nicht ermittelt"
+
+        if capture_device is None:
+            self.error = reason or "keine gültige Capture-Quelle gefunden"
+            print(
+                "Audio-Eingang: "
+                f"Default Source={default_label!r}; {self.error}",
+                file=sys.stderr,
+            )
+            self.running = False
+            return False
+
+        print(
+            "Audio-Eingang: "
+            f"Default Source={default_label!r}; "
+            f"Capture-Quelle={capture_source!r}; "
+            f"sounddevice={capture_device}",
+            file=sys.stderr,
+        )
+
         try:
             self.stream = sd.InputStream(
+                device=capture_device,
                 samplerate=SAMPLE_RATE,
                 blocksize=INPUT_BLOCK,
                 channels=1,
@@ -350,6 +560,12 @@ class AudioAnalyzer:
         except Exception as exc:
             self.error = str(exc)
             self.running = False
+            if self.stream is not None:
+                try:
+                    self.stream.close()
+                except Exception:
+                    pass
+                self.stream = None
             return False
 
     def stop(self):
