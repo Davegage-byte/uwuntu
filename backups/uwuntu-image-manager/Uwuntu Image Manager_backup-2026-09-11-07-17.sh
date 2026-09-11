@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.12"
+APP_VERSION="1.11"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.12"
+APP_VERSION = "1.11"
 FORMAT_VERSION = "uwuntu-image-v1"
 
 UPDATE_API_URL = (
@@ -2082,7 +2082,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.12"
+VERSION = "1.11"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -3022,33 +3022,30 @@ class MainWindow(Gtk.ApplicationWindow):
             )
         )
 
-        bottom = Gtk.Grid(column_spacing=8, row_spacing=8)
+        bottom = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
 
         root.append(bottom)
 
-        show_images = Gtk.Button(label="IMAGES ANZEIGEN")
-        show_images.add_css_class("secondary")
-        show_images.set_hexpand(True)
-        show_images.connect("clicked", self.open_images)
-        bottom.attach(show_images, 0, 0, 1, 1)
-
-        open_image_folder = Gtk.Button(label="IMAGE-ORDNER ÖFFNEN")
-        open_image_folder.add_css_class("secondary")
-        open_image_folder.set_hexpand(True)
-        open_image_folder.connect("clicked", self.open_image_folder)
-        bottom.attach(open_image_folder, 1, 0, 1, 1)
+        open_images = Gtk.Button(label="IMAGE-ORDNER ÖFFNEN")
+        open_images.add_css_class("secondary")
+        open_images.set_hexpand(True)
+        open_images.connect("clicked", self.open_image_folder)
+        bottom.append(open_images)
 
         self.update_button = Gtk.Button(label="UPDATE PRÜFEN")
         self.update_button.add_css_class("secondary")
         self.update_button.set_hexpand(True)
         self.update_button.connect("clicked", self.check_for_update)
-        bottom.attach(self.update_button, 0, 1, 1, 1)
+        bottom.append(self.update_button)
 
         open_log = Gtk.Button(label="LOG ÖFFNEN")
         open_log.add_css_class("secondary")
         open_log.set_hexpand(True)
         open_log.connect("clicked", self.open_log)
-        bottom.attach(open_log, 1, 1, 1, 1)
+        bottom.append(open_log)
 
     def action_card(self, title, text, callback):
         frame = Gtk.Box(
@@ -3108,62 +3105,6 @@ class MainWindow(Gtk.ApplicationWindow):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-
-    def open_images(self, *_):
-        images = image_items()
-
-        if not images:
-            self.error(
-                "Im Uwuntu-Image-Ordner wurde noch kein gültiges "
-                ".uwuntu-Image gefunden."
-            )
-            return
-
-        win = ActionWindow(self, "Gespeicherte Images")
-        win.root.append(make_label("GESPEICHERTE IMAGES", "card-title"))
-        win.root.append(
-            make_label(
-                "Wähle ein Image aus, um die gespeicherten Details "
-                "anzuzeigen.",
-                "card-text",
-            )
-        )
-
-        image_dd = dropdown_from_strings(
-            [image_display(item) for item in images]
-        )
-        win.root.append(image_dd)
-
-        details = make_label(image_details(images[0]), "details")
-        win.root.append(details)
-
-        def image_changed(dd, _pspec):
-            idx = dd.get_selected()
-
-            if idx < len(images):
-                details.set_text(image_details(images[idx]))
-
-        image_dd.connect("notify::selected", image_changed)
-
-        buttons = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=8,
-        )
-        win.root.append(buttons)
-
-        close = Gtk.Button(label="SCHLIESSEN")
-        close.add_css_class("secondary")
-        close.set_hexpand(True)
-        close.connect("clicked", lambda *_: win.close())
-        buttons.append(close)
-
-        open_folder = Gtk.Button(label="IMAGE-ORDNER ÖFFNEN")
-        open_folder.add_css_class("secondary")
-        open_folder.set_hexpand(True)
-        open_folder.connect("clicked", self.open_image_folder)
-        buttons.append(open_folder)
-
-        win.present()
 
     def open_log(self, *_):
         LOG_FILE.touch(exist_ok=True)
@@ -3731,7 +3672,7 @@ SVG
     # --------------------------------------------------------
     # Desktop-Datei
     # --------------------------------------------------------
-    cat > "$USER_APPLICATIONS/com.uwuntu.ImageManager.desktop" <<EOF
+    cat > "$USER_APPLICATIONS/uwuntu-image-manager.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Uwuntu Image Manager
@@ -3740,11 +3681,10 @@ Exec=$USER_BIN_DIR/uwuntu-image-manager
 Icon=uwuntu-image-manager
 Terminal=false
 StartupNotify=true
-StartupWMClass=com.uwuntu.ImageManager
 Categories=Utility;System;
 EOF
 
-    chmod 0755 "$USER_APPLICATIONS/com.uwuntu.ImageManager.desktop"
+    chmod 0755 "$USER_APPLICATIONS/uwuntu-image-manager.desktop"
 
     # Desktop-Verzeichnis ermitteln
     DESKTOP_DIR="$(
@@ -3764,18 +3704,15 @@ EOF
     mkdir -p "$DESKTOP_DIR"
 
     cp \
-        "$USER_APPLICATIONS/com.uwuntu.ImageManager.desktop" \
+        "$USER_APPLICATIONS/uwuntu-image-manager.desktop" \
         "$DESKTOP_DIR/Uwuntu Image Manager.desktop"
 
     chmod 0755 "$DESKTOP_DIR/Uwuntu Image Manager.desktop"
 
-    # Den früheren, nicht zur Gtk.Application-ID passenden Launcher entfernen.
-    rm -f "$USER_APPLICATIONS/uwuntu-image-manager.desktop"
-
     chown -R "$REAL_USER":"$(id -gn "$REAL_USER")" \
         "$USER_APP_DIR" \
         "$USER_BIN_DIR/uwuntu-image-manager" \
-        "$USER_APPLICATIONS/com.uwuntu.ImageManager.desktop" \
+        "$USER_APPLICATIONS/uwuntu-image-manager.desktop" \
         "$REAL_HOME/.local/share/icons" \
         "$USER_STATE_DIR" \
         "$USER_IMAGE_DIR" \
@@ -3790,10 +3727,6 @@ EOF
             >/dev/null 2>&1 || true
 
     update-desktop-database "$USER_APPLICATIONS" >/dev/null 2>&1 || true
-    sudo -u "$REAL_USER" \
-        HOME="$REAL_HOME" \
-        gtk-update-icon-cache "$REAL_HOME/.local/share/icons/hicolor" \
-        >/dev/null 2>&1 || true
 
     echo
     echo "============================================================"
