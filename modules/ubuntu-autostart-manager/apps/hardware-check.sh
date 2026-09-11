@@ -2289,14 +2289,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.82")
+        self.window.set_title("Hardware Check v4.5.83")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.82")
+        title_label = Gtk.Label(label="Hardware Check v4.5.83")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5391,9 +5391,6 @@ except Exception:
         self.ram_activity.set_content_height(112)
         self.ram_activity.set_hexpand(True)
         self.ram_activity.set_draw_func(self.draw_ram_activity)
-        self.ram_activity.set_tooltip_text(
-            "Optische Aktivitätsanzeige – keine Darstellung der Speicherbelegung"
-        )
         self.ram_activity.update_property(
             [Gtk.AccessibleProperty.LABEL],
             ["Visuelle Aktivitätsanzeige des RAM-Tests"],
