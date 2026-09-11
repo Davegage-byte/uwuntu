@@ -2287,14 +2287,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.79")
+        self.window.set_title("Hardware Check v4.5.80")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.79")
+        title_label = Gtk.Label(label="Hardware Check v4.5.80")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5384,6 +5384,21 @@ except Exception:
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_progress.set_show_text(False)
         body.append(self.benchmark_progress)
+
+        self.ram_activity = Gtk.DrawingArea()
+        self.ram_activity.set_content_height(112)
+        self.ram_activity.set_hexpand(True)
+        self.ram_activity.set_draw_func(self.draw_ram_activity)
+        self.ram_activity.set_tooltip_text(
+            "Optische Aktivitätsanzeige – keine Darstellung der Speicherbelegung"
+        )
+        self.ram_activity.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Visuelle Aktivitätsanzeige des RAM-Tests"],
+        )
+        self.ram_activity.set_visible(False)
+        self.ram_visual_state = "idle"
+        body.append(self.ram_activity)
         progress_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=8
@@ -5416,6 +5431,55 @@ except Exception:
         if color:
             self.benchmark_result.add_css_class("status-" + color)
 
+    def draw_ram_activity(self, area, cr, width, height):
+        """Zeichnet eine ruhige, rein optische Defrag-Kachelfläche."""
+        columns = 40
+        rows = 8
+        gap = 3.0
+        padding = 8.0
+        tile_width = max(2.0, (width - 2 * padding - gap * (columns - 1)) / columns)
+        tile_height = max(2.0, (height - 2 * padding - gap * (rows - 1)) / rows)
+        total = columns * rows
+        fraction = self.benchmark_progress.get_fraction()
+        completed = min(total, int(fraction * total))
+        scan = min(total - 1, completed + int(time.monotonic() * 5) % 4)
+
+        cr.set_source_rgb(0.035, 0.055, 0.075)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+
+        for index in range(total):
+            row, column = divmod(index, columns)
+            x = padding + column * (tile_width + gap)
+            y = padding + row * (tile_height + gap)
+
+            if self.ram_visual_state == "error" and index >= completed:
+                color = (0.68, 0.12, 0.16)
+            elif self.ram_visual_state == "cancelled" and index >= completed:
+                color = (0.72, 0.34, 0.06)
+            elif index < completed:
+                color = (0.12, 0.56, 0.30)
+                if completed - index <= 3:
+                    color = (0.91, 0.43, 0.08)
+            elif index == scan or index == scan + 1:
+                color = (0.05, 0.68, 0.88)
+            else:
+                color = (0.08, 0.12, 0.16)
+
+            cr.set_source_rgb(*color)
+            cr.rectangle(x, y, tile_width, tile_height)
+            cr.fill()
+
+    def update_ram_activity(self, state=None):
+        if not hasattr(self, "ram_activity"):
+            return
+        is_ram = bool(self.test_kind and self.test_kind.startswith("ram"))
+        self.ram_activity.set_visible(is_ram)
+        if state is not None:
+            self.ram_visual_state = state
+        if is_ram:
+            self.ram_activity.queue_draw()
+
     def reset_benchmark_ui(self):
         self.stop_test_process()
         self.test_kind = None
@@ -5431,6 +5495,7 @@ except Exception:
             self.benchmark_result.set_text("")
             self.set_benchmark_result_class(None)
             self.set_benchmark_controls(False)
+            self.update_ram_activity("idle")
 
     def set_benchmark_status_temp_class(self, temp_c):
         for cls in ("status-yellow", "status-red"):
@@ -5487,6 +5552,7 @@ except Exception:
         )
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class(None)
+        self.update_ram_activity("running")
 
         if kind.startswith("cpu"):
             cores = os.cpu_count() or 1
@@ -5538,6 +5604,7 @@ except Exception:
             self.benchmark_status.set_text("Test konnte nicht gestartet werden")
             self.benchmark_result.set_text(str(exc))
             self.set_benchmark_result_class("red")
+            self.update_ram_activity("error")
             return
         self.set_benchmark_controls(True)
         GLib.timeout_add(200, self.poll_test)
@@ -5558,6 +5625,8 @@ except Exception:
                 f"{format_test_clock(duration)}"
             )
 
+            self.update_ram_activity()
+
             if self.test_kind and self.test_kind.startswith("cpu"):
                 self.update_cpu_benchmark_status()
 
@@ -5574,6 +5643,7 @@ except Exception:
             f"{format_test_clock(duration)}"
         )
         self.set_benchmark_controls(False)
+        self.update_ram_activity()
 
         if self.test_cancelled:
             return False
@@ -5604,6 +5674,7 @@ except Exception:
                 )
             )
             self.set_benchmark_result_class("red")
+            self.update_ram_activity("error")
             log(
                 f"Test fehlgeschlagen: {self.test_kind}; "
                 f"returncode={returncode}; output={output[-1000:]}"
@@ -5650,6 +5721,7 @@ except Exception:
                     f"{throughput:.1f} GB/s"
                 )
                 self.set_benchmark_result_class("green")
+                self.update_ram_activity("complete")
             else:
                 self.benchmark_status.set_text(
                     "RAM FEHLER ERKANNT"
@@ -5660,6 +5732,7 @@ except Exception:
                     f"{passes} Prüfmuster"
                 )
                 self.set_benchmark_result_class("red")
+                self.update_ram_activity("error")
             log(
                 f"RAM Test fertig: errors={errors}, "
                 f"target={target}, checked={checked}, "
@@ -5709,6 +5782,7 @@ except Exception:
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class("orange")
+        self.update_ram_activity("cancelled")
 
         log(f"Test abgebrochen: {self.test_kind}")
 
