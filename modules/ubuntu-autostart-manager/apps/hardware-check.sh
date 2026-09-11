@@ -2196,6 +2196,7 @@ class App(Gtk.Application):
         # AT-SPI läuft ausschließlich in einem persistenten Helper. Der
         # Hauptprozess liest für Audio-Pfeiltasten nur diesen lokalen Cache.
         self.power_dialog_cache_value = False
+        self.power_dialog_guard_until = 0.0
         self.power_dialog_helper_proc = None
         self.power_dialog_helper_thread = None
         self.power_dialog_helper_stopping = False
@@ -2286,14 +2287,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.76")
+        self.window.set_title("Hardware Check v4.5.77")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.76")
+        title_label = Gtk.Label(label="Hardware Check v4.5.77")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4786,6 +4787,14 @@ except Exception:
         """Ausschließlich den Cache lesen – ohne Prozess, Scan oder Wartezeit."""
         return bool(self.power_dialog_cache_value)
 
+    def activate_power_dialog_guard(self):
+        """Audio-Pfeile kurz bis zur asynchronen AT-SPI-Erkennung sperren."""
+        self.power_dialog_guard_until = time.monotonic() + 2.5
+
+    def power_dialog_guard_active(self):
+        """Den lokalen Power-Tasten-Schutz ohne Timer oder Polling abfragen."""
+        return time.monotonic() < self.power_dialog_guard_until
+
     def send_audio_action(self, action):
         action_name = {
             "audio-left": "left",
@@ -4827,13 +4836,19 @@ except Exception:
         # Rohe Tastendrücke werden im Tastatur-Test immer verarbeitet,
         # unabhängig davon, welches Desktop-Fenster gerade den Fokus hat.
         if action.startswith("keycode:"):
-            if visible == "keyboard":
-                try:
-                    _, key_state, raw_code = action.split(":", 2)
-                    code = int(raw_code)
-                except (TypeError, ValueError):
-                    return False
+            try:
+                _, key_state, raw_code = action.split(":", 2)
+                code = int(raw_code)
+            except (TypeError, ValueError):
+                return False
 
+            # Linux KEY_POWER, KEY_SLEEP und KEY_SUSPEND nur beobachten. Der
+            # /dev/input-Listener bleibt read-only; der kurze Timestamp-Guard
+            # schließt lediglich die Lücke bis zum AT-SPI-Dialogereignis.
+            if key_state == "down" and code in {116, 142, 205}:
+                self.activate_power_dialog_guard()
+
+            if visible == "keyboard":
                 if key_state not in ("down", "up"):
                     return False
 
@@ -4862,10 +4877,13 @@ except Exception:
             # Pfeiltasten ausschließlich diesem Systemdialog. Die Erkennung
             # stammt aus einem asynchron gepflegten Cache und verzögert den
             # Audiotastendruck selbst nicht mehr.
-            if self.system_power_dialog_open():
+            if (
+                self.system_power_dialog_open()
+                or self.power_dialog_guard_active()
+            ):
                 log(
                     "Audio-Hotkey blockiert: "
-                    "GNOME Power-/Ausschalt-Dialog ist geöffnet"
+                    "GNOME Power-/Ausschalt-Dialog ist geöffnet oder wird geöffnet"
                 )
                 return False
 
