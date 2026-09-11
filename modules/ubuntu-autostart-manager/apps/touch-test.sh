@@ -311,7 +311,10 @@ class TouchWindow(Gtk.Window):
         self.finished = False
         self.front_attempts = 0
         self.completed = 0
-        self.layout_key = None
+        self.layout_locked = False
+        self.pending_layout_size = None
+        self.layout_apply_source = 0
+        self.ignored_layout_sizes = set()
 
         # GTK3/X11 specific: explicitly request a visual with an alpha channel.
         screen = self.get_screen()
@@ -410,27 +413,92 @@ class TouchWindow(Gtk.Window):
         return outer
 
     def on_size_allocate(self, widget, allocation):
-        layout = calculate_touch_layout(allocation.width, allocation.height)
+        size = (int(allocation.width), int(allocation.height))
+        if self.layout_locked:
+            if size != self.layout_size and size not in self.ignored_layout_sizes:
+                self.ignored_layout_sizes.add(size)
+                print(f"Touch-Layout: spätere Allocation {size[0]}x{size[1]} ignoriert")
+            return
+
+        if not self.is_plausible_fullscreen_size(*size):
+            return
+
+        if size == self.pending_layout_size:
+            self.cancel_layout_apply()
+            self.apply_and_lock_layout(size)
+            return
+
+        self.pending_layout_size = size
+        print(f"Touch-Layout: Kandidat {size[0]}x{size[1]}")
+        self.cancel_layout_apply()
+        # Ein zweites identisches size-allocate sperrt sofort. Falls GTK nur
+        # eines sendet, reicht alternativ eine kurze ereignisbasierte Ruhephase.
+        self.layout_apply_source = GLib.timeout_add(120, self.apply_pending_layout, size)
+
+    def monitor_size(self):
+        display = self.get_display()
+        monitor = None
+        window = self.get_window()
+        if display is not None and window is not None:
+            monitor = display.get_monitor_at_window(window)
+        if monitor is None and display is not None:
+            monitor = display.get_primary_monitor()
+        if monitor is None:
+            return None
+        geometry = monitor.get_geometry()
+        # GDK-Monitorgeometrie und size-allocate sind bereits logische GTK-
+        # Koordinaten; der Skalierungsfaktor darf hier nicht erneut einfließen.
+        return int(geometry.width), int(geometry.height)
+
+    def is_plausible_fullscreen_size(self, width, height):
+        if width < 640 or height < 480:
+            return False
+        monitor_size = self.monitor_size()
+        if monitor_size is None:
+            return True
+        return abs(width - monitor_size[0]) <= 2 and abs(height - monitor_size[1]) <= 2
+
+    def cancel_layout_apply(self):
+        if self.layout_apply_source:
+            GLib.source_remove(self.layout_apply_source)
+            self.layout_apply_source = 0
+
+    def apply_pending_layout(self, expected_size):
+        self.layout_apply_source = 0
+        if self.layout_locked or self.pending_layout_size != expected_size:
+            return False
+        allocation = self.get_allocation()
+        current_size = (int(allocation.width), int(allocation.height))
+        if current_size != expected_size or not self.is_plausible_fullscreen_size(*current_size):
+            return False
+        self.apply_and_lock_layout(expected_size)
+        return False
+
+    def apply_and_lock_layout(self, size):
+        if self.layout_locked:
+            return
+        self.layout_locked = True
+        self.layout_size = size
+        self.pending_layout_size = None
+        print(f"Touch-Layout: final {size[0]}x{size[1]} · LOCK")
+
+        layout = calculate_touch_layout(*size)
         tw, th = layout["target_size"]
         pw, ph = layout["panel_size"]
-        layout_key = (layout["window"], tw, th, pw, ph)
+        for target in self.targets.values():
+            target.set_size_request(tw, th)
+        self.panel.set_size_request(pw, ph)
 
-        if layout_key != self.layout_key:
-            self.layout_key = layout_key
-            for target in self.targets.values():
-                target.set_size_request(tw, th)
-            self.panel.set_size_request(pw, ph)
-
-            # CSS-Inhaltsminima skalieren mit, damit GTK die dynamischen
-            # Größenwünsche nicht wegen fester Fonts/Paddings vergrößert.
-            scale = layout["scale"]
-            border = max(1, int(round(5 * scale)))
-            radius = max(2, int(round(14 * scale)))
-            panel_border = max(1, int(round(2 * scale)))
-            pad_y = max(1, int(round(13 * scale)))
-            pad_x = max(2, int(round(20 * scale)))
-            self.panel.set_spacing(max(0, int(round(4 * scale))))
-            dynamic_css = CSS + f"""
+        # Der Lock ist bereits gesetzt, bevor diese Größen-/CSS-Änderungen
+        # eigene size-allocate-Ereignisse auslösen können.
+        scale = layout["scale"]
+        border = max(1, int(round(5 * scale)))
+        radius = max(2, int(round(14 * scale)))
+        panel_border = max(1, int(round(2 * scale)))
+        pad_y = max(1, int(round(13 * scale)))
+        pad_x = max(2, int(round(20 * scale)))
+        self.panel.set_spacing(max(0, int(round(4 * scale))))
+        dynamic_css = CSS + f"""
 .touch-target {{ border-width: {border}px; border-radius: {radius}px; }}
 .title-panel {{ border-width: {panel_border}px; border-radius: {radius}px;
                 padding: {pad_y}px {pad_x}px; }}
@@ -438,7 +506,7 @@ class TouchWindow(Gtk.Window):
 .progress {{ font-size: {max(7, int(round(15 * scale)))}px; }}
 .hint {{ font-size: {max(6, int(round(11 * scale)))}px; }}
 """.encode()
-            self._provider.load_from_data(dynamic_css)
+        self._provider.load_from_data(dynamic_css)
 
         for key, (x, y) in layout["positions"].items():
             self.fixed.move(self.targets[key], x, y)
