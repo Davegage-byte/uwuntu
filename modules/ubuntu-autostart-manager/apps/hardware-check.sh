@@ -2286,14 +2286,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.75")
+        self.window.set_title("Hardware Check v4.5.76")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.75")
+        title_label = Gtk.Label(label="Hardware Check v4.5.76")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2846,7 +2846,7 @@ class App(Gtk.Application):
             "detected": ("orange", "ERKANNT"),
             "linux_unsupported": (
                 "orange",
-                "IPU7 KAMERA – LINUX NICHT TESTBAR",
+                "WEBCAM MIT LINUX NICHT TESTBAR",
             ),
             "face": ("blue", "GESICHT ERKANNT"),
             "tested": ("green", "GETESTET"),
@@ -3349,7 +3349,7 @@ class App(Gtk.Application):
         elif result in {"error", "failed"}:
             self.set_touch_status_ui("red", "NICHT BESTANDEN")
         elif result == "aborted":
-            self.set_touch_status_ui("orange", "NICHT SICHER / ABGEBROCHEN")
+            self.set_touch_status_ui("orange", "ABGEBROCHEN")
         elif result == "no_touchscreen":
             self.set_touch_status_ui("orange", "NICHT GETESTET")
         else:
