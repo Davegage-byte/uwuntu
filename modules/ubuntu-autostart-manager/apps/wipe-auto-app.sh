@@ -198,6 +198,14 @@ def _device_identity(device):
     )
 
 
+def _sysfs_path_is_usb(sys_path):
+    path = sys_path.lower()
+    return bool(
+        "/usb" in path
+        or re.search(r"/(?:\d+-\d+(?:\.\d+)*)/", path)
+    )
+
+
 def _is_certainly_internal_ssd(device):
     path = str(device.get("path") or "")
     name = str(device.get("name") or "")
@@ -209,9 +217,17 @@ def _is_certainly_internal_ssd(device):
         return False
     if device.get("rota") not in (False, 0, "0"):
         return False
-    if tran == "usb" or tran not in ("", "nvme", "sata", "ata"):
+    if tran not in ("", "nvme", "sata", "ata", "usb"):
         return False
     if re.match(r"^(loop|zram|dm-|md|sr|ram|fd|nbd|rbd)", name):
+        return False
+
+    # USB ist unabhängig von TRAN ein harter Ausschluss. Damit bleiben auch
+    # USB-Bridges gesperrt, die sich ungewöhnlich als SATA/ATA/NVMe melden.
+    sys_path = os.path.realpath(f"/sys/class/block/{name}")
+    props = _udev_properties(path)
+    bus = props.get("ID_BUS", "").lower()
+    if tran == "usb" or bus == "usb" or _sysfs_path_is_usb(sys_path):
         return False
 
     if tran in ("nvme", "sata", "ata"):
@@ -219,11 +235,8 @@ def _is_certainly_internal_ssd(device):
 
     # Ein leeres TRAN ist nur mit einem zweiten, eindeutig internen Signal
     # zulässig. RM=0 allein ist ausdrücklich kein solches Signal.
-    sys_path = os.path.realpath(f"/sys/class/block/{name}")
-    if "/virtual/" in sys_path or "/usb" in sys_path.lower():
+    if "/virtual/" in sys_path:
         return False
-    props = _udev_properties(path)
-    bus = props.get("ID_BUS", "").lower()
     id_path = props.get("ID_PATH", "").lower()
     if bus in ("ata", "nvme"):
         return True
@@ -512,6 +525,7 @@ class WipeAutoApp(Gtk.Application):
         super().__init__(application_id="com.david.WipeAuto")
         self.window = None
         self.wiping = False
+        self.confirming = False
         self.soh_alert_active = False
         self.soh_blink_on = False
         self.disk = None
@@ -939,7 +953,7 @@ class WipeAutoApp(Gtk.Application):
             self.wipe_button.grab_focus()
         return False
     def on_refresh(self, button):
-        if not self.wiping:
+        if not self.wiping and not self.confirming:
             # Nach einem erfolgreichen Wipe ist der WIPE-Button bewusst
             # ausgeblendet. REFRESH setzt die SSD-Karte wieder auf den
             # normalen Ausgangszustand zurück.
@@ -1108,8 +1122,15 @@ class WipeAutoApp(Gtk.Application):
         self.window.set_default_widget(self.wipe_button)
 
     def on_wipe_clicked(self, button):
-        if self.wiping or not self.disk or not self.disk_info:
+        if self.wiping or self.confirming or not self.disk or not self.disk_info:
             return
+
+        # Das in der UI angezeigte Ziel bereits vor dem Bestätigungsdialog
+        # unveränderlich festhalten. Ein späterer Refresh darf es nicht ersetzen.
+        self.confirmed_disk = self.disk
+        self.confirmed_identity = _device_identity(self.disk_info)
+        self.confirming = True
+        self.refresh_button.set_sensitive(False)
 
         self.clear_action_area()
         # Bestätigungszeile über die verfügbare Breite ziehen.
@@ -1142,26 +1163,31 @@ class WipeAutoApp(Gtk.Application):
         self.disk_badge.set_text("CONFIRM")
         self.set_class(self.disk_badge, "warn")
         self.disk_note.set_text(
-            f"Alle Partitions-/Dateisystem-Signaturen auf {self.disk} werden entfernt."
+            f"Alle Partitions-/Dateisystem-Signaturen auf {self.confirmed_disk} werden entfernt."
         )
 
     def on_cancel_wipe(self, button):
         if self.wiping:
             return
+        self.confirming = False
+        self.confirmed_disk = None
+        self.confirmed_identity = None
+        self.refresh_button.set_sensitive(True)
         self.restore_wipe_button()
         self.refresh_all()
         GLib.idle_add(self.focus_wipe_button)
 
     def on_confirm_wipe(self, button):
-        if self.wiping or not self.disk or not self.disk_info:
+        if (
+            self.wiping
+            or not self.confirming
+            or not self.confirmed_disk
+            or not self.confirmed_identity
+        ):
             return
 
-        # Pfad und Kernel-/Hardwareidentität exakt festhalten. Der Worker
-        # darf unter keinen Umständen auf einen neu erkannten Ersatz wechseln.
-        self.confirmed_disk = self.disk
-        self.confirmed_identity = _device_identity(self.disk_info)
+        self.confirming = False
         self.wiping = True
-        self.refresh_button.set_sensitive(False)
 
         self.clear_action_area()
 
@@ -1241,6 +1267,8 @@ class WipeAutoApp(Gtk.Application):
 
     def finish_wipe_success(self, disk):
         self.wiping = False
+        self.confirmed_disk = None
+        self.confirmed_identity = None
         self.refresh_button.set_sensitive(True)
 
         self.disk_badge.set_text("PASS")
@@ -1265,6 +1293,8 @@ class WipeAutoApp(Gtk.Application):
 
     def finish_wipe_error(self, message):
         self.wiping = False
+        self.confirmed_disk = None
+        self.confirmed_identity = None
         self.refresh_button.set_sensitive(True)
 
         self.disk_badge.set_text("ERROR")
