@@ -2289,14 +2289,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.81")
+        self.window.set_title("Hardware Check v4.5.82")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.81")
+        title_label = Gtk.Label(label="Hardware Check v4.5.82")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5403,6 +5403,8 @@ except Exception:
         self.ram_activity_values = [0.0] * (40 * 8)
         self.ram_activity_targets = [0.0] * (40 * 8)
         self.ram_activity_hotspots = []
+        self.ram_activity_green_thresholds = [1.0] * (40 * 8)
+        self.ram_activity_progress = 0.0
         body.append(self.ram_activity)
         progress_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -5437,7 +5439,7 @@ except Exception:
             self.benchmark_result.add_css_class("status-" + color)
 
     def draw_ram_activity(self, area, cr, width, height):
-        """Zeichnet eine organisch driftende, rein optische Kachelfläche."""
+        """Zeichnet die organische RAM-Aktivität mit Uwuntu-Farbpalette."""
         columns = 40
         rows = 8
         gap = 3.0
@@ -5445,9 +5447,19 @@ except Exception:
         tile_width = max(2.0, (width - 2 * padding - gap * (columns - 1)) / columns)
         tile_height = max(2.0, (height - 2 * padding - gap * (rows - 1)) / rows)
         total = columns * rows
-        cr.set_source_rgb(0.035, 0.055, 0.075)
+
+        background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
+        base = (0x23 / 255.0, 0x23 / 255.0, 0x29 / 255.0)
+        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+        orange = (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
+        red = (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+
+        cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
         cr.fill()
+
+        progress = max(0.0, min(1.0, self.ram_activity_progress))
 
         for index in range(total):
             row, column = divmod(index, columns)
@@ -5456,21 +5468,29 @@ except Exception:
 
             intensity = self.ram_activity_values[index]
             if self.ram_visual_state == "error":
-                color = (0.68, 0.12, 0.16)
+                color = red
             elif self.ram_visual_state == "cancelled":
-                color = (0.72, 0.34, 0.06)
+                color = orange
             elif self.ram_visual_state == "complete":
-                color = (0.12, 0.56, 0.30)
+                color = green
             else:
-                base = (0.065, 0.10, 0.135)
-                cool = (0.04, 0.48, 0.68)
-                warm = (0.88, 0.38, 0.07)
                 glow = min(1.0, intensity * 1.35)
-                accent = max(0.0, (intensity - 0.62) / 0.38)
+                accent = max(0.0, min(1.0, (intensity - 0.62) / 0.38))
+                active = tuple(
+                    base[channel] * (1.0 - glow) + blue[channel] * glow
+                    for channel in range(3)
+                )
+                active = tuple(
+                    active[channel] * (1.0 - accent) + green[channel] * accent
+                    for channel in range(3)
+                )
+
+                threshold = self.ram_activity_green_thresholds[index]
+                green_mix = max(0.0, min(1.0, (progress - threshold) / 0.05))
+                green_mix = green_mix * green_mix * (3.0 - 2.0 * green_mix)
                 color = tuple(
-                    base[channel] * (1.0 - glow)
-                    + cool[channel] * glow * (1.0 - accent)
-                    + warm[channel] * accent
+                    active[channel] * (1.0 - green_mix)
+                    + green[channel] * green_mix
                     for channel in range(3)
                 )
 
@@ -5482,6 +5502,16 @@ except Exception:
         total = 40 * 8
         self.ram_activity_values = [random.uniform(0.02, 0.16) for _ in range(total)]
         self.ram_activity_targets = list(self.ram_activity_values)
+        self.ram_activity_progress = 0.0
+
+        order = list(range(total))
+        random.shuffle(order)
+        self.ram_activity_green_thresholds = [1.0] * total
+        for rank, index in enumerate(order):
+            position = rank / max(1, total - 1)
+            threshold = 0.04 + position * 0.90 + random.uniform(-0.012, 0.012)
+            self.ram_activity_green_thresholds[index] = max(0.025, min(0.94, threshold))
+
         self.ram_activity_hotspots = [
             {
                 "x": random.uniform(0.0, 39.0),
@@ -5699,6 +5729,8 @@ except Exception:
         if proc.poll() is None:
             fraction = min(0.99, elapsed / duration)
             self.benchmark_progress.set_fraction(fraction)
+            if self.test_kind and self.test_kind.startswith("ram"):
+                self.ram_activity_progress = fraction
             self.benchmark_time.set_text(
                 f"{format_test_clock(elapsed)} / "
                 f"{format_test_clock(duration)}"
