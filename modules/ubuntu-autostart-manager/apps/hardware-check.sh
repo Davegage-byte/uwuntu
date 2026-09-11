@@ -75,6 +75,7 @@ gi.require_version("Gdk", "4.0")
 
 from gi.repository import Gtk, Gdk, GLib, Pango
 from pathlib import Path
+import ast
 import glob
 import json
 import os
@@ -2285,14 +2286,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.74")
+        self.window.set_title("Hardware Check v4.5.75")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.74")
+        title_label = Gtk.Label(label="Hardware Check v4.5.75")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5897,6 +5898,8 @@ except Exception:
         """
         if self.super_block_active:
             return
+        if self.stack.get_visible_child_name() != "keyboard":
+            return
 
         gsettings = shutil.which("gsettings")
         if not gsettings:
@@ -5921,6 +5924,8 @@ except Exception:
             original = get_proc.stdout.strip()
             if get_proc.returncode != 0 or not original:
                 log("SUPER-Blockierung: overlay-key konnte nicht gelesen werden")
+                return
+            if self.stack.get_visible_child_name() != "keyboard":
                 return
 
             set_proc = subprocess.run(
@@ -6298,12 +6303,42 @@ except Exception:
                 "wiederhergestellt"
             )
 
+    @staticmethod
+    def should_block_keyboard_test_binding(value):
+        """Nur bekannte, im Tastatur-Test störende Accelerators auswählen."""
+        blocked = {
+            "<alt>tab",
+            "<shift><alt>tab",
+            "<alt>f4",
+            "<alt>space",
+            "<super>left",
+            "<super>right",
+            "<super>up",
+            "<super>down",
+            "print",
+            "<shift>print",
+            "<alt>print",
+        }
+
+        try:
+            accelerators = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            return False
+
+        return (
+            isinstance(accelerators, (list, tuple))
+            and any(
+                isinstance(accelerator, str)
+                and accelerator.lower() in blocked
+                for accelerator in accelerators
+            )
+        )
+
     def block_desktop_shortcuts_for_keyboard_test(self):
         """GNOME-Desktop-Shortcuts temporär deaktivieren, ohne Input-Grab.
 
-        Nur GSettings-Werte im Array-Format werden verändert. Das deckt u. a.
-        Print Screen/Screenshot, Alt+F4, Super-Kombinationen, Workspace- und
-        Tiling-Keybindings ab. Bereits leere Bindings bleiben unberührt.
+        Ausschließlich bekannte störende Kombinationen werden verändert.
+        Power-, Sleep-, Media- und Helligkeits-Tasten bleiben unangetastet.
         """
         if self.desktop_shortcut_block_active:
             return False
@@ -6356,6 +6391,10 @@ except Exception:
                     continue
                 if original == "[]":
                     continue
+                if not self.should_block_keyboard_test_binding(original):
+                    continue
+                if self.stack.get_visible_child_name() != "keyboard":
+                    break
 
                 try:
                     set_proc = subprocess.run(
@@ -6371,6 +6410,10 @@ except Exception:
 
                 if set_proc.returncode == 0:
                     saved.append((schema, key, original))
+                    # Sofort veröffentlichen, damit ein paralleler Seitenwechsel
+                    # auch einen gerade gesetzten Wert zuverlässig restauriert.
+                    self.desktop_shortcut_bindings_original = saved
+                    self.desktop_shortcut_block_active = True
 
         # Einzelne SUPER-Taste ist kein Array-Keybinding und wird weiterhin
         # über die bestehende overlay-key-Funktion neutralisiert.
@@ -6405,20 +6448,49 @@ except Exception:
             except Exception:
                 self.desktop_shortcut_restore_helper = None
 
+            # Falls die Seite während der GSettings-Abfrage verlassen wurde,
+            # nach Anlage des Crash-Wächters unverzüglich restaurieren.
+            if self.stack.get_visible_child_name() != "keyboard":
+                self.restore_keyboard_shortcuts_async()
+
         log(
             f"Keyboard-Test: {len(saved)} Desktop-Keybinding(s) "
             "temporär deaktiviert · Input bleibt read-only"
         )
         return False
 
-    def restore_keyboard_shortcuts_async(self):
-        """Desktop-Keybindings nach sichtbarem Wechsel im Hintergrund restaurieren."""
-        def worker():
+    def restore_keyboard_shortcuts_with_retries(self):
+        """Alle HC-Sperren mit kurzen Wiederholungsversuchen restaurieren."""
+        pauses = (0.15, 0.30)
+        for attempt in range(3):
             try:
                 self.restore_super_after_keyboard_test()
                 self.restore_desktop_shortcuts_after_keyboard_test()
             except Exception as exc:
-                log(f"Keyboard-Test: asynchrones Shortcut-Restore fehlgeschlagen: {exc}")
+                log(
+                    "Keyboard-Test: Shortcut-Restore Versuch "
+                    f"{attempt + 1} fehlgeschlagen: {exc}"
+                )
+
+            if not (
+                self.super_block_active
+                or self.desktop_shortcut_block_active
+            ):
+                return True
+            if attempt < len(pauses):
+                time.sleep(pauses[attempt])
+
+        log(
+            "FEHLER: Keyboard-Test-Shortcuts konnten nach 3 Versuchen "
+            "nicht vollständig wiederhergestellt werden; externe "
+            "Restore-Wächter bleiben aktiv"
+        )
+        return False
+
+    def restore_keyboard_shortcuts_async(self):
+        """Desktop-Keybindings nach sichtbarem Wechsel im Hintergrund restaurieren."""
+        def worker():
+            self.restore_keyboard_shortcuts_with_retries()
 
         threading.Thread(target=worker, daemon=True).start()
         return False
@@ -6707,8 +6779,7 @@ except Exception:
 
     def do_shutdown(self):
         self.stop_power_dialog_helper()
-        self.restore_super_after_keyboard_test()
-        self.restore_desktop_shortcuts_after_keyboard_test()
+        self.restore_keyboard_shortcuts_with_retries()
         self.restore_alt_space_after_keyboard_test()
         self.restore_super_arrows_after_keyboard_test()
         if self.info_window is not None:
