@@ -45,7 +45,7 @@ RUNTIME_MANIFEST_PATH="$RUNTIME_MANIFEST_DIR/runtime-manifest.json"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026090912
+MANAGER_BUILD=2026090911
 AUTO_MODE=0
 
 # Die Laufzeitprogramme werden als eigenstaendige Repository-Module gepflegt.
@@ -1080,8 +1080,6 @@ install_all_dependencies() {
     local packages=(
         python3
         python3-gi
-        python3-cairo
-        python3-gi-cairo
         gir1.2-gtk-3.0
         gir1.2-gtk-4.0
         gir1.2-gdkpixbuf-2.0
@@ -1180,8 +1178,6 @@ PY_DEPS_CHECK
 
     python3 - <<'PY_GTK4_CHECK' >/dev/null 2>&1 || return 1
 import gi
-gi.require_foreign("cairo")
-import cairo
 gi.require_version("Gtk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, GdkPixbuf
@@ -1367,7 +1363,7 @@ install_hardware_check_app() {
     install_force_update_helper
 
     local hw_missing=()
-    for pkg in python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0 python3-pyatspi libinput-tools udev mokutil dmidecode wl-clipboard; do
+    for pkg in python3-gi gir1.2-gtk-4.0 python3-pyatspi libinput-tools udev mokutil dmidecode wl-clipboard; do
         dpkg -s "$pkg" >/dev/null 2>&1 || hw_missing+=("$pkg")
     done
     if [ "${#hw_missing[@]}" -gt 0 ]; then
