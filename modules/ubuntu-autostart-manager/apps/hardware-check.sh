@@ -6495,6 +6495,22 @@ except Exception:
                 self.super_block_active
                 or self.desktop_shortcut_block_active
             ):
+                # Die Keyboard-Seite kann erst nach der Prüfung am Anfang des
+                # Versuchs erneut geöffnet worden sein. Dann hat der alte
+                # Restore die vorherigen Flags bereits sauber zurückgesetzt;
+                # den jetzt wieder gewünschten Sperrzustand einmalig neu
+                # anwenden, statt den sichtbaren Test entsperrt zu lassen.
+                if (
+                    not force
+                    and self.stack.get_visible_child_name() == "keyboard"
+                ):
+                    log(
+                        "Keyboard-Test: nach parallelem Restore erneut "
+                        "geöffnet; Shortcut-Sperren werden neu angewendet"
+                    )
+                    self.block_super_for_keyboard_test()
+                    self.block_desktop_shortcuts_for_keyboard_test()
+                    return False
                 return True
             if attempt < len(pauses):
                 time.sleep(pauses[attempt])
