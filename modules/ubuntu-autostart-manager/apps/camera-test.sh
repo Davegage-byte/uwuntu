@@ -66,7 +66,7 @@ uwuntu_set_dock_autohide() {
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-camera-test"
-PY_FILE="$CACHE_DIR/camera_test_v1_21.py"
+PY_FILE="$CACHE_DIR/camera_test_v1_22.py"
 LOG_FILE="$CACHE_DIR/camera_test.log"
 STATE_FILE="$HOME/.local/state/uwuntu/camera_test_status.json"
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -75,7 +75,7 @@ rm -f "$STATE_FILE" 2>/dev/null || true
 {
     echo
     echo "============================================================"
-    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.21 Start"
+    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.22 Start"
 } >> "$LOG_FILE" 2>/dev/null || true
 
 # XWayland gibt dem Kamera-Fenster eine klassische WM_CLASS. Zusammen mit
@@ -160,7 +160,7 @@ from gi.repository import Gtk, Gdk, Gst, GLib, Gio
 
 APP_ID = "com.david.UwuntuCameraTest"
 APP_NAME = "Uwuntu Kamera Test"
-VERSION = "1.21"
+VERSION = "1.22"
 ERROR_TEXT = "KEIN KAMERABILD ERKANNT"
 IPU7_LIMITED_TEXT = "IPU7 KAMERA – LINUX NICHT TESTBAR"
 
@@ -282,17 +282,21 @@ def camera_devices():
     return capture or unknown or devices
 
 
-MODES = [
-    (
-        "MJPEG 1920x1080 @ 30 FPS",
-        "image/jpeg,width=1920,height=1080,framerate=30/1 ! jpegdec",
-    ),
-    (
-        "MJPEG 1280x720 @ 30 FPS",
-        "image/jpeg,width=1280,height=720,framerate=30/1 ! jpegdec",
-    ),
-    ("AUTO", None),
-]
+MODE_1080 = (
+    "MJPEG 1920x1080 @ 30 FPS",
+    "image/jpeg,width=1920,height=1080,framerate=30/1 ! jpegdec",
+)
+MODE_720 = (
+    "MJPEG 1280x720 @ 30 FPS",
+    "image/jpeg,width=1280,height=720,framerate=30/1 ! jpegdec",
+)
+MODE_AUTO = ("AUTO", None)
+
+# Im normalen 960x540-Fenster 720p bevorzugen, um Decode-/Convert-Last zu
+# sparen. Bei großem/maximiertem Fenster wird 1080p bevorzugt. Die jeweils
+# andere feste Auflösung und AUTO bleiben als robuste Fallbacks erhalten.
+MODES_720_FIRST = [MODE_720, MODE_1080, MODE_AUTO]
+MODES_1080_FIRST = [MODE_1080, MODE_720, MODE_AUTO]
 
 
 def find_face_cascade():
@@ -362,6 +366,8 @@ class CameraWindow(Gtk.ApplicationWindow):
 
         self.connect("key-press-event", self.on_key_press)
         self.connect("delete-event", self.on_delete)
+        self.connect("window-state-event", self.on_window_state)
+        self.connect("configure-event", self.on_configure)
 
         self.pipeline = None
         self.serial = 0
@@ -373,6 +379,15 @@ class CameraWindow(Gtk.ApplicationWindow):
         )
         self.device_index = 0
         self.mode_index = 0
+
+        # Dynamische Vorschauauflösung: normales Fenster bevorzugt 720p,
+        # deutlich vergrößert/maximiert bevorzugt 1080p. Größenänderungen
+        # werden entprellt, damit Ziehen am Fensterrand die Pipeline nicht
+        # fortlaufend neu startet.
+        self.preview_highres = False
+        self.window_maximized = False
+        self.last_window_size = (960, 540)
+        self.preview_switch_source_id = 0
 
         # Ressourcenschonende Gesichtserkennung:
         # maximal 1 kleines 320x180-Graubild pro Sekunde.
@@ -581,6 +596,85 @@ window { background: #000; }
         for child in self.video_box.get_children():
             self.video_box.remove(child)
 
+    def preview_modes(self):
+        if self.preview_highres:
+            return MODES_1080_FIRST
+        return MODES_720_FIRST
+
+    def desired_preview_highres(self):
+        if self.window_maximized:
+            return True
+
+        width, height = self.last_window_size
+
+        # Hysterese verhindert Umschaltflattern nahe der Grenze. Von 720p
+        # wird erst ab 1280x720 auf 1080p gewechselt; ist 1080p bereits aktiv,
+        # bleibt es bis unter ca. 1120x630 erhalten.
+        if self.preview_highres:
+            return width >= 1120 and height >= 630
+        return width >= 1280 and height >= 720
+
+    def cancel_preview_switch(self):
+        if not self.preview_switch_source_id:
+            return
+        try:
+            GLib.source_remove(self.preview_switch_source_id)
+        except Exception:
+            pass
+        self.preview_switch_source_id = 0
+
+    def schedule_preview_profile(self):
+        desired = self.desired_preview_highres()
+        if desired == self.preview_highres:
+            self.cancel_preview_switch()
+            return False
+
+        self.cancel_preview_switch()
+        self.preview_switch_source_id = GLib.timeout_add(
+            700,
+            self.apply_preview_profile,
+        )
+        return False
+
+    def apply_preview_profile(self):
+        self.preview_switch_source_id = 0
+        desired = self.desired_preview_highres()
+        if desired == self.preview_highres:
+            return False
+
+        self.preview_highres = desired
+        self.mode_index = 0
+        self.face_pipeline_enabled = self.face_cascade is not None
+        profile = "1080p" if desired else "720p"
+        print(
+            f"Fenstergröße stabil · Vorschau bevorzugt jetzt {profile}.",
+            flush=True,
+        )
+
+        # Callback läuft bereits im GTK-Mainloop: direkt neu aufbauen, damit
+        # alte Pipeline-Callbacks sofort über die neue serial ungültig werden.
+        self.try_current()
+        return False
+
+    def on_window_state(self, widget, event):
+        self.window_maximized = bool(
+            event.new_window_state & Gdk.WindowState.MAXIMIZED
+        )
+        self.schedule_preview_profile()
+        return False
+
+    def on_configure(self, widget, event):
+        try:
+            width = int(event.width)
+            height = int(event.height)
+        except Exception:
+            return False
+
+        if width > 0 and height > 0:
+            self.last_window_size = (width, height)
+            self.schedule_preview_profile()
+        return False
+
     def build_pipeline(self, device, caps):
         if caps is None:
             source = f'v4l2src device="{device}" ! '
@@ -654,7 +748,8 @@ window { background: #000; }
                 self.error_label.show()
             return False
 
-        if self.mode_index >= len(MODES):
+        modes = self.preview_modes()
+        if self.mode_index >= len(modes):
             self.device_index += 1
             self.mode_index = 0
             self.face_pipeline_enabled = self.face_cascade is not None
@@ -666,7 +761,7 @@ window { background: #000; }
                 return False
 
         device = self.current_device()
-        label, caps = MODES[self.mode_index]
+        label, caps = modes[self.mode_index]
         print(
             f"Kamera v{VERSION} · teste {device}: {label} · "
             f"Backend={os.environ.get('GDK_BACKEND', 'auto')}",
@@ -718,7 +813,7 @@ window { background: #000; }
         if not self.frame_seen:
             self.frame_seen = True
             device = self.current_device()
-            label, _ = MODES[self.mode_index]
+            label, _ = self.preview_modes()[self.mode_index]
             print(f"Kamera aktiv: {device} | {label}", flush=True)
             GLib.idle_add(self.error_label.hide)
             if not self.face_ever_seen:
@@ -896,6 +991,7 @@ window { background: #000; }
 
     def cleanup(self):
         self.serial += 1
+        self.cancel_preview_switch()
         self.stop_pipeline()
 
 
