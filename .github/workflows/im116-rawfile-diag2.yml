@@ -1,0 +1,39 @@
+name: IM1.16 Rawfile Restore Diagnose 2
+
+on:
+  push:
+    branches:
+      - feature/im116-fast-persistence-v2
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore mit -W und -o testen
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq partclone e2fsprogs
+          rm -rf /tmp/im116-raw2
+          mkdir -p /tmp/im116-raw2
+          cd /tmp/im116-raw2
+          dd if=/dev/urandom of=payload.bin bs=1M count=8 status=none
+          printf 'Uwuntu raw restore\n' > marker.txt
+          truncate -s 512M source.ext4
+          mkfs.ext4 -F -L casper-rw source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'mkdir /data' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write payload.bin /data/payload.bin' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write marker.txt /data/marker.txt' source.ext4 >/dev/null 2>&1
+          e2fsck -fy source.ext4 >/dev/null
+          partclone.ext4 -c -s source.ext4 -o clone.pcl -q 2>save.log
+          partclone.ext4 -r -s clone.pcl -W -o target.ext4 -q 2>restore.log
+          cat restore.log || true
+          ls -lh target.ext4
+          e2fsck -fy target.ext4 >/dev/null
+          debugfs -R 'dump -p /data/payload.bin restored.bin' target.ext4 >/dev/null 2>&1
+          debugfs -R 'dump -p /data/marker.txt restored-marker.txt' target.ext4 >/dev/null 2>&1
+          cmp payload.bin restored.bin
+          cmp marker.txt restored-marker.txt
+          test "$(blkid -p -s LABEL -o value target.ext4)" = 'casper-rw'
