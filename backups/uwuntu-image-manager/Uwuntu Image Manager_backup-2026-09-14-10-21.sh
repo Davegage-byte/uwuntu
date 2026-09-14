@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.16"
+APP_VERSION="1.15"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,9 +94,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.16"
-FORMAT_VERSION = "uwuntu-image-v3"
-SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
+APP_VERSION = "1.15"
+FORMAT_VERSION = "uwuntu-image-v2"
+SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", FORMAT_VERSION}
 
 UPDATE_API_URL = (
     "https://api.github.com/repos/"
@@ -671,167 +671,6 @@ def stream_partclone_to_zstd(source, target, total, progress):
     return done
 
 
-def ext_partclone_program(fstype):
-    fstype = str(fstype or "").lower()
-    if fstype == "ext3":
-        return "partclone.ext3"
-    if fstype == "ext4":
-        return "partclone.ext4"
-    raise RuntimeError(
-        f"Nicht unterstütztes Persistenz-Dateisystem: {fstype or 'unbekannt'}"
-    )
-
-
-def ext_filesystem_size_bytes(path):
-    info = output(
-        ["env", "LC_ALL=C", "dumpe2fs", "-h", str(path)],
-        timeout=30,
-    )
-
-    block_count = None
-    block_size = None
-
-    for line in info.splitlines():
-        if line.startswith("Block count:"):
-            block_count = int(line.split(":", 1)[1].strip())
-        elif line.startswith("Block size:"):
-            block_size = int(line.split(":", 1)[1].strip())
-
-    if not block_count or not block_size:
-        raise RuntimeError(
-            "Größe des kompakten Persistenz-Dateisystems konnte nicht "
-            "ermittelt werden."
-        )
-
-    return block_count * block_size
-
-
-def prepare_compact_ext_image(source, target, source_size, progress):
-    target.unlink(missing_ok=True)
-
-    # Rohes ext-Abbild als sparse Datei: unbenutzte Blöcke werden nicht
-    # physisch kopiert. Der Master-Stick selbst bleibt unverändert.
-    run(["e2image", "-rap", str(source), str(target)])
-    progress.update(1, force=True)
-
-    run(["e2fsck", "-fy", str(target)])
-    run(["resize2fs", "-M", str(target)])
-    minimum_size = ext_filesystem_size_bytes(target)
-    progress.update(2, force=True)
-
-    # Etwas freien Spielraum im gespeicherten Dateisystem lassen. Trotzdem
-    # bleibt es kompakt genug, um auf unterschiedlich großen 32-GB-Sticks
-    # wiederhergestellt und danach auf die Zielpartition erweitert zu werden.
-    compact_size = min(
-        int(source_size),
-        math.ceil((minimum_size + 256 * MIB) / MIB) * MIB,
-    )
-
-    if compact_size < minimum_size:
-        raise RuntimeError(
-            "Kompaktes Persistenz-Dateisystem ist größer als die Quellpartition."
-        )
-
-    with open(target, "r+b") as handle:
-        handle.truncate(compact_size)
-
-    if compact_size > minimum_size:
-        run(["resize2fs", str(target)])
-
-    run(["e2fsck", "-fy", str(target)])
-    actual_size = ext_filesystem_size_bytes(target)
-
-    if actual_size > compact_size:
-        raise RuntimeError(
-            "Das vorbereitete Persistenz-Dateisystem überschreitet seine "
-            "kompakte Zielgröße."
-        )
-
-    progress.finish(3)
-    return compact_size
-
-
-def stream_ext_partclone_to_zstd(
-    source,
-    target,
-    total,
-    progress,
-    fstype,
-):
-    program = ext_partclone_program(fstype)
-    log_handle = LOG_FILE.open("a", encoding="utf-8")
-    partclone_proc = subprocess.Popen(
-        [program, "-c", "-s", str(source), "-o", "-", "-q"],
-        stdout=subprocess.PIPE,
-        stderr=log_handle,
-    )
-    zstd_proc = subprocess.Popen(
-        ["zstd", "-T0", "-3", "-q", "-o", str(target)],
-        stdin=subprocess.PIPE,
-        stdout=log_handle,
-        stderr=log_handle,
-    )
-
-    done = 0
-    partclone_rc = None
-    zstd_rc = None
-    pipeline_error = None
-
-    try:
-        while True:
-            chunk = partclone_proc.stdout.read(CHUNK)
-            if not chunk:
-                break
-
-            zstd_proc.stdin.write(chunk)
-            done += len(chunk)
-            progress.update(done)
-
-        zstd_proc.stdin.close()
-        partclone_rc = partclone_proc.wait()
-        zstd_rc = zstd_proc.wait()
-    except Exception as exc:
-        pipeline_error = exc
-        try:
-            zstd_proc.stdin.close()
-        except Exception:
-            pass
-
-        for proc in (partclone_proc, zstd_proc):
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
-
-        for proc in (partclone_proc, zstd_proc):
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-    finally:
-        try:
-            partclone_proc.stdout.close()
-        except Exception:
-            pass
-        log_handle.close()
-
-    if pipeline_error is not None:
-        raise RuntimeError(
-            f"Partclone-Persistenz-Backup fehlgeschlagen: {pipeline_error}"
-        ) from pipeline_error
-    if partclone_rc != 0:
-        raise RuntimeError("Partclone-Sicherung der Persistenz ist fehlgeschlagen.")
-    if zstd_rc != 0:
-        raise RuntimeError("zstd-Komprimierung der Persistenz ist fehlgeschlagen.")
-
-    progress.finish(done)
-    return done
-
-
 def stream_tar_to_zstd(mountpoint, target, estimate, progress):
     log_handle = LOG_FILE.open("a", encoding="utf-8")
 
@@ -891,7 +730,7 @@ def package_image(temp_dir, final_path, progress):
         "metadata.json",
         "mbr_bootcode.bin",
         "root.fat.partclone.zst",
-        "persistence.ext.partclone.zst",
+        "persistence.tar.zst",
     ]
 
     expected = sum((temp_dir / name).stat().st_size for name in files)
@@ -1060,7 +899,7 @@ def backup(args):
         p = Progress(
             "Boot-Partition sichern",
             1,
-            5,
+            4,
             p1_info["size_bytes"],
             "LESEN",
         )
@@ -1073,55 +912,66 @@ def backup(args):
         )
 
         # ----------------------------------------------------
-        # 2/5 Persistenz-Dateisystem kompakt vorbereiten
+        # 2/4 Persistenz
         # ----------------------------------------------------
-        compact_ext = temp_dir / "persistence.compact.ext"
+        run(
+            [
+                "mount",
+                "-t",
+                p2_info["fstype"],
+                "-o",
+                "ro,noload",
+                p2,
+                str(mount_dir),
+            ],
+            check=True,
+        )
+
+        try:
+            du = output(
+                ["du", "-sbx", "--apparent-size", str(mount_dir)],
+                timeout=120,
+            ).split()[0]
+            estimate = int(du)
+        except Exception:
+            try:
+                estimate = int(
+                    output(
+                        ["df", "-B1", "--output=used", str(mount_dir)],
+                        timeout=10,
+                    ).splitlines()[-1].strip()
+                )
+            except Exception:
+                estimate = max(1, p2_info["size_bytes"] // 2)
+
+        estimate = max(estimate + 64 * MIB, 128 * MIB)
+
+        persistence_zst = temp_dir / "persistence.tar.zst"
 
         p = Progress(
-            "Persistenz für Schnell-Restore vorbereiten",
+            "Persistenz sichern",
             2,
-            5,
-            3,
-            "VORBEREITEN",
-        )
-
-        compact_size_bytes = prepare_compact_ext_image(
-            p2,
-            compact_ext,
-            p2_info["size_bytes"],
-            p,
-        )
-
-        # ----------------------------------------------------
-        # 3/5 Persistenz blockweise sichern
-        # ----------------------------------------------------
-        persistence_zst = temp_dir / "persistence.ext.partclone.zst"
-
-        p = Progress(
-            "Persistenz blockweise sichern",
-            3,
-            5,
-            compact_size_bytes,
+            4,
+            estimate,
             "LESEN",
         )
 
-        persistence_stream_bytes = stream_ext_partclone_to_zstd(
-            compact_ext,
+        tar_stream_bytes = stream_tar_to_zstd(
+            mount_dir,
             persistence_zst,
-            compact_size_bytes,
+            estimate,
             p,
-            p2_info["fstype"],
         )
 
-        compact_ext.unlink(missing_ok=True)
+        run(["umount", str(mount_dir)], check=True)
 
         # ----------------------------------------------------
-        # 4/5 Metadaten / Prüfsummen
+        # 3/4 Metadaten / Prüfsummen
         # ----------------------------------------------------
         p = Progress(
             "Image prüfen und vorbereiten",
+            3,
             4,
-            5,
             3,
             "PRÜFEN",
         )
@@ -1137,7 +987,7 @@ def backup(args):
         checksums = {
             "mbr_bootcode.bin": hash_file(mbr_path),
             "root.fat.partclone.zst": hash_file(root_zst),
-            "persistence.ext.partclone.zst": hash_file(persistence_zst),
+            "persistence.tar.zst": hash_file(persistence_zst),
         }
 
         p.update(2, force=True)
@@ -1157,10 +1007,8 @@ def backup(args):
             },
             "partition2": {
                 **p2_info,
-                "backup": "persistence.ext.partclone.zst",
-                "backup_method": f"partclone-{p2_info['fstype']}",
-                "partclone_stream_bytes": persistence_stream_bytes,
-                "compact_size_bytes": compact_size_bytes,
+                "backup": "persistence.tar.zst",
+                "tar_stream_bytes": tar_stream_bytes,
             },
             "restore_max_total_mib": RESTORE_MAX_TOTAL_MIB,
             "restore_end_reserve_mib": RESTORE_END_RESERVE_MIB,
@@ -1176,7 +1024,7 @@ def backup(args):
         p.finish(3)
 
         # ----------------------------------------------------
-        # 5/5 Einzelne .uwuntu-Datei
+        # 4/4 Einzelne .uwuntu-Datei
         # ----------------------------------------------------
         expected = (
             meta_path.stat().st_size
@@ -1187,8 +1035,8 @@ def backup(args):
 
         p = Progress(
             "Einzelnes .uwuntu-Image erstellen",
-            5,
-            5,
+            4,
+            4,
             expected,
             "SCHREIBEN",
         )
@@ -1529,111 +1377,6 @@ def restore_persistence_member(
     progress.finish(done)
 
 
-def restore_persistence_partclone_member(
-    image,
-    metadata,
-    target,
-    progress,
-):
-    p2_meta = metadata["partition2"]
-    member_name = str(p2_meta.get("backup") or "")
-
-    if member_name != "persistence.ext.partclone.zst":
-        raise RuntimeError(
-            "Partclone-Persistenz enthält einen unerwarteten Dateinamen."
-        )
-
-    expected_stream = int(p2_meta.get("partclone_stream_bytes") or 0)
-    if expected_stream <= 0:
-        raise RuntimeError("Partclone-Persistenz-Streamgröße fehlt im Image.")
-
-    source_fs = str(p2_meta.get("fstype") or "").lower()
-    program = ext_partclone_program(source_fs)
-    if p2_meta.get("backup_method") != f"partclone-{source_fs}":
-        raise RuntimeError(
-            "Partclone-Persistenz enthält keine gültige Backup-Methode."
-        )
-
-    expected_hash = metadata["checksums"][member_name]
-    zstd, thread, result, log_handle = feed_member_to_zstd(
-        image,
-        member_name,
-        expected_hash,
-    )
-
-    partclone_log = LOG_FILE.open("a", encoding="utf-8")
-    partclone_proc = subprocess.Popen(
-        [program, "-r", "-s", "-", "-o", str(target), "-q"],
-        stdin=subprocess.PIPE,
-        stdout=partclone_log,
-        stderr=partclone_log,
-    )
-
-    done = 0
-    zstd_rc = None
-    partclone_rc = None
-    pipeline_error = None
-
-    try:
-        while True:
-            chunk = zstd.stdout.read(CHUNK)
-            if not chunk:
-                break
-
-            partclone_proc.stdin.write(chunk)
-            done += len(chunk)
-            progress.update(done)
-
-        partclone_proc.stdin.close()
-        zstd_rc = zstd.wait()
-        partclone_rc = partclone_proc.wait()
-        thread.join()
-    except Exception as exc:
-        pipeline_error = exc
-        try:
-            partclone_proc.stdin.close()
-        except Exception:
-            pass
-
-        for proc in (zstd, partclone_proc):
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
-
-        try:
-            thread.join(timeout=5)
-        except Exception:
-            pass
-    finally:
-        log_handle.close()
-        partclone_log.close()
-
-    if pipeline_error is not None:
-        if result.get("error"):
-            raise result["error"]
-        raise RuntimeError(
-            f"Partclone-Persistenz-Restore fehlgeschlagen: {pipeline_error}"
-        ) from pipeline_error
-    if zstd_rc != 0:
-        raise RuntimeError("Partclone-Persistenz konnte nicht dekomprimiert werden.")
-    if partclone_rc != 0:
-        raise RuntimeError(
-            "Partclone-Wiederherstellung der Persistenz ist fehlgeschlagen."
-        )
-
-    check_member_hash(result, expected_hash)
-
-    if done != expected_stream:
-        raise RuntimeError(
-            "Partclone-Persistenz-Stream hat eine unerwartete Größe "
-            f"({done} statt {expected_stream} Bytes)."
-        )
-
-    progress.finish(done)
-
-
 def restore(args):
     image = safe_image_path(args.image)
     disk = args.disk
@@ -1649,19 +1392,12 @@ def restore(args):
 
     p1_size = int(metadata["partition1"]["size_bytes"])
 
-    p2_meta = metadata["partition2"]
-
-    if metadata.get("format") == "uwuntu-image-v3":
-        p2_used = int(p2_meta.get("compact_size_bytes") or 0)
-        if p2_used <= 0:
-            raise RuntimeError("Kompakte Persistenzgröße fehlt im Image.")
-    else:
-        # V1/V2 verwenden weiterhin das bisherige tar-Format.
-        p2_used = int(
-            p2_meta.get("tar_stream_bytes")
-            or p2_meta.get("size_bytes")
-            or 0
-        )
+    # Tatsächlich gespeicherte Nutzdaten der ext4-Seite.
+    p2_used = int(
+        metadata["partition2"].get("tar_stream_bytes")
+        or metadata["partition2"].get("size_bytes")
+        or 0
+    )
 
     mount_dir = Path(tempfile.mkdtemp(prefix="uwuntu-persist-dst-", dir="/mnt"))
 
@@ -1690,7 +1426,7 @@ def restore(args):
         # ----------------------------------------------------
         # 2/4 Boot
         # ----------------------------------------------------
-        if metadata.get("format") in {"uwuntu-image-v2", "uwuntu-image-v3"}:
+        if metadata.get("format") == "uwuntu-image-v2":
             root_progress_total = int(
                 metadata["partition1"].get("partclone_stream_bytes") or 0
             )
@@ -1707,7 +1443,7 @@ def restore(args):
             "SCHREIBEN",
         )
 
-        if metadata.get("format") in {"uwuntu-image-v2", "uwuntu-image-v3"}:
+        if metadata.get("format") == "uwuntu-image-v2":
             restore_root_partclone_member(image, metadata, p1, p)
         else:
             restore_root_member(image, metadata, p1, p)
@@ -1724,76 +1460,49 @@ def restore(args):
                 f"{source_fs or 'unbekannt'}"
             )
 
-        if metadata.get("format") == "uwuntu-image-v3":
-            persistence_total = int(
-                p2_meta.get("partclone_stream_bytes") or 0
-            )
-            if persistence_total <= 0:
-                raise RuntimeError(
-                    "Partclone-Persistenz-Streamgröße fehlt im Image."
-                )
+        mkfs_program = (
+            "mkfs.ext3"
+            if source_fs == "ext3"
+            else "mkfs.ext4"
+        )
+        mkfs_args = [mkfs_program, "-F"]
 
-            p = Progress(
-                "Persistenz blockweise wiederherstellen",
-                3,
-                4,
-                persistence_total,
-                "SCHREIBEN",
-            )
+        label = str(p2_meta.get("label") or "")
+        uuid = str(p2_meta.get("uuid") or "")
 
-            restore_persistence_partclone_member(
-                image,
-                metadata,
-                p2,
-                p,
-            )
+        if label:
+            mkfs_args += ["-L", label]
 
-            run(["e2fsck", "-fy", p2])
-            run(["resize2fs", p2])
-        else:
-            mkfs_program = (
-                "mkfs.ext3"
-                if source_fs == "ext3"
-                else "mkfs.ext4"
-            )
-            mkfs_args = [mkfs_program, "-F"]
+        if re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{12}",
+            uuid,
+        ):
+            mkfs_args += ["-U", uuid]
 
-            label = str(p2_meta.get("label") or "")
-            uuid = str(p2_meta.get("uuid") or "")
+        mkfs_args.append(p2)
 
-            if label:
-                mkfs_args += ["-L", label]
+        run(mkfs_args)
+        run(["mount", p2, str(mount_dir)])
 
-            if re.fullmatch(
-                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{12}",
-                uuid,
-            ):
-                mkfs_args += ["-U", uuid]
+        p = Progress(
+            "Persistenz wiederherstellen",
+            3,
+            4,
+            int(p2_meta["tar_stream_bytes"]),
+            "SCHREIBEN",
+        )
 
-            mkfs_args.append(p2)
+        restore_persistence_member(
+            image,
+            metadata,
+            mount_dir,
+            p,
+        )
 
-            run(mkfs_args)
-            run(["mount", p2, str(mount_dir)])
-
-            p = Progress(
-                "Persistenz wiederherstellen",
-                3,
-                4,
-                int(p2_meta["tar_stream_bytes"]),
-                "SCHREIBEN",
-            )
-
-            restore_persistence_member(
-                image,
-                metadata,
-                mount_dir,
-                p,
-            )
-
-            run(["sync"], check=False)
-            run(["umount", str(mount_dir)])
+        run(["sync"], check=False)
+        run(["umount", str(mount_dir)])
 
         # ----------------------------------------------------
         # 4/4 Abschlussprüfung
@@ -1809,8 +1518,9 @@ def restore(args):
         run(["fsck.vfat", "-a", p1], check=False)
         p.update(1, force=True)
 
-        # Keine erzwungene zweite Vollprüfung: auf einem sauberen
-        # Dateisystem beendet sich e2fsck hier schnell.
+        # Die Persistenz wurde gerade neu angelegt, beschrieben, synchronisiert
+        # und sauber ausgehängt. Ohne -f überspringt e2fsck auf einem sauberen
+        # Dateisystem den teuren erzwungenen Vollscan.
         ext_check = run(["e2fsck", "-p", p2], check=False)
         if ext_check.returncode not in (0, 1):
             raise RuntimeError(
@@ -1964,13 +1674,7 @@ def ventoy_update(args):
 
     dat_size = target.stat().st_size
 
-    p2_meta = metadata["partition2"]
-    if metadata.get("format") == "uwuntu-image-v3":
-        required = int(p2_meta.get("compact_size_bytes") or 0)
-        if required <= 0:
-            raise RuntimeError("Kompakte Persistenzgröße fehlt im Image.")
-    else:
-        required = int(p2_meta["tar_stream_bytes"] * 1.05) + 256 * MIB
+    required = int(metadata["partition2"]["tar_stream_bytes"] * 1.05) + 256 * MIB
 
     if dat_size < required:
         fail(
@@ -1992,7 +1696,6 @@ def ventoy_update(args):
     mount_dir = Path(tempfile.mkdtemp(prefix="uwuntu-ventoy-", dir="/mnt"))
 
     rollback_needed = False
-    loopdev = ""
 
     try:
         # ----------------------------------------------------
@@ -2021,19 +1724,19 @@ def ventoy_update(args):
         except Exception:
             dat_uuid = ""
 
-        if metadata.get("format") != "uwuntu-image-v3":
-            mkfs = ["mkfs.ext4", "-F", "-L", "casper-rw"]
+        mkfs = ["mkfs.ext4", "-F", "-L", "casper-rw"]
 
-            if re.fullmatch(
-                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{12}",
-                dat_uuid,
-            ):
-                mkfs += ["-U", dat_uuid]
+        if re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{12}",
+            dat_uuid,
+        ):
+            mkfs += ["-U", dat_uuid]
 
-            mkfs.append(str(new_file))
-            run(mkfs)
+        mkfs.append(str(new_file))
+
+        run(mkfs)
 
         emit(
             "progress",
@@ -2051,82 +1754,27 @@ def ventoy_update(args):
         # ----------------------------------------------------
         # 2/3 Persistence hinein
         # ----------------------------------------------------
-        if metadata.get("format") == "uwuntu-image-v3":
-            persistence_total = int(
-                p2_meta.get("partclone_stream_bytes") or 0
-            )
-            if persistence_total <= 0:
-                raise RuntimeError(
-                    "Partclone-Persistenz-Streamgröße fehlt im Image."
-                )
+        loop_mount(new_file, mount_dir)
 
-            loopdev = output(
-                ["losetup", "--find", "--show", str(new_file)],
-                timeout=10,
-            )
+        p = Progress(
+            "Uwuntu-Inhalt in Ventoy übertragen",
+            2,
+            3,
+            int(metadata["partition2"]["tar_stream_bytes"]),
+            "SCHREIBEN",
+        )
 
-            p = Progress(
-                "Uwuntu-Inhalt blockweise in Ventoy übertragen",
-                2,
-                3,
-                persistence_total,
-                "SCHREIBEN",
-            )
+        restore_persistence_member(
+            image,
+            metadata,
+            mount_dir,
+            p,
+        )
 
-            restore_persistence_partclone_member(
-                image,
-                metadata,
-                loopdev,
-                p,
-            )
+        run(["sync"], check=False)
+        run(["umount", str(mount_dir)])
 
-            run(["e2fsck", "-fy", loopdev])
-            run(["resize2fs", loopdev])
-
-            if re.fullmatch(
-                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-                r"[0-9a-fA-F]{12}",
-                dat_uuid,
-            ):
-                run(["tune2fs", "-U", dat_uuid, loopdev])
-
-            run(["e2label", loopdev, "casper-rw"])
-            ext_check = run(["e2fsck", "-p", loopdev], check=False)
-            if ext_check.returncode not in (0, 1):
-                raise RuntimeError(
-                    "Neue Uwuntu.dat konnte nicht sauber geprüft werden."
-                )
-
-            run(["sync"], check=False)
-            run(["losetup", "-d", loopdev], check=False)
-            loopdev = ""
-        else:
-            loop_mount(new_file, mount_dir)
-
-            p = Progress(
-                "Uwuntu-Inhalt in Ventoy übertragen",
-                2,
-                3,
-                int(p2_meta["tar_stream_bytes"]),
-                "SCHREIBEN",
-            )
-
-            restore_persistence_member(
-                image,
-                metadata,
-                mount_dir,
-                p,
-            )
-
-            run(["sync"], check=False)
-            run(["umount", str(mount_dir)])
-
-        ext_check = run(["e2fsck", "-p", str(new_file)], check=False)
-        if ext_check.returncode not in (0, 1):
-            raise RuntimeError(
-                "Neue Uwuntu.dat konnte nicht sauber geprüft werden."
-            )
+        run(["e2fsck", "-fy", str(new_file)])
 
         # ----------------------------------------------------
         # 3/3 Prüfen + atomar ersetzen
@@ -2210,12 +1858,6 @@ def ventoy_update(args):
         new_file.unlink(missing_ok=True)
         fail(f"Ventoy-Update fehlgeschlagen:\n{exc}")
     finally:
-        if loopdev:
-            try:
-                run(["losetup", "-d", loopdev], check=False)
-            except Exception:
-                pass
-
         try:
             if subprocess.run(
                 ["mountpoint", "-q", str(mount_dir)]
@@ -2650,7 +2292,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.16"
+VERSION = "1.15"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -3060,7 +2702,6 @@ def read_image_metadata(path):
         if data.get("format") not in {
             "uwuntu-image-v1",
             "uwuntu-image-v2",
-            "uwuntu-image-v3",
         }:
             return None
 
@@ -3112,7 +2753,7 @@ def image_details(item):
         f"({source.get('path', '–')})\n"
         f"Quellgröße: {fmt_bytes(source.get('size_bytes'))}\n"
         f"Imagegröße: {fmt_bytes(item['size'])}\n"
-        f"Persistenzdaten: {fmt_bytes(p2.get('partclone_stream_bytes') or p2.get('tar_stream_bytes'))}\n"
+        f"Persistenzdaten: {fmt_bytes(p2.get('tar_stream_bytes'))}\n"
         f"Datei: {item['path'].name}"
     )
 
