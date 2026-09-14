@@ -1,4 +1,4 @@
-name: IM1.16 Rawfile Restore Diagnose 2
+name: IM1.16 Persistenz-Partclone Diagnose
 
 on:
   push:
@@ -10,30 +10,84 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Restore mit -W und -o testen
+      - name: Minimiertes ext4-Partclone-Image testen
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq partclone e2fsprogs
-          rm -rf /tmp/im116-raw2
-          mkdir -p /tmp/im116-raw2
-          cd /tmp/im116-raw2
+          sudo apt-get install -y -qq partclone zstd e2fsprogs util-linux
+
+          rm -rf /tmp/im116-persist
+          mkdir -p /tmp/im116-persist
+          cd /tmp/im116-persist
+
           dd if=/dev/urandom of=payload.bin bs=1M count=8 status=none
-          printf 'Uwuntu raw restore\n' > marker.txt
-          truncate -s 512M source.ext4
+          printf 'Uwuntu persistence test\n' > marker.txt
+
+          truncate -s 768M source.ext4
           mkfs.ext4 -F -L casper-rw source.ext4 >/dev/null 2>&1
           debugfs -w -R 'mkdir /data' source.ext4 >/dev/null 2>&1
           debugfs -w -R 'write payload.bin /data/payload.bin' source.ext4 >/dev/null 2>&1
           debugfs -w -R 'write marker.txt /data/marker.txt' source.ext4 >/dev/null 2>&1
           e2fsck -fy source.ext4 >/dev/null
-          partclone.ext4 -c -s source.ext4 -o clone.pcl -q 2>save.log
-          partclone.ext4 -r -s clone.pcl -W -o target.ext4 -q 2>restore.log
-          cat restore.log || true
-          ls -lh target.ext4
-          e2fsck -fy target.ext4 >/dev/null
-          debugfs -R 'dump -p /data/payload.bin restored.bin' target.ext4 >/dev/null 2>&1
-          debugfs -R 'dump -p /data/marker.txt restored-marker.txt' target.ext4 >/dev/null 2>&1
+
+          # Quelle unverändert lassen: zunächst eine sparse Raw-Kopie erzeugen.
+          e2image -rap source.ext4 sparse.ext4 >/dev/null 2>&1
+          e2fsck -fy sparse.ext4 >/dev/null
+
+          # Kopie auf das kleinstmögliche ext4-Dateisystem verkleinern.
+          resize2fs -M sparse.ext4 >/dev/null 2>&1
+          e2fsck -fy sparse.ext4 >/dev/null
+
+          block_count=$(dumpe2fs -h sparse.ext4 2>/dev/null | awk -F: '/^Block count:/{gsub(/[[:space:]]/,"",$2); print $2}')
+          block_size=$(dumpe2fs -h sparse.ext4 2>/dev/null | awk -F: '/^Block size:/{gsub(/[[:space:]]/,"",$2); print $2}')
+          test -n "$block_count"
+          test -n "$block_size"
+          min_bytes=$((block_count * block_size))
+          truncate -s "$min_bytes" sparse.ext4
+          e2fsck -fy sparse.ext4 >/dev/null
+
+          test "$min_bytes" -lt $((768 * 1024 * 1024))
+
+          # Minimierte Kopie als Partclone+Zstd sichern.
+          partclone.ext4 -c -s sparse.ext4 -o - -q -L save.log | zstd -T0 -3 -q -o persistence.ext4.partclone.zst
+          test -s persistence.ext4.partclone.zst
+
+          # Ventoy-Fall: Partclone in eine normale Raw-Datei restaurieren.
+          zstd -q -dc persistence.ext4.partclone.zst | partclone.ext4 -r -s - -W -o restored.ext4 -q -L restore-file.log
+          test -f restored.ext4
+          e2fsck -fy restored.ext4 >/dev/null
+          debugfs -R 'dump -p /data/payload.bin restored.bin' restored.ext4 >/dev/null 2>&1
+          debugfs -R 'dump -p /data/marker.txt restored-marker.txt' restored.ext4 >/dev/null 2>&1
           cmp payload.bin restored.bin
           cmp marker.txt restored-marker.txt
-          test "$(blkid -p -s LABEL -o value target.ext4)" = 'casper-rw'
+          test "$(blkid -p -s LABEL -o value restored.ext4)" = 'casper-rw'
+
+          # Raw-Datei auf eine größere Ventoy-DAT-Größe wachsen lassen.
+          truncate -s 900M restored.ext4
+          e2fsck -fy restored.ext4 >/dev/null
+          resize2fs restored.ext4 >/dev/null 2>&1
+          e2fsck -fy restored.ext4 >/dev/null
+          debugfs -R 'dump -p /data/payload.bin restored-grown.bin' restored.ext4 >/dev/null 2>&1
+          cmp payload.bin restored-grown.bin
+
+          # USB-Stick-Fall möglichst realistisch über ein Loop-Blockgerät testen.
+          truncate -s 1024M target.img
+          loopdev=$(sudo losetup --find --show target.img)
+          cleanup() {
+            sudo losetup -d "$loopdev" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          zstd -q -dc persistence.ext4.partclone.zst | sudo partclone.ext4 -r -s - -o "$loopdev" -q -L /tmp/im116-loop-partclone.log
+          sudo e2fsck -fy "$loopdev" >/dev/null
+          sudo resize2fs "$loopdev" >/dev/null 2>&1
+          sudo e2fsck -fy "$loopdev" >/dev/null
+          sudo debugfs -R 'dump -p /data/payload.bin /tmp/restored-loop.bin' "$loopdev" >/dev/null 2>&1
+          cmp payload.bin /tmp/restored-loop.bin
+          test "$(sudo blkid -p -s LABEL -o value "$loopdev")" = 'casper-rw'
+
+          echo "SOURCE_BYTES=$(stat -c %s source.ext4)"
+          echo "MIN_FS_BYTES=$min_bytes"
+          echo "PARTCLONE_ZST_BYTES=$(stat -c %s persistence.ext4.partclone.zst)"
+          echo "IM1.16 persistence pipeline OK"
