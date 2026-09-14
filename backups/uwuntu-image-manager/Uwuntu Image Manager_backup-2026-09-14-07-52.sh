@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.15"
+APP_VERSION="1.14"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.15"
+APP_VERSION = "1.14"
 FORMAT_VERSION = "uwuntu-image-v2"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", FORMAT_VERSION}
 
@@ -2292,7 +2292,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.15"
+VERSION = "1.14"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -2370,24 +2370,6 @@ def fmt_eta(seconds):
 
     hours, minutes = divmod(minutes, 60)
     return f"{hours} h {minutes:02d} min"
-
-
-def fmt_duration(seconds):
-    try:
-        seconds = max(0, int(round(float(seconds))))
-    except Exception:
-        return "–"
-
-    if seconds < 60:
-        return f"{seconds} s"
-
-    minutes, sec = divmod(seconds, 60)
-
-    if minutes < 60:
-        return f"{minutes} min {sec:02d} s"
-
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} h {minutes:02d} min {sec:02d} s"
 
 
 def parse_created(value):
@@ -3537,7 +3519,6 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.run_backend(
                         "UWUNTU SICHERN",
                         ["backup", "--disk", disk["path"]],
-                        show_total_time=True,
                     ),
                 ),
             )
@@ -3655,7 +3636,6 @@ class MainWindow(Gtk.ApplicationWindow):
                             "--image",
                             str(image["path"]),
                         ],
-                        show_total_time=True,
                     ),
                 ),
             )
@@ -3798,7 +3778,6 @@ class MainWindow(Gtk.ApplicationWindow):
         title,
         args,
         restart_on_success=False,
-        show_total_time=False,
     ):
         progress = ProgressWindow(self, title)
 
@@ -3856,10 +3835,6 @@ class MainWindow(Gtk.ApplicationWindow):
                 final_error = str(exc)
 
             def finish_ui():
-                elapsed_seconds = max(
-                    0.0,
-                    time.monotonic() - progress.operation_started,
-                )
                 progress.close()
 
                 if final_error:
@@ -3891,20 +3866,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     if app:
                         app.quit()
                 else:
-                    detail = (
-                        "Der Datenträger kann nach erfolgreichem "
-                        "Backup/Restore sicher entfernt werden."
-                    )
-
-                    if show_total_time:
-                        detail = (
-                            f"Gesamtdauer: {fmt_duration(elapsed_seconds)}\n\n"
-                            + detail
-                        )
-
                     self.info(
                         final_success or "Vorgang abgeschlossen.",
-                        detail,
+                        "Der Datenträger kann nach erfolgreichem "
+                        "Backup/Restore sicher entfernt werden.",
                     )
 
                 return False
