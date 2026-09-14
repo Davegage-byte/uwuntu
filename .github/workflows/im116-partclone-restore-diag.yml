@@ -1,0 +1,59 @@
+name: IM1.16 Partclone Restore Diagnose
+
+on:
+  push:
+    branches:
+      - feature/im116-fast-persistence-v2
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Direkten Datei-Restore testen
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq partclone zstd e2fsprogs
+          rm -rf /tmp/im116-restore-diag
+          mkdir -p /tmp/im116-restore-diag
+          cd /tmp/im116-restore-diag
+          dd if=/dev/urandom of=payload.bin bs=1M count=24 status=none
+          printf 'Uwuntu restore diag\n' > marker.txt
+          truncate -s 1024M source.ext4
+          mkfs.ext4 -F -L casper-rw source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'mkdir /data' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write payload.bin /data/payload.bin' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write marker.txt /data/marker.txt' source.ext4 >/dev/null 2>&1
+          e2fsck -fy source.ext4 >/dev/null
+          e2image -rap source.ext4 compact.ext4 >/dev/null 2>&1
+          e2fsck -fy compact.ext4 >/dev/null
+          resize2fs -M compact.ext4 >/dev/null
+          bc=$(LC_ALL=C dumpe2fs -h compact.ext4 2>/dev/null | awk -F: '/^Block count:/{gsub(/ /,"",$2);print $2}')
+          bs=$(LC_ALL=C dumpe2fs -h compact.ext4 2>/dev/null | awk -F: '/^Block size:/{gsub(/ /,"",$2);print $2}')
+          min_bytes=$((bc * bs))
+          compact_bytes=$(( ((min_bytes + 256*1024*1024 + 1024*1024 - 1) / (1024*1024)) * (1024*1024) ))
+          truncate -s "$compact_bytes" compact.ext4
+          resize2fs compact.ext4 >/dev/null
+          e2fsck -fy compact.ext4 >/dev/null
+          partclone.ext4 -c -s compact.ext4 -o - -q 2>save.log | zstd -T0 -3 -q -o persistence.zst
+          truncate -s 1536M target.ext4
+          set +e
+          zstd -q -dc persistence.zst | partclone.ext4 -r -s - -o target.ext4 -q 2>restore.log
+          rc=$?
+          set -e
+          echo "restore_rc=$rc"
+          cat restore.log || true
+          ls -lh target.ext4
+          test "$rc" -eq 0
+          truncate -s 1536M target.ext4
+          e2fsck -fy target.ext4 >/dev/null
+          resize2fs target.ext4 >/dev/null
+          e2fsck -p target.ext4 >/dev/null || test $? -eq 1
+          debugfs -R 'dump -p /data/payload.bin restored.bin' target.ext4 >/dev/null 2>&1
+          debugfs -R 'dump -p /data/marker.txt restored-marker.txt' target.ext4 >/dev/null 2>&1
+          cmp payload.bin restored.bin
+          cmp marker.txt restored-marker.txt
+          test "$(blkid -p -s LABEL -o value target.ext4)" = 'casper-rw'
+          test "$(stat -c %s target.ext4)" -eq $((1536*1024*1024))
