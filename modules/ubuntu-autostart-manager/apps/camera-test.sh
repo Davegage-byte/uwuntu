@@ -66,7 +66,7 @@ uwuntu_set_dock_autohide() {
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-camera-test"
-PY_FILE="$CACHE_DIR/camera_test_v1_22.py"
+PY_FILE="$CACHE_DIR/camera_test_v1_23.py"
 LOG_FILE="$CACHE_DIR/camera_test.log"
 STATE_FILE="$HOME/.local/state/uwuntu/camera_test_status.json"
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -75,7 +75,7 @@ rm -f "$STATE_FILE" 2>/dev/null || true
 {
     echo
     echo "============================================================"
-    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.22 Start"
+    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.23 Start"
 } >> "$LOG_FILE" 2>/dev/null || true
 
 # XWayland gibt dem Kamera-Fenster eine klassische WM_CLASS. Zusammen mit
@@ -160,7 +160,7 @@ from gi.repository import Gtk, Gdk, Gst, GLib, Gio
 
 APP_ID = "com.david.UwuntuCameraTest"
 APP_NAME = "Uwuntu Kamera Test"
-VERSION = "1.22"
+VERSION = "1.23"
 ERROR_TEXT = "KEIN KAMERABILD ERKANNT"
 IPU7_LIMITED_TEXT = "IPU7 KAMERA – LINUX NICHT TESTBAR"
 
@@ -601,6 +601,18 @@ window { background: #000; }
             return MODES_1080_FIRST
         return MODES_720_FIRST
 
+    def update_mode_title(self, label):
+        if "1280x720" in label:
+            mode_text = "1280×720 · 30 FPS"
+        elif "1920x1080" in label:
+            mode_text = "1920×1080 · 30 FPS"
+        else:
+            mode_text = str(label)
+        title = f"{APP_NAME} v{VERSION} · {mode_text}"
+        self.set_title(title)
+        self.header_bar.set_title(title)
+        return False
+
     def desired_preview_highres(self):
         if self.window_maximized:
             return True
@@ -762,6 +774,7 @@ window { background: #000; }
 
         device = self.current_device()
         label, caps = modes[self.mode_index]
+        self.update_mode_title(label)
         print(
             f"Kamera v{VERSION} · teste {device}: {label} · "
             f"Backend={os.environ.get('GDK_BACKEND', 'auto')}",
