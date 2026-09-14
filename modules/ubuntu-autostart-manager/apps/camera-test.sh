@@ -66,7 +66,7 @@ uwuntu_set_dock_autohide() {
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-camera-test"
-PY_FILE="$CACHE_DIR/camera_test_v1_20.py"
+PY_FILE="$CACHE_DIR/camera_test_v1_21.py"
 LOG_FILE="$CACHE_DIR/camera_test.log"
 STATE_FILE="$HOME/.local/state/uwuntu/camera_test_status.json"
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -75,7 +75,7 @@ rm -f "$STATE_FILE" 2>/dev/null || true
 {
     echo
     echo "============================================================"
-    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.20 Start"
+    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.21 Start"
 } >> "$LOG_FILE" 2>/dev/null || true
 
 # XWayland gibt dem Kamera-Fenster eine klassische WM_CLASS. Zusammen mit
@@ -160,7 +160,7 @@ from gi.repository import Gtk, Gdk, Gst, GLib, Gio
 
 APP_ID = "com.david.UwuntuCameraTest"
 APP_NAME = "Uwuntu Kamera Test"
-VERSION = "1.20"
+VERSION = "1.21"
 ERROR_TEXT = "KEIN KAMERABILD ERKANNT"
 IPU7_LIMITED_TEXT = "IPU7 KAMERA – LINUX NICHT TESTBAR"
 
@@ -610,8 +610,10 @@ window { background: #000; }
               'identity name=probe signal-handoffs=true ! '
               'gtksink name=sink sync=false '
               't. ! queue leaky=downstream max-size-buffers=1 ! '
-              'videoconvert ! videoscale ! videorate ! '
-              'video/x-raw,format=GRAY8,width=320,height=180,framerate=1/1 ! '
+              'videorate drop-only=true ! '
+              'video/x-raw,framerate=1/1 ! '
+              'videoconvert ! videoscale ! '
+              'video/x-raw,format=GRAY8,width=320,height=180 ! '
               'appsink name=facesink emit-signals=true drop=true '
               'max-buffers=1 sync=false'
         )
