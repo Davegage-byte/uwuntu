@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.14"
+APP_VERSION="1.13"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,9 +94,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.14"
-FORMAT_VERSION = "uwuntu-image-v2"
-SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", FORMAT_VERSION}
+APP_VERSION = "1.13"
+FORMAT_VERSION = "uwuntu-image-v1"
 
 UPDATE_API_URL = (
     "https://api.github.com/repos/"
@@ -517,7 +516,7 @@ def read_metadata(image):
     except Exception as exc:
         fail(f"Image-Metadaten konnten nicht gelesen werden:\n{exc}")
 
-    if data.get("format") not in SUPPORTED_FORMAT_VERSIONS:
+    if data.get("format") != FORMAT_VERSION:
         fail(
             "Dieses Image hat ein nicht unterstütztes Format.\n"
             f"Gefunden: {data.get('format', 'unbekannt')}"
@@ -588,89 +587,6 @@ def stream_file_to_zstd(source, target, total, progress):
     return done
 
 
-
-def stream_partclone_to_zstd(source, target, total, progress):
-    log_handle = LOG_FILE.open("a", encoding="utf-8")
-    partclone_proc = subprocess.Popen(
-        [
-            "partclone.vfat",
-            "-c",
-            "-s",
-            str(source),
-            "-o",
-            "-",
-            "-q",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=log_handle,
-    )
-    zstd_proc = subprocess.Popen(
-        ["zstd", "-T0", "-3", "-q", "-o", str(target)],
-        stdin=subprocess.PIPE,
-        stdout=log_handle,
-        stderr=log_handle,
-    )
-
-    done = 0
-    partclone_rc = None
-    zstd_rc = None
-    pipeline_error = None
-
-    try:
-        while True:
-            chunk = partclone_proc.stdout.read(CHUNK)
-            if not chunk:
-                break
-
-            zstd_proc.stdin.write(chunk)
-            done += len(chunk)
-            progress.update(done)
-
-        zstd_proc.stdin.close()
-        partclone_rc = partclone_proc.wait()
-        zstd_rc = zstd_proc.wait()
-    except Exception as exc:
-        pipeline_error = exc
-        try:
-            zstd_proc.stdin.close()
-        except Exception:
-            pass
-
-        for proc in (partclone_proc, zstd_proc):
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
-
-        for proc in (partclone_proc, zstd_proc):
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-    finally:
-        try:
-            partclone_proc.stdout.close()
-        except Exception:
-            pass
-        log_handle.close()
-
-    if pipeline_error is not None:
-        raise RuntimeError(
-            f"Partclone-Backup-Pipeline fehlgeschlagen: {pipeline_error}"
-        ) from pipeline_error
-    if partclone_rc != 0:
-        raise RuntimeError("Partclone-Sicherung der Boot-Partition fehlgeschlagen.")
-    if zstd_rc != 0:
-        raise RuntimeError("zstd-Komprimierung der Boot-Partition fehlgeschlagen.")
-
-    progress.finish(done)
-    return done
-
-
 def stream_tar_to_zstd(mountpoint, target, estimate, progress):
     log_handle = LOG_FILE.open("a", encoding="utf-8")
 
@@ -729,7 +645,7 @@ def package_image(temp_dir, final_path, progress):
     files = [
         "metadata.json",
         "mbr_bootcode.bin",
-        "root.fat.partclone.zst",
+        "root.fat.raw.zst",
         "persistence.tar.zst",
     ]
 
@@ -894,7 +810,7 @@ def backup(args):
         # ----------------------------------------------------
         # 1/4 Boot/FAT
         # ----------------------------------------------------
-        root_zst = temp_dir / "root.fat.partclone.zst"
+        root_zst = temp_dir / "root.fat.raw.zst"
 
         p = Progress(
             "Boot-Partition sichern",
@@ -904,7 +820,7 @@ def backup(args):
             "LESEN",
         )
 
-        root_stream_bytes = stream_partclone_to_zstd(
+        root_stream_bytes = stream_file_to_zstd(
             p1,
             root_zst,
             p1_info["size_bytes"],
@@ -986,7 +902,7 @@ def backup(args):
 
         checksums = {
             "mbr_bootcode.bin": hash_file(mbr_path),
-            "root.fat.partclone.zst": hash_file(root_zst),
+            "root.fat.raw.zst": hash_file(root_zst),
             "persistence.tar.zst": hash_file(persistence_zst),
         }
 
@@ -1001,9 +917,8 @@ def backup(args):
             "source": source,
             "partition1": {
                 **p1_info,
-                "backup": "root.fat.partclone.zst",
-                "backup_method": "partclone-vfat",
-                "partclone_stream_bytes": root_stream_bytes,
+                "backup": "root.fat.raw.zst",
+                "stream_bytes": root_stream_bytes,
             },
             "partition2": {
                 **p2_info,
@@ -1211,111 +1126,6 @@ def restore_root_member(image, metadata, target, progress):
     progress.finish(done)
 
 
-
-def restore_root_partclone_member(image, metadata, target, progress):
-    p1_meta = metadata["partition1"]
-    member_name = str(p1_meta.get("backup") or "")
-
-    if member_name != "root.fat.partclone.zst":
-        raise RuntimeError(
-            "Partclone-Boot-Image enthält einen unerwarteten Dateinamen."
-        )
-
-    if p1_meta.get("backup_method") != "partclone-vfat":
-        raise RuntimeError(
-            "Partclone-Boot-Image enthält keine gültige Backup-Methode."
-        )
-
-    expected_stream = int(p1_meta.get("partclone_stream_bytes") or 0)
-    if expected_stream <= 0:
-        raise RuntimeError("Partclone-Streamgröße fehlt im Image.")
-
-    expected_hash = metadata["checksums"][member_name]
-    zstd, thread, result, log_handle = feed_member_to_zstd(
-        image,
-        member_name,
-        expected_hash,
-    )
-
-    partclone_log = LOG_FILE.open("a", encoding="utf-8")
-    partclone_proc = subprocess.Popen(
-        [
-            "partclone.vfat",
-            "-r",
-            "-s",
-            "-",
-            "-o",
-            str(target),
-            "-q",
-        ],
-        stdin=subprocess.PIPE,
-        stdout=partclone_log,
-        stderr=partclone_log,
-    )
-
-    done = 0
-    zstd_rc = None
-    partclone_rc = None
-    pipeline_error = None
-
-    try:
-        while True:
-            chunk = zstd.stdout.read(CHUNK)
-            if not chunk:
-                break
-
-            partclone_proc.stdin.write(chunk)
-            done += len(chunk)
-            progress.update(done)
-
-        partclone_proc.stdin.close()
-        zstd_rc = zstd.wait()
-        partclone_rc = partclone_proc.wait()
-        thread.join()
-    except Exception as exc:
-        pipeline_error = exc
-        try:
-            partclone_proc.stdin.close()
-        except Exception:
-            pass
-
-        for proc in (zstd, partclone_proc):
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-            except Exception:
-                pass
-
-        try:
-            thread.join(timeout=5)
-        except Exception:
-            pass
-    finally:
-        log_handle.close()
-        partclone_log.close()
-
-    if pipeline_error is not None:
-        if result.get("error"):
-            raise result["error"]
-        raise RuntimeError(
-            f"Partclone-Restore-Pipeline fehlgeschlagen: {pipeline_error}"
-        ) from pipeline_error
-    if zstd_rc != 0:
-        raise RuntimeError("Partclone-Boot-Image konnte nicht dekomprimiert werden.")
-    if partclone_rc != 0:
-        raise RuntimeError("Partclone-Wiederherstellung der Boot-Partition fehlgeschlagen.")
-
-    check_member_hash(result, expected_hash)
-
-    if done != expected_stream:
-        raise RuntimeError(
-            "Partclone-Boot-Stream hat eine unerwartete Größe "
-            f"({done} statt {expected_stream} Bytes)."
-        )
-
-    progress.finish(done)
-
-
 def restore_persistence_member(
     image,
     metadata,
@@ -1426,27 +1236,15 @@ def restore(args):
         # ----------------------------------------------------
         # 2/4 Boot
         # ----------------------------------------------------
-        if metadata.get("format") == "uwuntu-image-v2":
-            root_progress_total = int(
-                metadata["partition1"].get("partclone_stream_bytes") or 0
-            )
-            if root_progress_total <= 0:
-                raise RuntimeError("Partclone-Streamgröße fehlt im Image.")
-        else:
-            root_progress_total = p1_size
-
         p = Progress(
             "Boot-Partition wiederherstellen",
             2,
             4,
-            root_progress_total,
+            p1_size,
             "SCHREIBEN",
         )
 
-        if metadata.get("format") == "uwuntu-image-v2":
-            restore_root_partclone_member(image, metadata, p1, p)
-        else:
-            restore_root_member(image, metadata, p1, p)
+        restore_root_member(image, metadata, p1, p)
 
         # ----------------------------------------------------
         # 3/4 Persistenz
@@ -2292,7 +2090,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.14"
+VERSION = "1.13"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -2681,10 +2479,7 @@ def read_image_metadata(path):
 
             data = json.loads(handle.read().decode("utf-8"))
 
-        if data.get("format") not in {
-            "uwuntu-image-v1",
-            "uwuntu-image-v2",
-        }:
+        if data.get("format") != "uwuntu-image-v1":
             return None
 
         return data
