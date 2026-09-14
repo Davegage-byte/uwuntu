@@ -67,7 +67,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_23.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_24.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -78,11 +78,11 @@ need_install=0
 python3 - <<'PY' >/dev/null 2>&1 || need_install=1
 import numpy
 import sounddevice
-from PIL import Image, ImageDraw
 import gi
 gi.require_version("Gtk", "4.0")
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+gi.require_foreign("cairo")
+import cairo
+from gi.repository import Gtk, Gdk, GLib
 PY
 
 if [ "$need_install" -eq 1 ]; then
@@ -101,10 +101,10 @@ if [ "$need_install" -eq 1 ]; then
         python3 \
         python3-numpy \
         python3-sounddevice \
-        python3-pil \
         python3-gi \
+        python3-cairo \
+        python3-gi-cairo \
         gir1.2-gtk-4.0 \
-        gir1.2-gdkpixbuf-2.0 \
         libportaudio2 || exit 1
 fi
 
@@ -140,15 +140,15 @@ from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
-from PIL import Image, ImageDraw
 
 import gi
 gi.require_version("Gtk", "4.0")
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Gio
+gi.require_foreign("cairo")
+import cairo
+from gi.repository import Gtk, GLib, Gdk, Gio
 
 
-VERSION = "v1.23"
+VERSION = "v1.24"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
@@ -177,6 +177,7 @@ SAMPLE_RATE = 48000
 INPUT_BLOCK = 512
 DISPLAY_SAMPLES = 2048
 UI_REFRESH_MS = 16
+ANALYSIS_REFRESH_SECONDS = 0.04  # 25 Hz; Waveform bleibt ~60 FPS
 
 NO_SIGNAL_DBFS = -55.0
 GOOD_SIGNAL_DBFS = -32.0
@@ -539,6 +540,12 @@ class AudioAnalyzer:
         self._noise_rms = 0.002
         self._noise_initialized = False
 
+        # Peak-Frequenz ist nur Status-/Diagnoseinformation und muss nicht
+        # mit jedem 512-Sample-Audioblock neu berechnet werden. Cache hält
+        # Fenster/Frequenzachse dauerhaft; die Waveform selbst bleibt 60 FPS.
+        self._next_fft_at = 0.0
+        self._fft_cache = {}
+
     def callback(self, indata, frames, time_info, status):
         try:
             samples = np.asarray(indata[:, 0], dtype=np.float32).copy()
@@ -778,6 +785,37 @@ class AudioAnalyzer:
             for freq, _duration in TONE_NOTES
         }
 
+    def update_peak_frequency(self, filtered, now):
+        """Peak-Frequenz CPU-schonend mit gecachter FFT-Geometrie aktualisieren."""
+        if now < self._next_fft_at:
+            return
+        self._next_fft_at = now + ANALYSIS_REFRESH_SECONDS
+
+        fft_n = len(filtered)
+        cached = self._fft_cache.get(fft_n)
+        if cached is None:
+            window = np.hanning(fft_n).astype(np.float32)
+            freqs = np.fft.rfftfreq(fft_n, 1.0 / SAMPLE_RATE)
+            valid_indices = np.flatnonzero(
+                (freqs >= 80.0) & (freqs <= 12000.0)
+            )
+            cached = (window, freqs, valid_indices)
+            self._fft_cache.clear()
+            self._fft_cache[fft_n] = cached
+
+        window, freqs, valid_indices = cached
+        if not len(valid_indices):
+            self.peak_freq = 0.0
+            return
+
+        spectrum = np.abs(np.fft.rfft(filtered * window))
+        amplitudes = spectrum[valid_indices]
+        if len(amplitudes) and float(np.max(amplitudes)) > 1e-12:
+            peak_index = valid_indices[int(np.argmax(amplitudes))]
+            self.peak_freq = float(freqs[peak_index])
+        else:
+            self.peak_freq = 0.0
+
     def worker(self):
         while self.running:
             try:
@@ -813,21 +851,7 @@ class AudioAnalyzer:
                 self._display_roll.copy()
             )
 
-            fft_n = len(filtered)
-            window = np.hanning(fft_n)
-            spectrum = np.abs(np.fft.rfft(filtered * window))
-            freqs = np.fft.rfftfreq(fft_n, 1.0 / SAMPLE_RATE)
-
-            valid = (freqs >= 80.0) & (freqs <= 12000.0)
-
-            if np.any(valid):
-                vf = freqs[valid]
-                va = spectrum[valid]
-
-                if len(va) and float(np.max(va)) > 1e-12:
-                    self.peak_freq = float(vf[int(np.argmax(va))])
-                else:
-                    self.peak_freq = 0.0
+            self.update_peak_frequency(filtered, now)
 
             if stable_db < NO_SIGNAL_DBFS:
                 self.status = "KEIN SIGNAL"
@@ -845,83 +869,120 @@ class AudioAnalyzer:
 
 
 class WaveRenderer:
-    def render(self, waveform, color_name):
-        img = Image.new("RGBA", (CANVAS_W, CANVAS_H), COL_BG)
-        draw = ImageDraw.Draw(img)
+    """Direkter Cairo-Renderer ohne PIL/Pixbuf/Texture-Kopie pro Frame."""
 
-        left = 30
-        right = 30
-        top = 22
-        bottom = 22
+    def __init__(self):
+        self._geometry_key = None
+        self._indices = np.zeros(2, dtype=np.int32)
+        self._x_positions = np.zeros(2, dtype=np.float32)
+        self._geometry = None
 
-        x0 = left
-        y0 = top
-        x1 = CANVAS_W - right
-        y1 = CANVAS_H - bottom
-
-        width = x1 - x0
-        height = y1 - y0
-        center_y = y0 + height // 2
-
-        for i in range(1, 10):
-            x = int(x0 + width * i / 10)
-            draw.line((x, y0, x, y1), fill=COL_GRID, width=1)
-
-        for frac in (0.25, 0.75):
-            y = int(y0 + height * frac)
-            draw.line((x0, y, x1, y), fill=COL_GRID, width=1)
-
-        draw.line(
-            (x0, center_y, x1, center_y),
-            fill=COL_CENTER,
-            width=2
+    @staticmethod
+    def set_color(cr, rgba):
+        cr.set_source_rgb(
+            rgba[0] / 255.0,
+            rgba[1] / 255.0,
+            rgba[2] / 255.0,
         )
 
-        if color_name == "green":
-            color = COL_GREEN
-        elif color_name == "blue":
-            color = COL_BLUE
-        elif color_name == "orange":
-            color = COL_ORANGE
-        else:
-            color = COL_RED
+    def geometry(self, width, height, waveform_length):
+        key = (int(width), int(height), int(waveform_length))
+        if key == self._geometry_key and self._geometry is not None:
+            return self._geometry
+
+        # Proportionen des bisherigen 1200x430-PIL-Canvas beibehalten.
+        x0 = width * 30.0 / CANVAS_W
+        x1 = width - width * 30.0 / CANVAS_W
+        y0 = height * 22.0 / CANVAS_H
+        y1 = height - height * 22.0 / CANVAS_H
+        plot_width = max(2.0, x1 - x0)
+        plot_height = max(2.0, y1 - y0)
+        center_y = y0 + plot_height / 2.0
+
+        # Etwa ein Stützpunkt je 1,5 Pixel ist optisch glatt, spart aber
+        # gegenüber der alten Ein-Punkt-pro-Pixel-PIL-Linie Zeichenarbeit.
+        point_count = min(
+            max(2, int(waveform_length)),
+            max(2, int(plot_width / 1.5)),
+        )
+        self._indices = np.linspace(
+            0,
+            max(1, waveform_length - 1),
+            point_count,
+            dtype=np.int32,
+        )
+        self._x_positions = np.linspace(
+            x0,
+            x1,
+            point_count,
+            dtype=np.float32,
+        )
+        self._geometry_key = key
+        self._geometry = (
+            x0, y0, x1, y1, plot_width, plot_height, center_y
+        )
+        return self._geometry
+
+    def draw(self, cr, width, height, waveform, color_name):
+        self.set_color(cr, COL_BG)
+        cr.paint()
+
+        waveform_length = len(waveform) if waveform is not None else 2
+        x0, y0, x1, y1, plot_width, plot_height, center_y = self.geometry(
+            width,
+            height,
+            max(2, waveform_length),
+        )
+
+        cr.set_line_width(max(1.0, width / CANVAS_W))
+        self.set_color(cr, COL_GRID)
+        for i in range(1, 10):
+            x = x0 + plot_width * i / 10.0
+            cr.move_to(x, y0)
+            cr.line_to(x, y1)
+            cr.stroke()
+        for frac in (0.25, 0.75):
+            y = y0 + plot_height * frac
+            cr.move_to(x0, y)
+            cr.line_to(x1, y)
+            cr.stroke()
+
+        self.set_color(cr, COL_CENTER)
+        cr.set_line_width(max(1.5, 2.0 * width / CANVAS_W))
+        cr.move_to(x0, center_y)
+        cr.line_to(x1, center_y)
+        cr.stroke()
+
+        self.set_color(cr, COL_BORDER)
+        cr.set_line_width(max(1.5, 2.0 * width / CANVAS_W))
+        cr.rectangle(x0, y0, plot_width, plot_height)
+        cr.stroke()
 
         if waveform is None or len(waveform) < 2:
-            waveform = np.zeros(2, dtype=np.float32)
+            return
 
-        point_count = min(width, len(waveform))
-        indices = np.linspace(
-            0,
-            len(waveform) - 1,
-            point_count
-        ).astype(int)
+        color = {
+            "green": COL_GREEN,
+            "blue": COL_BLUE,
+            "orange": COL_ORANGE,
+        }.get(color_name, COL_RED)
 
-        values = waveform[indices]
-        amp_px = height * 0.45
-
-        points = []
-
-        for i, value in enumerate(values):
-            x = int(x0 + width * i / (point_count - 1))
-            y = int(center_y - float(value) * amp_px)
-            y = max(y0 + 2, min(y1 - 2, y))
-            points.append((x, y))
-
-        if len(points) >= 2:
-            draw.line(
-                points,
-                fill=color,
-                width=5,
-                joint="curve"
-            )
-
-        draw.rectangle(
-            (x0, y0, x1, y1),
-            outline=COL_BORDER,
-            width=2
+        values = waveform[self._indices]
+        amp_px = plot_height * 0.45
+        y_values = np.clip(
+            center_y - values * amp_px,
+            y0 + 2.0,
+            y1 - 2.0,
         )
 
-        return img
+        self.set_color(cr, color)
+        cr.set_line_width(max(2.5, 5.0 * width / CANVAS_W))
+        cr.set_line_join(cairo.LINE_JOIN_ROUND)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.move_to(float(self._x_positions[0]), float(y_values[0]))
+        for x, y in zip(self._x_positions[1:], y_values[1:]):
+            cr.line_to(float(x), float(y))
+        cr.stroke()
 
 
 class SpeakerTester:
@@ -1412,17 +1473,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.wave_overlay.set_hexpand(True)
         self.wave_overlay.set_vexpand(True)
 
-        self.picture = Gtk.Picture()
-        self.picture.set_hexpand(True)
-        self.picture.set_vexpand(True)
-        self.picture.set_can_shrink(True)
+        self.wave_area = Gtk.DrawingArea()
+        self.wave_area.set_hexpand(True)
+        self.wave_area.set_vexpand(True)
+        self.wave_area.set_content_width(CANVAS_W)
+        self.wave_area.set_content_height(CANVAS_H)
+        self.wave_area.set_draw_func(self.draw_waveform)
 
-        try:
-            self.picture.set_keep_aspect_ratio(False)
-        except Exception:
-            pass
-
-        self.wave_overlay.set_child(self.picture)
+        self.wave_overlay.set_child(self.wave_area)
         root.append(self.wave_overlay)
 
         # ----------------------------------------------------
@@ -1653,41 +1711,28 @@ class MainWindow(Gtk.ApplicationWindow):
         self.result_states["both"] = "orange"
         self.result_states["right"] = "orange"
 
-    def pil_to_texture(self, img):
-        rgba = img.convert("RGBA")
-        raw = rgba.tobytes()
-        gbytes = GLib.Bytes.new(raw)
+    def waveform_color(self):
+        if not self.analyzer.running:
+            return "red"
+        if self.speaker_scan_active:
+            return "blue"
+        if self.all_speakers_passed:
+            return "green"
+        return self.analyzer.color_name
 
-        pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
-            gbytes,
-            GdkPixbuf.Colorspace.RGB,
-            True,
-            8,
-            rgba.width,
-            rgba.height,
-            rgba.width * 4
+    def draw_waveform(self, _area, cr, width, height):
+        self.renderer.draw(
+            cr,
+            width,
+            height,
+            self.analyzer.waveform,
+            self.waveform_color(),
         )
-
-        return Gdk.Texture.new_for_pixbuf(pixbuf)
 
     def update_picture(self):
-        if not self.analyzer.running:
-            waveform_color = "red"
-        elif self.speaker_scan_active:
-            waveform_color = "blue"
-        elif self.all_speakers_passed:
-            waveform_color = "green"
-        else:
-            waveform_color = self.analyzer.color_name
-
-        image = self.renderer.render(
-            self.analyzer.waveform,
-            waveform_color
-        )
-
-        texture = self.pil_to_texture(image)
-        self.picture.set_paintable(texture)
-        self._texture = texture
+        # 60-FPS-Timer bleibt bestehen; GTK/Cairo zeichnet direkt in den
+        # Widget-Renderpfad, ohne PIL-Bild/Pixbuf/Texture pro Frame.
+        self.wave_area.queue_draw()
 
     def set_buttons_sensitive(self, value):
         for button in self.button_map.values():
