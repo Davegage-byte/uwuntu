@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.12"
+APP_VERSION="1.13"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
 FORMAT_VERSION = "uwuntu-image-v1"
 
 UPDATE_API_URL = (
@@ -1316,7 +1316,15 @@ def restore(args):
         run(["fsck.vfat", "-a", p1], check=False)
         p.update(1, force=True)
 
-        run(["e2fsck", "-fy", p2])
+        # Die Persistenz wurde gerade neu angelegt, beschrieben, synchronisiert
+        # und sauber ausgehängt. Ohne -f überspringt e2fsck auf einem sauberen
+        # Dateisystem den teuren erzwungenen Vollscan.
+        ext_check = run(["e2fsck", "-p", p2], check=False)
+        if ext_check.returncode not in (0, 1):
+            raise RuntimeError(
+                "Persistenz-Dateisystemprüfung fehlgeschlagen "
+                f"(e2fsck Status {ext_check.returncode})."
+            )
         p.update(2, force=True)
 
         mbr = read_member(image, "mbr_bootcode.bin")
@@ -2082,7 +2090,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.12"
+VERSION = "1.13"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
