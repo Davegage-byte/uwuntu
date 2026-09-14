@@ -1,0 +1,205 @@
+name: IM1.17 experiment v2
+
+on:
+  push:
+    branches:
+      - experiment/im117-fsck-optimization
+
+permissions:
+  contents: write
+
+jobs:
+  build-test:
+    if: github.event.head_commit.message != 'IM1.17 experiment output'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y partclone e2fsprogs zstd
+
+      - name: Backup and patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT='Uwuntu Image Manager.sh'
+          TS="$(date +%Y-%m-%d-%H-%M)"
+          BACKUP="backups/uwuntu-image-manager/Uwuntu Image Manager_backup-${TS}.sh"
+          mkdir -p 'backups/uwuntu-image-manager'
+          cp -- "$ROOT" "$BACKUP"
+          cmp -s -- "$ROOT" "$BACKUP"
+          echo "BACKUP_PATH=$BACKUP" >> "$GITHUB_ENV"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p=Path('Uwuntu Image Manager.sh')
+          s=p.read_text(encoding='utf-8')
+
+          def sub1(pattern, repl, text, flags=0):
+              out,n=re.subn(pattern,repl,text,count=1,flags=flags)
+              assert n==1, pattern
+              return out
+
+          s=sub1(r'(?m)^APP_VERSION="1\.16"$', 'APP_VERSION="1.17"', s)
+          s=sub1(r'(?m)^APP_VERSION = "1\.16"$', 'APP_VERSION = "1.17"', s)
+          s=sub1(r'(?m)^VERSION = "1\.16"$', 'VERSION = "1.17"', s)
+
+          prepare='''def prepare_compact_ext_image(source, target, source_size, progress):
+              target.unlink(missing_ok=True)
+
+              # Rohes ext-Abbild als sparse Datei: unbenutzte Blöcke werden nicht
+              # physisch kopiert. Der Master-Stick selbst bleibt unverändert.
+              run(["e2image", "-rap", str(source), str(target)])
+              progress.update(1, force=True)
+
+              # Ein Vollcheck bleibt vor dem Verkleinern notwendig. Danach wird die
+              # temporäre Kopie exakt auf die Minimalgröße des Dateisystems gekürzt.
+              run(["e2fsck", "-fy", str(target)])
+              run(["resize2fs", "-M", str(target)])
+              compact_size = ext_filesystem_size_bytes(target)
+              progress.update(2, force=True)
+
+              if compact_size <= 0 or compact_size > int(source_size):
+                  raise RuntimeError(
+                      "Kompaktes Persistenz-Dateisystem hat eine ungültige Größe."
+                  )
+
+              # Freier Platz wird erst beim Restore auf der echten Zielpartition
+              # erzeugt. Damit entfallen hier der bisherige +256-MiB-Grow und die
+              # zweite erzwungene Vollprüfung.
+              with open(target, "r+b") as handle:
+                  handle.truncate(compact_size)
+
+              ext_check = run(["e2fsck", "-p", str(target)], check=False)
+              if ext_check.returncode not in (0, 1):
+                  raise RuntimeError(
+                      "Das kompakte Persistenz-Dateisystem konnte nach dem "
+                      "Verkleinern nicht sauber geprüft werden."
+                  )
+
+              actual_size = ext_filesystem_size_bytes(target)
+              if actual_size > compact_size:
+                  raise RuntimeError(
+                      "Das vorbereitete Persistenz-Dateisystem überschreitet seine "
+                      "kompakte Zielgröße."
+                  )
+
+              progress.finish(3)
+              return compact_size
+
+          '''.replace('          ','')
+
+          s=sub1(
+              r'def prepare_compact_ext_image\(source, target, source_size, progress\):\n.*?\n(?=def stream_ext_partclone_to_zstd\()' ,
+              prepare,
+              s,
+              re.S,
+          )
+
+          s=sub1(
+              r'(?m)^            run\(\["e2fsck", "-fy", p2\]\)\n            run\(\["resize2fs", p2\]\)$',
+              '            # Das v3-Image ist bereits sauber geprüft; direkt wachsen.\n'
+              '            # Der schnelle e2fsck -p bleibt in der Abschlussphase erhalten.\n'
+              '            run(["resize2fs", p2])',
+              s,
+          )
+
+          s=sub1(
+              r'(?m)^            run\(\["e2fsck", "-fy", loopdev\]\)\n            run\(\["resize2fs", loopdev\]\)$',
+              '            # Auch Ventoy wächst direkt aus der sauberen v3-Kopie.\n'
+              '            run(["resize2fs", loopdev])',
+              s,
+          )
+
+          inner=(
+              '            run(["e2label", loopdev, "casper-rw"])\n'
+              '            ext_check = run(["e2fsck", "-p", loopdev], check=False)\n'
+              '            if ext_check.returncode not in (0, 1):\n'
+              '                raise RuntimeError(\n'
+              '                    "Neue Uwuntu.dat konnte nicht sauber geprüft werden."\n'
+              '                )\n\n'
+              '            run(["sync"], check=False)'
+          )
+          replacement=(
+              '            run(["e2label", loopdev, "casper-rw"])\n\n'
+              '            # Einmalige gemeinsame e2fsck-Prüfung folgt nach dem Detach.\n'
+              '            run(["sync"], check=False)'
+          )
+          assert s.count(inner)==1
+          s=s.replace(inner,replacement,1)
+
+          assert s.count('["e2fsck", "-fy"')==1
+          assert len(re.findall(r'(?m)^APP_VERSION="1\.17"$',s))==1
+          assert len(re.findall(r'(?m)^APP_VERSION = "1\.17"$',s))==1
+          assert len(re.findall(r'(?m)^VERSION = "1\.17"$',s))==1
+          p.write_text(s,encoding='utf-8',newline='\n')
+          PY
+
+      - name: Static checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n 'Uwuntu Image Manager.sh'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          a=re.search(r"cat > \"\$ROOT_HELPER\" <<'PYROOT'\n(.*?)\nPYROOT",s,re.S)
+          b=re.search(r"cat > \"\$USER_APP_DIR/uwuntu_image_manager.py\" <<'PYAPP'\n(.*?)\nPYAPP",s,re.S)
+          assert a and b
+          compile(a.group(1),'<PYROOT>','exec')
+          compile(b.group(1),'<PYAPP>','exec')
+          print('Shell + beide Python-Blöcke: OK')
+          PY
+
+      - name: Real ext4 Partclone pipeline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/im117 && cd /tmp/im117
+          truncate -s 768M source.ext
+          mkfs.ext4 -F -L casper-rw source.ext >/dev/null
+          e2fsck -fy source.ext >/dev/null
+          resize2fs -M source.ext >/dev/null
+          FS_BYTES="$(dumpe2fs -h source.ext 2>/dev/null | awk -F: '/Block count:/{gsub(/ /,"",$2);bc=$2}/Block size:/{gsub(/ /,"",$2);bs=$2}END{print bc*bs}')"
+          test "$FS_BYTES" -gt 0
+          truncate -s "$FS_BYTES" source.ext
+          set +e
+          e2fsck -p source.ext >/dev/null
+          RC=$?
+          set -e
+          test "$RC" -eq 0 -o "$RC" -eq 1
+
+          partclone.ext4 -c -s source.ext -o clone.pcl -q -L save.log
+          truncate -s 1G target.raw
+          LOOP="$(sudo losetup --find --show target.raw)"
+          trap 'sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+          sudo partclone.ext4 -r -s clone.pcl -o "$LOOP" -q -L restore.log
+
+          # Entscheidender Test: kein e2fsck -fy vor resize2fs.
+          sudo resize2fs "$LOOP" >/dev/null
+          set +e
+          sudo e2fsck -p "$LOOP" >/dev/null
+          RC=$?
+          set -e
+          test "$RC" -eq 0 -o "$RC" -eq 1
+          test "$(sudo blkid -s LABEL -o value "$LOOP")" = 'casper-rw'
+          sudo losetup -d "$LOOP"
+          trap - EXIT
+          echo 'Partclone -> direkter Grow -> e2fsck -p: OK'
+
+      - name: Commit output
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- 'Uwuntu Image Manager.sh' "$BACKUP_PATH"
+          git commit -m 'IM1.17 experiment output'
+          git push origin HEAD:experiment/im117-fsck-optimization
