@@ -1,0 +1,46 @@
+name: IM1.16 Partclone Diagnose
+
+on:
+  push:
+    branches:
+      - feature/im116-fast-persistence-v2
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq partclone zstd e2fsprogs
+          rm -rf /tmp/im116-diag
+          mkdir -p /tmp/im116-diag
+          cd /tmp/im116-diag
+          dd if=/dev/urandom of=payload.bin bs=1M count=24 status=none
+          truncate -s 1024M source.ext4
+          mkfs.ext4 -F -L casper-rw source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'mkdir /data' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write payload.bin /data/payload.bin' source.ext4 >/dev/null 2>&1
+          e2fsck -fy source.ext4 >/dev/null
+          e2image -rap source.ext4 compact.ext4 >/dev/null 2>&1
+          e2fsck -fy compact.ext4 >/dev/null
+          resize2fs -M compact.ext4 >/dev/null
+          block_count=$(LC_ALL=C dumpe2fs -h compact.ext4 2>/dev/null | awk -F: '/^Block count:/{gsub(/ /,"",$2);print $2}')
+          block_size=$(LC_ALL=C dumpe2fs -h compact.ext4 2>/dev/null | awk -F: '/^Block size:/{gsub(/ /,"",$2);print $2}')
+          min_bytes=$((block_count * block_size))
+          compact_bytes=$(( ((min_bytes + 256*1024*1024 + 1024*1024 - 1) / (1024*1024)) * (1024*1024) ))
+          echo "block_count=$block_count block_size=$block_size min_bytes=$min_bytes compact_bytes=$compact_bytes"
+          truncate -s "$compact_bytes" compact.ext4
+          resize2fs compact.ext4 >/dev/null
+          e2fsck -fy compact.ext4 >/dev/null
+          set +e
+          partclone.ext4 -c -s compact.ext4 -o - -q 2>partclone-save.log | zstd -T0 -3 -q -o persistence.ext.partclone.zst
+          pipe_rc=$?
+          set -e
+          echo "pipeline_rc=$pipe_rc"
+          cat partclone-save.log || true
+          ls -lh compact.ext4 persistence.ext.partclone.zst || true
+          exit "$pipe_rc"
