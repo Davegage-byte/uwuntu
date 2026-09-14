@@ -1,0 +1,253 @@
+name: IM1.17 experiment
+
+on:
+  push:
+    branches:
+      - experiment/im117-fsck-optimization
+
+permissions:
+  contents: write
+
+jobs:
+  build-test:
+    if: github.event.head_commit.message != 'IM1.17 experiment output'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y partclone e2fsprogs zstd
+
+      - name: Backup IM1.16 and build IM1.17
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT='Uwuntu Image Manager.sh'
+          TS="$(date +%Y-%m-%d-%H-%M)"
+          BACKUP="backups/uwuntu-image-manager/Uwuntu Image Manager_backup-${TS}.sh"
+          mkdir -p 'backups/uwuntu-image-manager'
+          cp -- "$ROOT" "$BACKUP"
+          cmp -s -- "$ROOT" "$BACKUP"
+          echo "BACKUP_PATH=$BACKUP" >> "$GITHUB_ENV"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('Uwuntu Image Manager.sh')
+          s = p.read_text(encoding='utf-8')
+
+          assert s.count('APP_VERSION="1.16"') == 1
+          assert s.count('APP_VERSION = "1.16"') == 1
+          assert s.count('VERSION = "1.16"') == 1
+          s = s.replace('APP_VERSION="1.16"', 'APP_VERSION="1.17"')
+          s = s.replace('APP_VERSION = "1.16"', 'APP_VERSION = "1.17"')
+          s = s.replace('VERSION = "1.16"', 'VERSION = "1.17"')
+
+          old_prepare = '''def prepare_compact_ext_image(source, target, source_size, progress):
+              target.unlink(missing_ok=True)
+
+              # Rohes ext-Abbild als sparse Datei: unbenutzte Blöcke werden nicht
+              # physisch kopiert. Der Master-Stick selbst bleibt unverändert.
+              run(["e2image", "-rap", str(source), str(target)])
+              progress.update(1, force=True)
+
+              run(["e2fsck", "-fy", str(target)])
+              run(["resize2fs", "-M", str(target)])
+              minimum_size = ext_filesystem_size_bytes(target)
+              progress.update(2, force=True)
+
+              # Etwas freien Spielraum im gespeicherten Dateisystem lassen. Trotzdem
+              # bleibt es kompakt genug, um auf unterschiedlich großen 32-GB-Sticks
+              # wiederhergestellt und danach auf die Zielpartition erweitert zu werden.
+              compact_size = min(
+                  int(source_size),
+                  math.ceil((minimum_size + 256 * MIB) / MIB) * MIB,
+              )
+
+              if compact_size < minimum_size:
+                  raise RuntimeError(
+                      "Kompaktes Persistenz-Dateisystem ist größer als die Quellpartition."
+                  )
+
+              with open(target, "r+b") as handle:
+                  handle.truncate(compact_size)
+
+              if compact_size > minimum_size:
+                  run(["resize2fs", str(target)])
+
+              run(["e2fsck", "-fy", str(target)])
+              actual_size = ext_filesystem_size_bytes(target)
+
+              if actual_size > compact_size:
+                  raise RuntimeError(
+                      "Das vorbereitete Persistenz-Dateisystem überschreitet seine "
+                      "kompakte Zielgröße."
+                  )
+
+              progress.finish(3)
+              return compact_size
+          '''.replace('          ', '')
+
+          new_prepare = '''def prepare_compact_ext_image(source, target, source_size, progress):
+              target.unlink(missing_ok=True)
+
+              # Rohes ext-Abbild als sparse Datei: unbenutzte Blöcke werden nicht
+              # physisch kopiert. Der Master-Stick selbst bleibt unverändert.
+              run(["e2image", "-rap", str(source), str(target)])
+              progress.update(1, force=True)
+
+              # Vor dem Verkleinern einmal vollständig prüfen. Danach wird das
+              # temporäre Dateisystem exakt auf seine Minimalgröße gebracht.
+              run(["e2fsck", "-fy", str(target)])
+              run(["resize2fs", "-M", str(target)])
+              compact_size = ext_filesystem_size_bytes(target)
+              progress.update(2, force=True)
+
+              if compact_size <= 0 or compact_size > int(source_size):
+                  raise RuntimeError(
+                      "Kompaktes Persistenz-Dateisystem hat eine ungültige Größe."
+                  )
+
+              # Die Sparse-Datei muss nicht bereits beim Backup wieder um 256 MiB
+              # vergrößert werden. Freier Platz entsteht erst beim Restore durch
+              # resize2fs auf die echte Zielpartition. Das spart einen zusätzlichen
+              # Grow-Lauf und eine zweite erzwungene Vollprüfung beim Backup.
+              with open(target, "r+b") as handle:
+                  handle.truncate(compact_size)
+
+              ext_check = run(["e2fsck", "-p", str(target)], check=False)
+              if ext_check.returncode not in (0, 1):
+                  raise RuntimeError(
+                      "Das kompakte Persistenz-Dateisystem konnte nach dem "
+                      "Verkleinern nicht sauber geprüft werden."
+                  )
+
+              actual_size = ext_filesystem_size_bytes(target)
+              if actual_size > compact_size:
+                  raise RuntimeError(
+                      "Das vorbereitete Persistenz-Dateisystem überschreitet seine "
+                      "kompakte Zielgröße."
+                  )
+
+              progress.finish(3)
+              return compact_size
+          '''.replace('          ', '')
+
+          assert old_prepare in s
+          s = s.replace(old_prepare, new_prepare, 1)
+
+          old_restore = '''            run(["e2fsck", "-fy", p2])
+              run(["resize2fs", p2])'''.replace('              ', '')
+          new_restore = '''            # Das v3-Image wurde beim Backup bereits sauber geprüft. Ein
+              # erzwungener Vollcheck direkt vor dem Vergrößern kostet auf langsamen
+              # USB-Sticks mehrere Minuten und ist für das ungemountete Grow nicht nötig.
+              run(["resize2fs", p2])'''.replace('              ', '')
+          assert s.count(old_restore) == 1
+          s = s.replace(old_restore, new_restore, 1)
+
+          old_ventoy = '''            run(["e2fsck", "-fy", loopdev])
+              run(["resize2fs", loopdev])'''.replace('              ', '')
+          new_ventoy = '''            # Wie beim normalen v3-Restore direkt auf die vorhandene
+              # saubere Partclone-Kopie wachsen; die Abschlussprüfung folgt danach.
+              run(["resize2fs", loopdev])'''.replace('              ', '')
+          assert s.count(old_ventoy) == 1
+          s = s.replace(old_ventoy, new_ventoy, 1)
+
+          old_inner_check = '''            run(["e2label", loopdev, "casper-rw"])
+              ext_check = run(["e2fsck", "-p", loopdev], check=False)
+              if ext_check.returncode not in (0, 1):
+                  raise RuntimeError(
+                      "Neue Uwuntu.dat konnte nicht sauber geprüft werden."
+                  )
+
+              run(["sync"], check=False)'''.replace('              ', '')
+          new_inner_check = '''            run(["e2label", loopdev, "casper-rw"])
+
+              # Nur einmal prüfen: nach dem Losetup-Detach folgt unten die gemeinsame
+              # e2fsck-Prüfung der fertigen Uwuntu.dat für alle Imageformate.
+              run(["sync"], check=False)'''.replace('              ', '')
+          assert s.count(old_inner_check) == 1
+          s = s.replace(old_inner_check, new_inner_check, 1)
+
+          # Sicherheitsasserts: Nur der zwingend nötige Vollcheck vor resize2fs -M
+          # beim Backup darf in IM1.17 noch als -fy verbleiben.
+          assert s.count('["e2fsck", "-fy"') == 1
+          assert 'APP_VERSION="1.17"' in s
+          assert 'APP_VERSION = "1.17"' in s
+          assert 'VERSION = "1.17"' in s
+
+          p.write_text(s, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Static checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n 'Uwuntu Image Manager.sh'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s=Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          root=re.search(r"cat > \"\$ROOT_HELPER\" <<'PYROOT'\n(.*?)\nPYROOT",s,re.S)
+          app=re.search(r"cat > \"\$USER_APP_DIR/uwuntu_image_manager.py\" <<'PYAPP'\n(.*?)\nPYAPP",s,re.S)
+          assert root and app
+          compile(root.group(1), '<PYROOT>', 'exec')
+          compile(app.group(1), '<PYAPP>', 'exec')
+          assert s.count('1.17') >= 3
+          print('Shell + eingebettetes Python: OK')
+          PY
+
+      - name: End-to-end ext4 restore without pre-resize full fsck
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/im117-test
+          cd /tmp/im117-test
+
+          truncate -s 768M source.ext
+          mkfs.ext4 -F -L casper-rw source.ext >/dev/null
+          e2fsck -fy source.ext >/dev/null
+          resize2fs -M source.ext >/dev/null
+
+          FS_BYTES="$(dumpe2fs -h source.ext 2>/dev/null | awk -F: '/Block count:/{gsub(/ /,"",$2);bc=$2}/Block size:/{gsub(/ /,"",$2);bs=$2}END{print bc*bs}')"
+          test "$FS_BYTES" -gt 0
+          truncate -s "$FS_BYTES" source.ext
+          set +e
+          e2fsck -p source.ext >/dev/null
+          RC=$?
+          set -e
+          test "$RC" -eq 0 -o "$RC" -eq 1
+
+          partclone.ext4 -c -s source.ext -o clone.pcl -q -L save.log
+
+          truncate -s 1G target.raw
+          LOOP="$(sudo losetup --find --show target.raw)"
+          trap 'sudo losetup -d "$LOOP" 2>/dev/null || true' EXIT
+          sudo partclone.ext4 -r -s clone.pcl -o "$LOOP" -q -L restore.log
+
+          # Kern der IM1.17-Änderung: kein e2fsck -fy vor dem Grow.
+          sudo resize2fs "$LOOP" >/dev/null
+          set +e
+          sudo e2fsck -p "$LOOP" >/dev/null
+          RC=$?
+          set -e
+          test "$RC" -eq 0 -o "$RC" -eq 1
+          test "$(sudo blkid -s LABEL -o value "$LOOP")" = 'casper-rw'
+          sudo losetup -d "$LOOP"
+          trap - EXIT
+          echo 'Partclone -> resize2fs ohne Vollcheck -> e2fsck -p: OK'
+
+      - name: Commit experimental output
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- 'Uwuntu Image Manager.sh' "$BACKUP_PATH"
+          git commit -m 'IM1.17 experiment output'
+          git push origin HEAD:experiment/im117-fsck-optimization
