@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.17"
+APP_VERSION="1.16"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.17"
+APP_VERSION = "1.16"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -714,40 +714,42 @@ def prepare_compact_ext_image(source, target, source_size, progress):
     run(["e2image", "-rap", str(source), str(target)])
     progress.update(1, force=True)
 
-    # Ein Vollcheck bleibt vor dem Verkleinern notwendig. Danach wird die
-    # temporäre Kopie exakt auf die Minimalgröße des Dateisystems gekürzt.
     run(["e2fsck", "-fy", str(target)])
     run(["resize2fs", "-M", str(target)])
-    compact_size = ext_filesystem_size_bytes(target)
+    minimum_size = ext_filesystem_size_bytes(target)
     progress.update(2, force=True)
 
-    if compact_size <= 0 or compact_size > int(source_size):
+    # Etwas freien Spielraum im gespeicherten Dateisystem lassen. Trotzdem
+    # bleibt es kompakt genug, um auf unterschiedlich großen 32-GB-Sticks
+    # wiederhergestellt und danach auf die Zielpartition erweitert zu werden.
+    compact_size = min(
+        int(source_size),
+        math.ceil((minimum_size + 256 * MIB) / MIB) * MIB,
+    )
+
+    if compact_size < minimum_size:
         raise RuntimeError(
-  "Kompaktes Persistenz-Dateisystem hat eine ungültige Größe."
+            "Kompaktes Persistenz-Dateisystem ist größer als die Quellpartition."
         )
 
-    # Freier Platz wird erst beim Restore auf der echten Zielpartition
-    # erzeugt. Damit entfallen hier der bisherige +256-MiB-Grow und die
-    # zweite erzwungene Vollprüfung.
     with open(target, "r+b") as handle:
         handle.truncate(compact_size)
 
-    ext_check = run(["e2fsck", "-p", str(target)], check=False)
-    if ext_check.returncode not in (0, 1):
-        raise RuntimeError(
-  "Das kompakte Persistenz-Dateisystem konnte nach dem "
-  "Verkleinern nicht sauber geprüft werden."
-        )
+    if compact_size > minimum_size:
+        run(["resize2fs", str(target)])
 
+    run(["e2fsck", "-fy", str(target)])
     actual_size = ext_filesystem_size_bytes(target)
+
     if actual_size > compact_size:
         raise RuntimeError(
-  "Das vorbereitete Persistenz-Dateisystem überschreitet seine "
-  "kompakte Zielgröße."
+            "Das vorbereitete Persistenz-Dateisystem überschreitet seine "
+            "kompakte Zielgröße."
         )
 
     progress.finish(3)
     return compact_size
+
 
 def stream_ext_partclone_to_zstd(
     source,
@@ -1746,8 +1748,7 @@ def restore(args):
                 p,
             )
 
-            # Das v3-Image ist bereits sauber geprüft; direkt wachsen.
-            # Der schnelle e2fsck -p bleibt in der Abschlussphase erhalten.
+            run(["e2fsck", "-fy", p2])
             run(["resize2fs", p2])
         else:
             mkfs_program = (
@@ -2079,7 +2080,7 @@ def ventoy_update(args):
                 p,
             )
 
-            # Auch Ventoy wächst direkt aus der sauberen v3-Kopie.
+            run(["e2fsck", "-fy", loopdev])
             run(["resize2fs", loopdev])
 
             if re.fullmatch(
@@ -2091,8 +2092,12 @@ def ventoy_update(args):
                 run(["tune2fs", "-U", dat_uuid, loopdev])
 
             run(["e2label", loopdev, "casper-rw"])
+            ext_check = run(["e2fsck", "-p", loopdev], check=False)
+            if ext_check.returncode not in (0, 1):
+                raise RuntimeError(
+                    "Neue Uwuntu.dat konnte nicht sauber geprüft werden."
+                )
 
-            # Einmalige gemeinsame e2fsck-Prüfung folgt nach dem Detach.
             run(["sync"], check=False)
             run(["losetup", "-d", loopdev], check=False)
             loopdev = ""
@@ -2645,7 +2650,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.17"
+VERSION = "1.16"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
