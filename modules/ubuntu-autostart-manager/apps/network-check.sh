@@ -139,7 +139,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.29"
+VERSION = "2.30"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1016,7 +1016,7 @@ class WipeCompactPanel:
 
         # Dieselben deutschen UPower-Zustände wie im Standalone-Wipe.
         if state == "fully-charged":
-            parts = ["VOLL"]
+            parts = ["VOLL GELADEN"]
             state_class = "good"
         elif state == "charging":
             parts = ["LÄDT"]
@@ -1373,14 +1373,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.29 + Wipe Auto v3.33")
+        self.window.set_title("Network Check v2.30 + Wipe Auto v3.33")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.29 + Wipe Auto v3.33")
+        title_label = Gtk.Label(label="Network Check v2.30 + Wipe Auto v3.33")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 

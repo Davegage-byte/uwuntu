@@ -107,6 +107,7 @@ SCREENS = [
     ("Grün", (0.0, 1.0, 0.0)),
     ("Blau", (0.0, 0.0, 1.0)),
     ("Grau", (0.5, 0.5, 0.5)),
+    ("Schwarz", (0.0, 0.0, 0.0)),
     ("Schwarz-Weiß Farbverlauf", None),
 ]
 TOTAL = len(SCREENS)
