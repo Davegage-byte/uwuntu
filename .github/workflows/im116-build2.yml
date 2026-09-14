@@ -1,0 +1,137 @@
+name: IM1.16 Build Test 2
+
+on:
+  push:
+    branches:
+      - feature/im116-fast-persistence-v2
+
+permissions:
+  contents: write
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pflicht-Backup IM1.15
+        shell: bash
+        run: |
+          set -euo pipefail
+          stamp="$(TZ=Europe/Berlin date +%Y-%m-%d-%H-%M)"
+          mkdir -p backups/uwuntu-image-manager
+          backup="backups/uwuntu-image-manager/Uwuntu Image Manager_backup-${stamp}.sh"
+          cp 'Uwuntu Image Manager.sh' "$backup"
+          echo "BACKUP_PATH=$backup" >> "$GITHUB_ENV"
+          cmp -s "$backup" <(git show 7a0e443c0a8eb6b182ab58a1b475e316159197ef:'Uwuntu Image Manager.sh')
+
+      - name: IM1.16 erzeugen
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 im116_build.py
+
+      - name: Testpakete
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq partclone zstd e2fsprogs
+
+      - name: Syntax und Struktur
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n 'Uwuntu Image Manager.sh'
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          for tag in ('PYROOT', 'PYAPP'):
+              marker = f"<<'{tag}'\n"
+              start = text.index(marker) + len(marker)
+              end = text.index(f"\n{tag}\n", start)
+              compile(text[start:end], f'<{tag}>', 'exec')
+          assert text.count('APP_VERSION="1.16"') == 1
+          assert text.count('APP_VERSION = "1.16"') == 1
+          assert text.count('VERSION = "1.16"') == 1
+          assert 'FORMAT_VERSION = "uwuntu-image-v3"' in text
+          assert 'persistence.ext.partclone.zst' in text
+          assert 'prepare_compact_ext_image' in text
+          assert 'restore_persistence_partclone_member' in text
+          assert text.count('show_total_time=True') == 2
+          PY
+          cmp -s "$BACKUP_PATH" <(git show 7a0e443c0a8eb6b182ab58a1b475e316159197ef:'Uwuntu Image Manager.sh')
+          git diff --check
+
+      - name: Echte ext4 Block-Pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/im116-test
+          mkdir -p /tmp/im116-test
+          cd /tmp/im116-test
+          dd if=/dev/urandom of=payload.bin bs=1M count=24 status=none
+          printf 'Uwuntu IM1.16 persistence test\n' > marker.txt
+          truncate -s 1024M source.ext4
+          mkfs.ext4 -F -L casper-rw source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'mkdir /data' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write payload.bin /data/payload.bin' source.ext4 >/dev/null 2>&1
+          debugfs -w -R 'write marker.txt /data/marker.txt' source.ext4 >/dev/null 2>&1
+          e2fsck -fy source.ext4 >/dev/null
+          e2image -rap source.ext4 compact.ext4 >/dev/null 2>&1
+          e2fsck -fy compact.ext4 >/dev/null
+          resize2fs -M compact.ext4 >/dev/null
+          block_count=$(LC_ALL=C dumpe2fs -h compact.ext4 2>/dev/null | awk -F: '/^Block count:/{gsub(/ /,"",$2);print $2}')
+          block_size=$(LC_ALL=C dumpe2fs -h compact.ext4 2>/dev/null | awk -F: '/^Block size:/{gsub(/ /,"",$2);print $2}')
+          min_bytes=$((block_count * block_size))
+          compact_bytes=$(( ((min_bytes + 256*1024*1024 + 1024*1024 - 1) / (1024*1024)) * (1024*1024) ))
+          test "$compact_bytes" -lt $((1024*1024*1024))
+          truncate -s "$compact_bytes" compact.ext4
+          resize2fs compact.ext4 >/dev/null
+          e2fsck -fy compact.ext4 >/dev/null
+          partclone.ext4 -c -s compact.ext4 -o - -q 2>/tmp/partclone-save.log | zstd -T0 -3 -q -o persistence.ext.partclone.zst
+          truncate -s 1536M target.ext4
+          loopdev=$(sudo losetup --find --show target.ext4)
+          trap 'sudo losetup -d "$loopdev" >/dev/null 2>&1 || true' EXIT
+          zstd -q -dc persistence.ext.partclone.zst | sudo partclone.ext4 -r -s - -o "$loopdev" -q 2>/tmp/partclone-restore.log
+          sudo e2fsck -fy "$loopdev" >/dev/null
+          sudo resize2fs "$loopdev" >/dev/null
+          set +e
+          sudo e2fsck -p "$loopdev" >/dev/null
+          rc=$?
+          set -e
+          test "$rc" -eq 0 -o "$rc" -eq 1
+          sudo losetup -d "$loopdev"
+          trap - EXIT
+          debugfs -R 'dump -p /data/payload.bin restored.bin' target.ext4 >/dev/null 2>&1
+          debugfs -R 'dump -p /data/marker.txt restored-marker.txt' target.ext4 >/dev/null 2>&1
+          cmp payload.bin restored.bin
+          cmp marker.txt restored-marker.txt
+          test "$(blkid -p -s LABEL -o value target.ext4)" = 'casper-rw'
+          test "$(stat -c %s target.ext4)" -eq $((1536*1024*1024))
+
+      - name: Kompatibilität statisch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          assert 'SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}' in text
+          assert 'def restore_persistence_member(' in text
+          assert '"persistence.tar.zst"' in text
+          assert 'metadata.get("format") in {"uwuntu-image-v2", "uwuntu-image-v3"}' in text
+          assert '"uwuntu-image-v3",' in text
+          PY
+
+      - name: Finalen Commit schreiben
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f im116_build.py .github/workflows/im116-build.yml .github/workflows/im116-build2.yml
+          git config user.name 'Davegage-byte'
+          git config user.email '74912940+Davegage-byte@users.noreply.github.com'
+          git add -A
+          git commit -m 'IM1.15→IM1.16 · Persistenz-Restore blockbasiert beschleunigt' -m 'Neues Imageformat uwuntu-image-v3 mit kompakter ext3/ext4-Partclone-Persistenz.' -m 'Restore schreibt belegte Dateisystemblöcke statt tausende Dateien einzeln per tar zu extrahieren und erweitert das Dateisystem danach auf die Zielpartition.' -m 'V1/V2 bleiben kompatibel; Ventoy unterstützt V3; IM1.15-Daueranzeige bleibt erhalten.' -m 'Pflicht-Backup, Syntax und reale ext4-End-to-End-Pipeline wurden geprüft.'
+          git push origin HEAD:feature/im116-fast-persistence-v2
