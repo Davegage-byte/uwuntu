@@ -38,10 +38,6 @@ DISPLAY_TEST_SCRIPT="$BIN_DIR/uwuntu-display-test.sh"
 DISPLAY_STATE_FILE="$HOME/.local/state/uwuntu/display_test_status.json"
 CLOSE_APPS_SCRIPT="$BIN_DIR/close-diagnostic-apps.sh"
 FORCE_UPDATE_SCRIPT="$BIN_DIR/uwuntu-force-update.sh"
-WIFI_SELFHEAL_SCRIPT="$BIN_DIR/uwuntu-wifi-selfheal.sh"
-WIFI_SELFHEAL_SYSTEM_SCRIPT="/usr/local/sbin/uwuntu-wifi-selfheal.sh"
-WIFI_SELFHEAL_SERVICE="/etc/systemd/system/uwuntu-wifi-selfheal.service"
-WIFI_SELFHEAL_TIMER="/etc/systemd/system/uwuntu-wifi-selfheal.timer"
 MANAGER_PATH_FILE="$HOME/.config/uwuntu-manager-path"
 MANAGER_INSTALL_PATH="$BIN_DIR/Ubuntu Autostart Manager.sh"
 RUNTIME_MANIFEST_DIR="$HOME/.local/share/uwuntu"
@@ -49,7 +45,7 @@ RUNTIME_MANIFEST_PATH="$RUNTIME_MANIFEST_DIR/runtime-manifest.json"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026091401
+MANAGER_BUILD=2026090912
 AUTO_MODE=0
 
 # Die Laufzeitprogramme werden als eigenstaendige Repository-Module gepflegt.
@@ -87,7 +83,6 @@ RUNTIME_MODULE_PATHS=(
     "helpers/start-kiosk-apps.sh"
     "helpers/close-diagnostic-apps.sh"
     "helpers/force-update.sh"
-    "helpers/wifi-selfheal.sh"
 )
 RUNTIME_MODULE_TARGETS=(
     "$NETWORK_CHECK_SCRIPT"
@@ -100,7 +95,6 @@ RUNTIME_MODULE_TARGETS=(
     "$KIOSK_LAUNCHER"
     "$CLOSE_APPS_SCRIPT"
     "$FORCE_UPDATE_SCRIPT"
-    "$WIFI_SELFHEAL_SCRIPT"
 )
 
 mkdir -p "$USER_AUTOSTART" "$BIN_DIR" "$APP_DIR" "$HOME/.config" "$RUNTIME_MANIFEST_DIR"
@@ -1418,89 +1412,6 @@ EOF
 }
 
 
-install_wifi_selfheal() {
-    echo "--- WLAN Self-Heal v1.1 installieren / aktualisieren ---"
-
-    require_runtime_module "helpers/wifi-selfheal.sh" || return 1
-    chmod +x "$WIFI_SELFHEAL_SCRIPT" || return 1
-
-    local tmpdir
-    local -a root_cmd
-    tmpdir="$(mktemp -d /tmp/uwuntu-wifi-selfheal-install.XXXXXX)" || return 1
-
-    if sudo -n true >/dev/null 2>&1; then
-        root_cmd=(sudo -n)
-    elif command -v pkexec >/dev/null 2>&1; then
-        root_cmd=(pkexec)
-    else
-        root_cmd=(sudo)
-    fi
-
-    cat > "$tmpdir/uwuntu-wifi-selfheal.service" <<EOF
-[Unit]
-Description=Uwuntu WLAN Self-Heal
-After=NetworkManager.service
-Wants=NetworkManager.service
-
-[Service]
-Type=oneshot
-ExecStart=$WIFI_SELFHEAL_SYSTEM_SCRIPT
-TimeoutStartSec=45s
-EOF
-
-    cat > "$tmpdir/uwuntu-wifi-selfheal.timer" <<'EOF'
-[Unit]
-Description=Uwuntu WLAN Self-Heal schnell und wiederholt
-
-[Timer]
-OnBootSec=2s
-OnUnitInactiveSec=5s
-AccuracySec=1s
-Unit=uwuntu-wifi-selfheal.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-    if ! "${root_cmd[@]}" /usr/bin/install -m 0755 \
-            "$WIFI_SELFHEAL_SCRIPT" "$WIFI_SELFHEAL_SYSTEM_SCRIPT" \
-        || ! "${root_cmd[@]}" /usr/bin/install -m 0644 \
-            "$tmpdir/uwuntu-wifi-selfheal.service" "$WIFI_SELFHEAL_SERVICE" \
-        || ! "${root_cmd[@]}" /usr/bin/install -m 0644 \
-            "$tmpdir/uwuntu-wifi-selfheal.timer" "$WIFI_SELFHEAL_TIMER"
-    then
-        rm -rf -- "$tmpdir"
-        echo "FEHLER: WLAN Self-Heal konnte nicht vollständig installiert werden."
-        return 1
-    fi
-    rm -rf -- "$tmpdir"
-
-    if ! "${root_cmd[@]}" /usr/bin/systemctl daemon-reload; then
-        echo "FEHLER: systemd daemon-reload für WLAN Self-Heal fehlgeschlagen."
-        return 1
-    fi
-    if ! "${root_cmd[@]}" /usr/bin/systemctl enable uwuntu-wifi-selfheal.timer >/dev/null 2>&1; then
-        echo "FEHLER: WLAN Self-Heal Timer konnte nicht aktiviert werden."
-        return 1
-    fi
-
-    # Der bisherige Timer war nur ein einmaliger Boot-Timer und kann bereits
-    # als 'elapsed' aktiv sein. Explizites restart lädt den neuen 5-s-Zyklus
-    # zuverlässig sofort, ohne einen zweiten konkurrierenden Fix anzulegen.
-    if ! "${root_cmd[@]}" /usr/bin/systemctl restart uwuntu-wifi-selfheal.timer; then
-        echo "FEHLER: WLAN Self-Heal Timer konnte nicht neu gestartet werden."
-        return 1
-    fi
-
-    # Erster Versuch sofort; flock im Helper verhindert Doppelstarts.
-    "${root_cmd[@]}" /usr/bin/systemctl start --no-block uwuntu-wifi-selfheal.service \
-        >/dev/null 2>&1 || true
-
-    echo "OK: WLAN Self-Heal v1.1 aktiv (Guest; LAN bleibt parallel unangetastet)."
-    return 0
-}
-
-
 install_kiosk() {
     header
     echo "4-Felder Diagnose-Kiosk einrichten"
@@ -1540,15 +1451,6 @@ install_kiosk() {
         return 1
     fi
     RUNTIME_MODULES_READY=1
-
-    # WLAN wird unabhängig von einer bereits aktiven LAN-Verbindung so früh
-    # wie möglich parallel bereitgestellt. Der vorhandene Self-Heal wird
-    # dabei ersetzt/aktualisiert, nicht durch einen zweiten Mechanismus ergänzt.
-    if ! install_wifi_selfheal; then
-        echo "FEHLER: WLAN Self-Heal konnte nicht installiert/aktualisiert werden."
-        pause
-        return 1
-    fi
 
     # Menüpunkt 1 ist ab jetzt wirklich "ALLES": Network/Wipe wird zuerst
     # installiert/aktualisiert, danach Kamera, Touch, Display, Audio, Hardware
@@ -1950,7 +1852,6 @@ install_all_menu() {
     echo "------------------------------------------------------------"
     echo
     echo "Installiert bzw. aktualisiert in einem Durchlauf:"
-    echo "  • WLAN Self-Heal v1.1 (Guest; LAN bleibt parallel aktiv)"
     echo "  • Network Check + Wipe Auto"
     echo "  • Uwuntu Kamera Test"
     echo "  • Touch-Tester"
