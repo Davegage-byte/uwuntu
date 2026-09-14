@@ -2289,14 +2289,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.84")
+        self.window.set_title("Hardware Check v4.5.85")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.84")
+        title_label = Gtk.Label(label="Hardware Check v4.5.85")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4659,6 +4659,24 @@ def publish():
 
 
 def on_relevant_event(event):
+    # object:state-changed:showing wird für sehr viele normale Widgets
+    # ausgelöst. Ein kompletter Desktop-Scan für jedes einzelne dieser
+    # Ereignisse kostet unnötig CPU. Nur Top-Level-Objekte können hier
+    # einen Power-/Ausschalt-Dialog darstellen; window:* bleibt wie
+    # bisher vollständig ereignisgesteuert erhalten.
+    try:
+        event_type = (getattr(event, "type", "") or "").lower()
+    except Exception:
+        event_type = ""
+
+    if event_type.startswith("object:state-changed:showing"):
+        try:
+            role = (event.source.getRoleName() or "").lower()
+        except Exception:
+            role = ""
+        if role not in ("dialog", "alert", "frame", "window"):
+            return
+
     publish()
 
 
