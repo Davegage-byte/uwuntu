@@ -1,0 +1,86 @@
+name: IM1.20 Compact Parallel UI Build
+
+on:
+  push:
+    branches:
+      - experiment/im120-compact-parallel-ui
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: experiment/im120-compact-parallel-ui
+          fetch-depth: 0
+
+      - name: Exact IM1.19 backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f 'Uwuntu Image Manager.sh'
+          grep -q 'APP_VERSION="1.19"' 'Uwuntu Image Manager.sh'
+          mkdir -p backups/uwuntu-image-manager
+          stamp="$(TZ=Europe/Berlin date +%Y-%m-%d-%H-%M)"
+          backup="backups/uwuntu-image-manager/Uwuntu Image Manager_backup-${stamp}.sh"
+          test ! -e "$backup"
+          cp --preserve=mode,timestamps 'Uwuntu Image Manager.sh' "$backup"
+          cmp -s 'Uwuntu Image Manager.sh' "$backup"
+          echo "IM_BACKUP=$backup" >> "$GITHUB_ENV"
+
+      - name: Build IM1.20
+        run: python3 .github/im120_builder.py
+
+      - name: Validate shell and embedded Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n 'Uwuntu Image Manager.sh'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          for tag in ('PYROOT', 'PYAPP'):
+              m = re.search(r"<<'" + tag + r"'\n(.*?)\n" + tag + r"\n", text, re.S)
+              if not m:
+                  raise SystemExit(f'{tag} block not found')
+              compile(m.group(1), f'<{tag}>', 'exec')
+          assert text.count('APP_VERSION="1.20"') == 2
+          assert text.count('VERSION = "1.20"') == 1
+          block = text.split('class BatchRestoreWindow(Gtk.Window):', 1)[1].split('\n\nclass ActionWindow', 1)[0]
+          assert 'Gtk.ScrolledWindow()' not in block
+          assert 'tiles = Gtk.Grid(column_spacing=6, row_spacing=6)' in block
+          assert 'column = position % 2' in block
+          assert 'row_number = position // 2' in block
+          assert 'self.set_default_size(1180, 690)' in block
+          assert 'safe_to_remove=safe_to_remove' in text
+          print('IM1.20 syntax/layout checks OK')
+          PY
+
+      - name: Verify backup still exact IM1.19
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show 060113de7c996d3d2fc8a74a66efd85bf986346e:'Uwuntu Image Manager.sh' > /tmp/im119-base.sh
+          cmp -s /tmp/im119-base.sh "$IM_BACKUP"
+
+      - name: Remove temporary builder files
+        shell: bash
+        run: |
+          rm -f .github/im120_builder.py
+          rm -f .github/workflows/im120-build.yml
+
+      - name: Commit final result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'IM1.19→IM1.20 · Parallel-Restore kompakt für 10 Sticks' -m 'Batch-Ansicht auf ein 2×5-Dashboard ohne Scrollen verdichtet. Pro Stick bleiben Nummer, Fortschritt, Phase, MB/s, Laufzeit, ETA und sicherer Entfernen-Status sichtbar; Gesamtübersicht und Zeitachse bleiben dauerhaft im Bild. Exaktes IM1.19-Backup enthalten.'
+          git push origin HEAD:experiment/im120-compact-parallel-ui
