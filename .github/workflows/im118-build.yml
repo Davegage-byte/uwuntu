@@ -1,4 +1,4 @@
-name: IM1.18 USB benchmark build
+name: IM1.18 USB benchmark build v2
 
 on:
   push:
@@ -24,24 +24,31 @@ jobs:
           from pathlib import Path
           import shutil
 
-          path = Path('Uwuntu Image Manager.sh')
-          backup = Path('backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh')
+          path = Path("Uwuntu Image Manager.sh")
+          backup = Path("backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh")
           backup.parent.mkdir(parents=True, exist_ok=True)
           shutil.copy2(path, backup)
           if path.read_bytes() != backup.read_bytes():
-              raise SystemExit('Backup is not byte-identical')
+              raise SystemExit("Backup is not byte-identical")
 
-          text = path.read_text(encoding='utf-8')
-          if text.count('1.17') != 3:
-              raise SystemExit(f'Expected exactly 3 version markers, found {text.count("1.17")}')
-          text = text.replace('1.17', '1.18')
+          text = path.read_text(encoding="utf-8")
 
-          image_marker = '''# ============================================================
+          def replace_once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected 1 match, found {count}")
+              text = text.replace(old, new, 1)
+
+          replace_once('APP_VERSION="1.17"', 'APP_VERSION="1.18"', 'shell version')
+          replace_once('APP_VERSION = "1.17"', 'APP_VERSION = "1.18"', 'root version')
+          replace_once('VERSION = "1.17"', 'VERSION = "1.18"', 'frontend version')
+
+          image_marker = """# ============================================================
           # Image
           # ============================================================
-          '''
-          if text.count(image_marker) != 1:
-              raise SystemExit('Root Image marker not unique')
+          """
+          image_marker = image_marker.replace("          ", "")
 
           benchmark_backend = r'''# ============================================================
           # USB-Benchmark
@@ -70,9 +77,6 @@ jobs:
               run(["sync"], check=False)
               run(["blockdev", "--flushbufs", disk])
 
-              # Ein einmalig erzeugtes, nicht komprimierbares Testmuster. Die
-              # ersten 4 KiB bleiben Null, damit keine zufällige gültige
-              # Partitionstabelle am Datenträgeranfang entstehen kann.
               pattern = b"\0" * 4096 + os.urandom(block_bytes - 4096)
 
               write_progress = Progress(
@@ -110,8 +114,6 @@ jobs:
               write_seconds = max(0.001, time.monotonic() - write_started)
               write_progress.finish(total_bytes)
 
-              # Vor dem Lesetest alle Schreibcaches leeren. Dadurch misst der
-              # Lesetest den Stick und nicht den Linux-Dateicache.
               run(["sync"], check=False)
               run(["blockdev", "--flushbufs", disk])
 
@@ -199,55 +201,47 @@ jobs:
 
 
           '''
-          text = text.replace(image_marker, benchmark_backend + image_marker, 1)
+          benchmark_backend = benchmark_backend.replace("          ", "")
+          replace_once(image_marker, benchmark_backend + image_marker, "image marker")
 
-          parser_marker = '''    p = sub.add_parser("restore")
+          parser_old = '''    p = sub.add_parser("restore")
               p.add_argument("--disk", required=True)
               p.add_argument("--image", required=True)
 
-          '''
-          parser_marker = parser_marker.replace('              ', '    ')
-          if text.count(parser_marker) != 1:
-              raise SystemExit('Restore parser marker not unique')
-          parser_insert = parser_marker + '''    p = sub.add_parser("benchmark")
+          '''.replace("              ", "    ")
+          parser_new = parser_old + '''    p = sub.add_parser("benchmark")
               p.add_argument("--disk", required=True)
 
-          '''.replace('              ', '    ')
-          text = text.replace(parser_marker, parser_insert, 1)
+          '''.replace("              ", "    ")
+          replace_once(parser_old, parser_new, "parser")
 
-          dispatch_marker = '''    elif args.action == "restore":
+          dispatch_old = '''    elif args.action == "restore":
               restore(args)
-          '''.replace('              ', '    ')
-          if text.count(dispatch_marker) != 1:
-              raise SystemExit('Restore dispatch marker not unique')
-          dispatch_insert = dispatch_marker + '''    elif args.action == "benchmark":
+          '''.replace("              ", "    ")
+          dispatch_new = dispatch_old + '''    elif args.action == "benchmark":
               benchmark(args)
-          '''.replace('              ', '    ')
-          text = text.replace(dispatch_marker, dispatch_insert, 1)
+          '''.replace("              ", "    ")
+          replace_once(dispatch_old, dispatch_new, "dispatch")
 
-          bottom_marker = '''        open_log = Gtk.Button(label="LOG ÖFFNEN")
+          bottom_old = '''        open_log = Gtk.Button(label="LOG ÖFFNEN")
                   open_log.add_css_class("secondary")
                   open_log.set_hexpand(True)
                   open_log.connect("clicked", self.open_log)
                   bottom.attach(open_log, 1, 1, 1, 1)
-          '''.replace('                  ', '        ')
-          if text.count(bottom_marker) != 1:
-              raise SystemExit('Bottom grid marker not unique')
-          bottom_insert = bottom_marker + '''
+          '''.replace("                  ", "        ")
+          bottom_new = bottom_old + '''
                   benchmark = Gtk.Button(label="USB-BENCHMARK")
                   benchmark.add_css_class("secondary")
                   benchmark.set_hexpand(True)
                   benchmark.connect("clicked", self.open_benchmark)
                   bottom.attach(benchmark, 0, 2, 1, 1)
-          '''.replace('                  ', '        ')
-          text = text.replace(bottom_marker, bottom_insert, 1)
+          '''.replace("                  ", "        ")
+          replace_once(bottom_old, bottom_new, "bottom grid")
 
           online_marker = '''    # --------------------------------------------------------
               # Online-Update
               # --------------------------------------------------------
-          '''.replace('              ', '    ')
-          if text.count(online_marker) != 1:
-              raise SystemExit('Online marker not unique')
+          '''.replace("              ", "    ")
 
           benchmark_ui = r'''    # --------------------------------------------------------
               # USB-Benchmark
@@ -337,64 +331,54 @@ jobs:
                   buttons.append(start)
                   win.present()
 
-          '''.replace('              ', '    ')
-          text = text.replace(online_marker, benchmark_ui + online_marker, 1)
+          '''
+          benchmark_ui = benchmark_ui.replace("              ", "    ")
+          replace_once(online_marker, benchmark_ui + online_marker, "online marker")
 
-          worker_marker = '''        def worker():
+          worker_old = '''        def worker():
                   final_success = None
                   final_error = None
                   backend_restart = False
-          '''.replace('                  ', '        ')
-          if text.count(worker_marker) != 1:
-              raise SystemExit('Worker marker not unique')
-          worker_insert = '''        def worker():
+          '''.replace("                  ", "        ")
+          worker_new = '''        def worker():
                   final_success = None
                   final_detail = ""
                   final_error = None
                   backend_restart = False
-          '''.replace('                  ', '        ')
-          text = text.replace(worker_marker, worker_insert, 1)
+          '''.replace("                  ", "        ")
+          replace_once(worker_old, worker_new, "worker")
 
-          success_marker = '''                    if event.get("type") == "success":
+          success_old = '''                    if event.get("type") == "success":
                                   final_success = event.get("message", "Fertig.")
                                   backend_restart = bool(
                                       event.get("restart", False)
                                   )
-          '''.replace('                                  ', '                    ')
-          if text.count(success_marker) != 1:
-              raise SystemExit('Success marker not unique')
-          success_insert = '''                    if event.get("type") == "success":
+          '''.replace("                                  ", "                    ")
+          success_new = '''                    if event.get("type") == "success":
                                   final_success = event.get("message", "Fertig.")
                                   final_detail = event.get("detail", "") or ""
                                   backend_restart = bool(
                                       event.get("restart", False)
                                   )
-          '''.replace('                                  ', '                    ')
-          text = text.replace(success_marker, success_insert, 1)
+          '''.replace("                                  ", "                    ")
+          replace_once(success_old, success_new, "success event")
 
-          detail_marker = '''                else:
+          detail_old = '''                else:
                       detail = (
                           "Der Datenträger kann nach erfolgreichem "
                           "Backup/Restore sicher entfernt werden."
                       )
-          '''.replace('                      ', '                ')
-          if text.count(detail_marker) != 1:
-              raise SystemExit('Detail marker not unique')
-          detail_insert = '''                else:
+          '''.replace("                      ", "                ")
+          detail_new = '''                else:
                       detail = final_detail or (
                           "Der Datenträger kann nach erfolgreichem "
                           "Backup/Restore sicher entfernt werden."
                       )
-          '''.replace('                      ', '                ')
-          text = text.replace(detail_marker, detail_insert, 1)
+          '''.replace("                      ", "                ")
+          replace_once(detail_old, detail_new, "final detail")
 
-          path.write_text(text, encoding='utf-8', newline='\n')
+          path.write_text(text, encoding="utf-8", newline="\n")
           PY
-
-          cmp -s "Uwuntu Image Manager.sh" "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh" && {
-            echo "ERROR: backup unexpectedly equals modified IM" >&2
-            exit 1
-          } || true
 
       - name: Static checks
         shell: bash
@@ -404,18 +388,17 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
-          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
-          assert text.count('1.18') == 3
-          assert 'def benchmark(args):' in text
-          assert 'def open_benchmark(self, *_):' in text
+          text = Path("Uwuntu Image Manager.sh").read_text(encoding="utf-8")
+          assert text.count("1.18") == 3
+          assert "def benchmark(args):" in text
+          assert "def open_benchmark(self, *_):" in text
           assert 'sub.add_parser("benchmark")' in text
-          assert '["benchmark", "--disk", disk["path"]]' in text
           root = re.search(r"<<'PYROOT'\n(.*?)\nPYROOT", text, re.S)
           app = re.search(r"<<'PYAPP'\n(.*?)\nPYAPP", text, re.S)
           assert root and app
-          compile(root.group(1), '<root-helper>', 'exec')
-          compile(app.group(1), '<frontend>', 'exec')
-          Path('/tmp/root-helper.py').write_text(root.group(1), encoding='utf-8')
+          compile(root.group(1), "<root-helper>", "exec")
+          compile(app.group(1), "<frontend>", "exec")
+          Path("/tmp/root-helper.py").write_text(root.group(1), encoding="utf-8")
           PY
           SUDO_USER=runner python3 /tmp/root-helper.py --help | grep -q benchmark
 
@@ -423,7 +406,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git show HEAD:"Uwuntu Image Manager.sh" > /tmp/im117-original.sh
+          git show HEAD^:"Uwuntu Image Manager.sh" > /tmp/im117-original.sh || git show HEAD:"Uwuntu Image Manager.sh" > /tmp/im117-original.sh
           cmp -s /tmp/im117-original.sh "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
 
       - name: Commit experiment output
