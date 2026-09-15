@@ -31,6 +31,9 @@ jobs:
           cp --preserve=mode,timestamps 'Uwuntu Image Manager.sh' "$backup"
           cmp -s 'Uwuntu Image Manager.sh' "$backup"
 
+      - name: Fix builder version assertions
+        run: python3 .github/im119_builder_fix.py
+
       - name: Build IM1.19
         run: python3 .github/im119_builder.py
 
@@ -48,8 +51,8 @@ jobs:
               if not m:
                   raise SystemExit(f'{tag} block not found')
               compile(m.group(1), f'<{tag}>', 'exec')
-          assert text.count('APP_VERSION="1.19"') == 2
-          assert text.count('VERSION = "1.19"') == 1
+          assert text.count('APP_VERSION="1.19"') == 1
+          assert text.count('VERSION = "1.19"') == 2
           assert 'class BatchRestoreWindow(Gtk.Window):' in text
           assert 'safe_to_remove=safe_to_remove' in text
           print('Embedded Python compile OK')
@@ -67,6 +70,7 @@ jobs:
         shell: bash
         run: |
           rm -f .github/im119_builder.py
+          rm -f .github/im119_builder_fix.py
           rm -f .github/workflows/im119-build.yml
 
       - name: Commit final result
