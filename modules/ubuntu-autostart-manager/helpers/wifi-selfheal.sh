@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Uwuntu WLAN Self-Heal
-# Version 1.1
+# Version 1.2
 #
 # Ziel:
 # - SSID/Profil heißt exakt "Guest".
@@ -9,6 +9,8 @@
 # - NetworkManager wird nur neu gestartet, wenn KEINE andere echte Verbindung aktiv ist.
 # - Das Guest-Profil bleibt hardwareunabhängig (kein Interface-/BSSID-/MAC-Binding).
 # - WLAN-Powersave ist für Guest deaktiviert.
+# - Normaler NetworkManager-/wpa_supplicant-Verbindungsaufbau wird nicht unterbrochen.
+# - Erfolg gilt erst mit Guest + connected + IPv4 und kurzer Stabilitätsprüfung.
 # - flock verhindert konkurrierende Reparaturläufe.
 
 set -u
@@ -20,9 +22,13 @@ SSID="Guest"
 TAG="uwuntu-wifi-selfheal"
 LOG="/var/log/uwuntu-wifi-selfheal.log"
 LOCK="/run/uwuntu-wifi-selfheal.lock"
-PROFILE_OPTIMIZED_STAMP="/run/uwuntu-wifi-selfheal-profile-v1.1"
+PROFILE_OPTIMIZED_STAMP="/run/uwuntu-wifi-selfheal-profile-v1.2"
+NOT_READY_STAMP="/run/uwuntu-wifi-selfheal-not-ready-v1.2"
 RECREATE_STAMP="/run/uwuntu-wifi-selfheal-last-recreate"
 NM_RESTART_STAMP="/run/uwuntu-wifi-selfheal-last-nm-restart"
+AUTOCONNECT_GRACE_SECONDS=6
+READY_STABLE_SECONDS=2
+READY_WAIT_SECONDS=6
 
 log() {
     local msg
@@ -40,14 +46,55 @@ wifi_iface() {
         | awk -F: '$2=="wifi" {print $1; exit}'
 }
 
+wifi_device_state() {
+    local iface="$1"
+
+    nm -t -f DEVICE,TYPE,STATE device status \
+        | awk -F: -v dev="$iface" '$1==dev && $2=="wifi" {print $3; exit}'
+}
+
 guest_profile_uuids() {
     nm -t -f UUID,NAME,TYPE connection show \
         | awk -F: '$2=="Guest" && $3=="802-11-wireless" {print $1}'
 }
 
-guest_active() {
-    nm -t -f NAME,TYPE,DEVICE connection show --active \
-        | awk -F: '$1=="Guest" && $2=="802-11-wireless" && $3!="" {found=1} END {exit(found ? 0 : 1)}'
+guest_has_ipv4() {
+    local iface="$1"
+
+    nm -g IP4.ADDRESS device show "$iface" \
+        | grep -Ev '^169\.254\.' \
+        | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'
+}
+
+guest_ready_now() {
+    local iface="$1"
+
+    nm -t -f DEVICE,TYPE,STATE,CONNECTION device status \
+        | awk -F: -v dev="$iface" -v profile="$PROFILE" '
+            $1==dev && $2=="wifi" && $3=="connected" && $4==profile {found=1}
+            END {exit(found ? 0 : 1)}
+        ' \
+        || return 1
+
+    guest_has_ipv4 "$iface"
+}
+
+wait_guest_ready_stable() {
+    local iface="$1"
+    local deadline
+
+    deadline=$((SECONDS + READY_WAIT_SECONDS))
+    while (( SECONDS <= deadline )); do
+        if guest_ready_now "$iface"; then
+            sleep "$READY_STABLE_SECONDS"
+            if guest_ready_now "$iface"; then
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+
+    return 1
 }
 
 # Diese Prüfung entscheidet ausschließlich über einen kompletten
@@ -84,6 +131,20 @@ mark_cooldown() {
     date +%s > "$1" 2>/dev/null || true
 }
 
+clear_not_ready_grace() {
+    rm -f "$NOT_READY_STAMP" 2>/dev/null || true
+}
+
+autoconnect_grace_elapsed() {
+    if [[ ! -r "$NOT_READY_STAMP" ]]; then
+        mark_cooldown "$NOT_READY_STAMP"
+        log "Guest noch nicht bereit. NetworkManager erhält zuerst ${AUTOCONNECT_GRACE_SECONDS}s für normalen Autoconnect."
+        return 1
+    fi
+
+    cooldown_ready "$NOT_READY_STAMP" "$AUTOCONNECT_GRACE_SECONDS"
+}
+
 optimize_guest_profiles() {
     local uuid found=0 failed=0
 
@@ -116,6 +177,8 @@ optimize_guest_profiles() {
 guest_visible() {
     local iface="$1"
 
+    # Ein erzwungener Scan ist erst in Stufe 3 sinnvoll. Im normalen Boot und
+    # in Stufe 1 darf er nicht mit einem laufenden wpa_supplicant-Scan kollidieren.
     nm device wifi rescan ifname "$iface" >/dev/null 2>&1 || true
     sleep 1
 
@@ -128,17 +191,17 @@ try_guest_profiles() {
     local uuid
 
     optimize_guest_profiles || true
-    nm device wifi rescan ifname "$iface" >/dev/null 2>&1 || true
-    sleep 1
 
+    # Kein erzwungener Rescan hier: NetworkManager darf seinen laufenden Scan
+    # und die normale Autoconnect-Logik unbehelligt abschließen.
     while IFS= read -r uuid; do
         [[ -n "$uuid" ]] || continue
         log "Versuche Guest-Profil UUID $uuid auf $iface."
         timeout 6s nmcli connection up uuid "$uuid" ifname "$iface" >/dev/null 2>&1 || true
-        sleep 1
 
-        if guest_active; then
-            log "WLAN erfolgreich mit '$PROFILE' verbunden."
+        if wait_guest_ready_stable "$iface"; then
+            clear_not_ready_grace
+            log "WLAN stabil mit '$PROFILE' verbunden; IPv4 ist aktiv."
             return 0
         fi
     done < <(guest_profile_uuids)
@@ -178,8 +241,9 @@ recreate_guest_profile() {
         touch "$PROFILE_OPTIMIZED_STAMP" 2>/dev/null || true
     fi
 
-    if guest_active; then
-        log "Guest-Profil neu erstellt und erfolgreich verbunden."
+    if wait_guest_ready_stable "$iface"; then
+        clear_not_ready_grace
+        log "Guest-Profil neu erstellt und stabil mit IPv4 verbunden."
         return 0
     fi
 
@@ -208,30 +272,46 @@ main() {
         exit 0
     fi
 
-    local iface
+    local iface state
     iface="$(wifi_iface)"
     if [[ -z "${iface:-}" ]]; then
         exit 0
     fi
 
-    # Nur einmal pro Boot aktiv schreiben/reapplyen. Der 5-Sekunden-Healthy-
-    # Check bleibt danach ein sehr leichter, stiller Zustandscheck.
-    if [[ ! -e "$PROFILE_OPTIMIZED_STAMP" ]]; then
-        if optimize_guest_profiles; then
-            touch "$PROFILE_OPTIMIZED_STAMP" 2>/dev/null || true
-            if guest_active; then
-                nm device reapply "$iface" >/dev/null 2>&1 || true
+    state="$(wifi_device_state "$iface")"
+
+    # Während NetworkManager/wpa_supplicant das Gerät noch initialisiert oder
+    # gerade verbindet, greift Self-Heal nicht ein. Damit funkt der Timer beim
+    # Boot nicht mehr in prepare/config/ip-config/Scan/Association hinein.
+    case "$state" in
+        connecting*|unavailable*|unmanaged*|unknown*|"")
+            exit 0
+            ;;
+    esac
+
+    if guest_ready_now "$iface"; then
+        clear_not_ready_grace
+
+        # Profil nur einmal pro Boot normalisieren. Kein reapply: Eine bereits
+        # stabile Verbindung wird durch Self-Heal nicht erneut angefasst.
+        if [[ ! -e "$PROFILE_OPTIMIZED_STAMP" ]]; then
+            if optimize_guest_profiles; then
+                touch "$PROFILE_OPTIMIZED_STAMP" 2>/dev/null || true
             fi
         fi
-    fi
-
-    if guest_active; then
         exit 0
     fi
 
-    log "Guest ist auf $iface nicht verbunden. Starte WLAN-Reparatur; LAN bleibt unangetastet."
+    # Bei disconnected bzw. Guest ohne fertige IPv4-Verbindung bekommt
+    # NetworkManager zuerst selbst eine kurze Chance für Autoconnect/DHCP.
+    if ! autoconnect_grace_elapsed; then
+        exit 0
+    fi
+
+    log "Guest ist auf $iface nach Autoconnect-Schonfrist nicht bereit. Starte WLAN-Reparatur; LAN bleibt unangetastet."
 
     # Stufe 1: WLAN aktivieren/entsperren und Guest direkt verbinden.
+    # Kein erzwungener WLAN-Scan in dieser Stufe.
     nm radio wifi on >/dev/null 2>&1 || true
     if command -v rfkill >/dev/null 2>&1; then
         rfkill unblock wifi >/dev/null 2>&1 || true
@@ -288,14 +368,13 @@ main() {
         if command -v rfkill >/dev/null 2>&1; then
             rfkill unblock wifi >/dev/null 2>&1 || true
         fi
-        try_guest_profiles "$iface" || true
+        if try_guest_profiles "$iface"; then
+            log "Guest nach NetworkManager-Neustart stabil mit IPv4 verbunden."
+            exit 0
+        fi
     fi
 
-    if guest_active; then
-        log "Guest nach NetworkManager-Neustart erfolgreich verbunden."
-    else
-        log "Guest weiterhin nicht verbunden. Nächster Timer-Durchlauf versucht es erneut."
-    fi
+    log "Guest weiterhin nicht stabil mit IPv4 verbunden. Nächster Timer-Durchlauf versucht es erneut."
 }
 
 main "$@"
