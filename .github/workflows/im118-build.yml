@@ -1,0 +1,438 @@
+name: IM1.18 USB benchmark build
+
+on:
+  push:
+    branches:
+      - experiment/im118-usb-benchmark-build
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    if: github.event.head_commit.message != 'IM1.18 experiment output'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch IM1.18 and create exact backup
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          path = Path('Uwuntu Image Manager.sh')
+          backup = Path('backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh')
+          backup.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(path, backup)
+          if path.read_bytes() != backup.read_bytes():
+              raise SystemExit('Backup is not byte-identical')
+
+          text = path.read_text(encoding='utf-8')
+          if text.count('1.17') != 3:
+              raise SystemExit(f'Expected exactly 3 version markers, found {text.count("1.17")}')
+          text = text.replace('1.17', '1.18')
+
+          image_marker = '''# ============================================================
+          # Image
+          # ============================================================
+          '''
+          if text.count(image_marker) != 1:
+              raise SystemExit('Root Image marker not unique')
+
+          benchmark_backend = r'''# ============================================================
+          # USB-Benchmark
+          # ============================================================
+
+          def benchmark(args):
+              disk = args.disk
+              validate_disk(disk)
+
+              total_bytes = 512 * MIB
+              block_bytes = 32 * MIB
+              info = disk_info(disk)
+
+              if int(info.get("size_bytes") or 0) < total_bytes:
+                  fail("Der ausgewählte Datenträger ist kleiner als 512 MiB.")
+
+              emit(
+                  "info",
+                  message=(
+                      f"USB-Benchmark: {info['model']} · {disk} · "
+                      "512 MiB lesen/schreiben"
+                  ),
+              )
+
+              unmount_disk(disk)
+              run(["sync"], check=False)
+              run(["blockdev", "--flushbufs", disk])
+
+              # Ein einmalig erzeugtes, nicht komprimierbares Testmuster. Die
+              # ersten 4 KiB bleiben Null, damit keine zufällige gültige
+              # Partitionstabelle am Datenträgeranfang entstehen kann.
+              pattern = b"\0" * 4096 + os.urandom(block_bytes - 4096)
+
+              write_progress = Progress(
+                  "USB-Benchmark · 512 MiB schreiben",
+                  1,
+                  2,
+                  total_bytes,
+                  "SCHREIBEN",
+              )
+
+              write_started = time.monotonic()
+              done = 0
+
+              try:
+                  with open(disk, "r+b", buffering=0) as handle:
+                      while done < total_bytes:
+                          view = memoryview(pattern)
+                          while view:
+                              written = handle.write(view)
+                              if not written:
+                                  raise RuntimeError(
+                                      "USB-Benchmark konnte nicht weiter schreiben."
+                                  )
+                              view = view[written:]
+                          done += block_bytes
+                          write_progress.update(done)
+
+                      handle.flush()
+                      os.fsync(handle.fileno())
+              except Exception as exc:
+                  raise RuntimeError(
+                      f"Schreibtest des USB-Benchmarks fehlgeschlagen: {exc}"
+                  ) from exc
+
+              write_seconds = max(0.001, time.monotonic() - write_started)
+              write_progress.finish(total_bytes)
+
+              # Vor dem Lesetest alle Schreibcaches leeren. Dadurch misst der
+              # Lesetest den Stick und nicht den Linux-Dateicache.
+              run(["sync"], check=False)
+              run(["blockdev", "--flushbufs", disk])
+
+              read_progress = Progress(
+                  "USB-Benchmark · 512 MiB lesen",
+                  2,
+                  2,
+                  total_bytes,
+                  "LESEN",
+              )
+
+              read_started = time.monotonic()
+              done = 0
+
+              try:
+                  with open(disk, "rb", buffering=0) as handle:
+                      while done < total_bytes:
+                          chunk = handle.read(block_bytes)
+                          if len(chunk) != block_bytes:
+                              raise RuntimeError(
+                                  "USB-Benchmark konnte nicht 512 MiB vollständig lesen."
+                              )
+                          if chunk != pattern:
+                              raise RuntimeError(
+                                  "Die gelesenen Testdaten stimmen nicht mit den "
+                                  "geschriebenen Daten überein."
+                              )
+                          done += len(chunk)
+                          read_progress.update(done)
+              except Exception as exc:
+                  raise RuntimeError(
+                      f"Lesetest des USB-Benchmarks fehlgeschlagen: {exc}"
+                  ) from exc
+
+              read_seconds = max(0.001, time.monotonic() - read_started)
+              read_progress.finish(total_bytes)
+
+              write_mbps = total_bytes / write_seconds / 1_000_000
+              read_mbps = total_bytes / read_seconds / 1_000_000
+              total_seconds = write_seconds + read_seconds
+
+              write_text = f"{write_mbps:.1f}".replace(".", ",")
+              read_text = f"{read_mbps:.1f}".replace(".", ",")
+
+              log(
+                  "USB-BENCHMARK ERFOLGREICH: "
+                  f"{disk}; write={write_mbps:.2f}MB/s; "
+                  f"read={read_mbps:.2f}MB/s; "
+                  f"write_s={write_seconds:.2f}; read_s={read_seconds:.2f}"
+              )
+
+              run(["sync"], check=False)
+              run(["blockdev", "--rereadpt", disk], check=False)
+              poweroff = run(
+                  ["udisksctl", "power-off", "-b", disk],
+                  check=False,
+              )
+
+              if poweroff.returncode == 0:
+                  finish_note = "Der Stick wurde sicher ausgeworfen und kann entfernt werden."
+              else:
+                  finish_note = (
+                      "Der Stick ist synchronisiert und ausgehängt. "
+                      "Er kann jetzt entfernt werden."
+                  )
+
+              emit(
+                  "success",
+                  message="USB-Benchmark abgeschlossen.",
+                  detail=(
+                      f"{info['model']} · {disk}\n\n"
+                      f"Schreiben: {write_text} MB/s\n"
+                      f"Lesen: {read_text} MB/s\n"
+                      "Testmenge: 512 MiB\n"
+                      f"Schreibzeit: {write_seconds:.1f} s\n"
+                      f"Lesezeit: {read_seconds:.1f} s\n"
+                      f"Gesamt: {total_seconds:.1f} s\n\n"
+                      "Die ersten 512 MiB wurden für den Test überschrieben. "
+                      "Der Stick ist dadurch nicht mehr bootfähig und muss "
+                      "vor normaler Nutzung neu formatiert oder mit dem "
+                      "Uwuntu Image Manager wiederhergestellt werden.\n\n"
+                      + finish_note
+                  ),
+              )
+
+
+          '''
+          text = text.replace(image_marker, benchmark_backend + image_marker, 1)
+
+          parser_marker = '''    p = sub.add_parser("restore")
+              p.add_argument("--disk", required=True)
+              p.add_argument("--image", required=True)
+
+          '''
+          parser_marker = parser_marker.replace('              ', '    ')
+          if text.count(parser_marker) != 1:
+              raise SystemExit('Restore parser marker not unique')
+          parser_insert = parser_marker + '''    p = sub.add_parser("benchmark")
+              p.add_argument("--disk", required=True)
+
+          '''.replace('              ', '    ')
+          text = text.replace(parser_marker, parser_insert, 1)
+
+          dispatch_marker = '''    elif args.action == "restore":
+              restore(args)
+          '''.replace('              ', '    ')
+          if text.count(dispatch_marker) != 1:
+              raise SystemExit('Restore dispatch marker not unique')
+          dispatch_insert = dispatch_marker + '''    elif args.action == "benchmark":
+              benchmark(args)
+          '''.replace('              ', '    ')
+          text = text.replace(dispatch_marker, dispatch_insert, 1)
+
+          bottom_marker = '''        open_log = Gtk.Button(label="LOG ÖFFNEN")
+                  open_log.add_css_class("secondary")
+                  open_log.set_hexpand(True)
+                  open_log.connect("clicked", self.open_log)
+                  bottom.attach(open_log, 1, 1, 1, 1)
+          '''.replace('                  ', '        ')
+          if text.count(bottom_marker) != 1:
+              raise SystemExit('Bottom grid marker not unique')
+          bottom_insert = bottom_marker + '''
+                  benchmark = Gtk.Button(label="USB-BENCHMARK")
+                  benchmark.add_css_class("secondary")
+                  benchmark.set_hexpand(True)
+                  benchmark.connect("clicked", self.open_benchmark)
+                  bottom.attach(benchmark, 0, 2, 1, 1)
+          '''.replace('                  ', '        ')
+          text = text.replace(bottom_marker, bottom_insert, 1)
+
+          online_marker = '''    # --------------------------------------------------------
+              # Online-Update
+              # --------------------------------------------------------
+          '''.replace('              ', '    ')
+          if text.count(online_marker) != 1:
+              raise SystemExit('Online marker not unique')
+
+          benchmark_ui = r'''    # --------------------------------------------------------
+              # USB-Benchmark
+              # --------------------------------------------------------
+              def open_benchmark(self, *_):
+                  disks = list_disks()
+
+                  if not disks:
+                      self.error(
+                          "Kein geeigneter USB-/Wechseldatenträger wurde gefunden.\n\n"
+                          "Stick einstecken und die Funktion erneut öffnen."
+                      )
+                      return
+
+                  win = ActionWindow(self, "USB-Benchmark")
+                  win.root.append(make_label("USB-BENCHMARK", "card-title"))
+                  win.root.append(
+                      make_label(
+                          "Misst die sequenzielle Schreib- und Lesegeschwindigkeit "
+                          "mit jeweils 512 MiB. So lassen sich mehrere USB-Sticks "
+                          "schnell miteinander vergleichen.",
+                          "card-text",
+                      )
+                  )
+
+                  dropdown = dropdown_from_strings(
+                      [disk_display(item) for item in disks]
+                  )
+                  win.root.append(dropdown)
+
+                  warning = make_label(
+                      "ACHTUNG: Der Test überschreibt die ersten 512 MiB des "
+                      "ausgewählten Sticks. Vorhandene Partitionen/Daten werden "
+                      "dadurch unbrauchbar.",
+                      "warning",
+                  )
+                  win.root.append(warning)
+
+                  note = make_label(
+                      "Test: 512 MiB schreiben → Cache leeren → 512 MiB lesen "
+                      "und Daten prüfen. Ergebnis direkt in MB/s.",
+                      "details",
+                  )
+                  win.root.append(note)
+
+                  buttons = Gtk.Box(
+                      orientation=Gtk.Orientation.HORIZONTAL,
+                      spacing=8,
+                  )
+                  win.root.append(buttons)
+
+                  cancel = Gtk.Button(label="ABBRECHEN")
+                  cancel.add_css_class("secondary")
+                  cancel.set_hexpand(True)
+                  cancel.connect("clicked", lambda *_: win.close())
+                  buttons.append(cancel)
+
+                  start = Gtk.Button(label="BENCHMARK STARTEN")
+                  start.add_css_class("primary")
+                  start.set_hexpand(True)
+
+                  def clicked(*_):
+                      idx = dropdown.get_selected()
+                      if idx >= len(disks):
+                          return
+
+                      disk = disks[idx]
+
+                      self.confirm(
+                          "USB-STICK WIRKLICH TESTEN?",
+                          f"Ziel:\n{disk_display(disk)}\n\n"
+                          "Die ersten 512 MiB des Sticks werden überschrieben. "
+                          "Damit gehen vorhandene Partitionsinformationen und "
+                          "Daten auf dem Stick verloren.\n\n"
+                          "Nach dem Benchmark muss der Stick neu formatiert oder "
+                          "mit dem Uwuntu Image Manager wiederhergestellt werden.",
+                          lambda: (
+                              win.close(),
+                              self.run_backend(
+                                  "USB-BENCHMARK · 512 MiB",
+                                  ["benchmark", "--disk", disk["path"]],
+                              ),
+                          ),
+                      )
+
+                  start.connect("clicked", clicked)
+                  buttons.append(start)
+                  win.present()
+
+          '''.replace('              ', '    ')
+          text = text.replace(online_marker, benchmark_ui + online_marker, 1)
+
+          worker_marker = '''        def worker():
+                  final_success = None
+                  final_error = None
+                  backend_restart = False
+          '''.replace('                  ', '        ')
+          if text.count(worker_marker) != 1:
+              raise SystemExit('Worker marker not unique')
+          worker_insert = '''        def worker():
+                  final_success = None
+                  final_detail = ""
+                  final_error = None
+                  backend_restart = False
+          '''.replace('                  ', '        ')
+          text = text.replace(worker_marker, worker_insert, 1)
+
+          success_marker = '''                    if event.get("type") == "success":
+                                  final_success = event.get("message", "Fertig.")
+                                  backend_restart = bool(
+                                      event.get("restart", False)
+                                  )
+          '''.replace('                                  ', '                    ')
+          if text.count(success_marker) != 1:
+              raise SystemExit('Success marker not unique')
+          success_insert = '''                    if event.get("type") == "success":
+                                  final_success = event.get("message", "Fertig.")
+                                  final_detail = event.get("detail", "") or ""
+                                  backend_restart = bool(
+                                      event.get("restart", False)
+                                  )
+          '''.replace('                                  ', '                    ')
+          text = text.replace(success_marker, success_insert, 1)
+
+          detail_marker = '''                else:
+                      detail = (
+                          "Der Datenträger kann nach erfolgreichem "
+                          "Backup/Restore sicher entfernt werden."
+                      )
+          '''.replace('                      ', '                ')
+          if text.count(detail_marker) != 1:
+              raise SystemExit('Detail marker not unique')
+          detail_insert = '''                else:
+                      detail = final_detail or (
+                          "Der Datenträger kann nach erfolgreichem "
+                          "Backup/Restore sicher entfernt werden."
+                      )
+          '''.replace('                      ', '                ')
+          text = text.replace(detail_marker, detail_insert, 1)
+
+          path.write_text(text, encoding='utf-8', newline='\n')
+          PY
+
+          cmp -s "Uwuntu Image Manager.sh" "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh" && {
+            echo "ERROR: backup unexpectedly equals modified IM" >&2
+            exit 1
+          } || true
+
+      - name: Static checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n "Uwuntu Image Manager.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          assert text.count('1.18') == 3
+          assert 'def benchmark(args):' in text
+          assert 'def open_benchmark(self, *_):' in text
+          assert 'sub.add_parser("benchmark")' in text
+          assert '["benchmark", "--disk", disk["path"]]' in text
+          root = re.search(r"<<'PYROOT'\n(.*?)\nPYROOT", text, re.S)
+          app = re.search(r"<<'PYAPP'\n(.*?)\nPYAPP", text, re.S)
+          assert root and app
+          compile(root.group(1), '<root-helper>', 'exec')
+          compile(app.group(1), '<frontend>', 'exec')
+          Path('/tmp/root-helper.py').write_text(root.group(1), encoding='utf-8')
+          PY
+          SUDO_USER=runner python3 /tmp/root-helper.py --help | grep -q benchmark
+
+      - name: Verify exact pre-change backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show HEAD:"Uwuntu Image Manager.sh" > /tmp/im117-original.sh
+          cmp -s /tmp/im117-original.sh "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
+
+      - name: Commit experiment output
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/im118-build.yml
+          git add "Uwuntu Image Manager.sh" "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
+          git commit -m "IM1.18 experiment output"
+          git push origin HEAD:experiment/im118-usb-benchmark-build
