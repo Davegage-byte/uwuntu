@@ -1,0 +1,80 @@
+name: IM1.19 Parallel Restore Build
+
+on:
+  push:
+    branches:
+      - feature/im119-parallel-restore
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: feature/im119-parallel-restore
+          fetch-depth: 0
+
+      - name: Exact IM1.18 backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f 'Uwuntu Image Manager.sh'
+          grep -q 'APP_VERSION="1.18"' 'Uwuntu Image Manager.sh'
+          mkdir -p backups/uwuntu-image-manager
+          backup='backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-07-10.sh'
+          test ! -e "$backup"
+          cp --preserve=mode,timestamps 'Uwuntu Image Manager.sh' "$backup"
+          cmp -s 'Uwuntu Image Manager.sh' "$backup"
+
+      - name: Build IM1.19
+        run: python3 .github/im119_builder.py
+
+      - name: Validate shell and embedded Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n 'Uwuntu Image Manager.sh'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          for tag in ('PYROOT', 'PYAPP'):
+              m = re.search(r"<<'" + tag + r"'\n(.*?)\n" + tag + r"\n", text, re.S)
+              if not m:
+                  raise SystemExit(f'{tag} block not found')
+              compile(m.group(1), f'<{tag}>', 'exec')
+          assert text.count('APP_VERSION="1.19"') == 2
+          assert text.count('VERSION = "1.19"') == 1
+          assert 'class BatchRestoreWindow(Gtk.Window):' in text
+          assert 'safe_to_remove=safe_to_remove' in text
+          print('Embedded Python compile OK')
+          PY
+
+      - name: Verify backup still exact
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup='backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-07-10.sh'
+          git show b37f49df5229738cb451da92992a3b9c1dce19cb:'Uwuntu Image Manager.sh' > /tmp/im118-base.sh
+          cmp -s /tmp/im118-base.sh "$backup"
+
+      - name: Remove temporary builder files
+        shell: bash
+        run: |
+          rm -f .github/im119_builder.py
+          rm -f .github/workflows/im119-build.yml
+
+      - name: Commit final result
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'IM1.18→IM1.19 · Parallel-Restore für bis zu 10 Sticks' -m 'Mehrfachauswahl im Restore, parallele Prozesse mit eigenem Fortschritt/Rate/ETA, Batch-Zeitachse mit Fertig-Markierungen sowie grüne Freigabe erst nach bestätigtem sicherem Auswerfen. Exaktes IM1.18-Backup enthalten.'
+          git push origin HEAD:feature/im119-parallel-restore
