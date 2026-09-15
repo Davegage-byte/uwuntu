@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.20"
+APP_VERSION="1.21"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -76,6 +76,7 @@ if [[ "$ROOT_MODE" -eq 1 ]]; then
 import argparse
 import base64
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import math
@@ -94,7 +95,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.20"
+APP_VERSION = "1.21"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -409,33 +410,147 @@ def wait_partition(path, timeout=12):
     fail(f"Partition wurde nicht angelegt/erkannt: {path}")
 
 
-def unmount_disk(disk):
+def _disk_partitions(disk):
     try:
         rows = output(
             ["lsblk", "-rnpo", "PATH,TYPE", disk],
+            timeout=10,
+        ).splitlines()
+    except Exception as exc:
+        log(f"UNMOUNT: Partitionen für {disk} konnten nicht gelesen werden: {exc}")
+        return []
+
+    partitions = []
+    for row in rows:
+        parts = row.split()
+        if len(parts) >= 2 and parts[1] == "part":
+            partitions.append(parts[0])
+    return partitions
+
+
+def _partition_mounts(part):
+    try:
+        return output(
+            ["findmnt", "-rn", "-S", part, "-o", "TARGET"],
             timeout=5,
         ).splitlines()
     except Exception:
-        rows = []
+        return []
 
-    for row in reversed(rows):
-        parts = row.split()
-        if len(parts) < 2 or parts[1] != "part":
-            continue
 
-        part = parts[0]
+def _best_effort(args, timeout=10):
+    try:
+        return run(args, check=False, timeout=timeout)
+    except Exception as exc:
+        log(
+            "BEST-EFFORT FEHLER: "
+            + " ".join(map(str, args))
+            + f": {exc}"
+        )
+        return None
+
+
+def unmount_disk(disk, retries=5, lazy_fallback=False):
+    """Alle Partitionen eines Datenträgers robust aushängen.
+
+    Wichtig: Es wird über den Gerätepfad ausgehängt und nicht über
+    den von findmnt escaped ausgegebenen Mountpoint. Dadurch sind
+    Mountpunkte mit Leerzeichen (\x20) unkritisch.
+    """
+    partitions = _disk_partitions(disk)
+    if not partitions:
+        return True
+
+    retries = max(1, int(retries))
+
+    for attempt in range(1, retries + 1):
+        for part in reversed(partitions):
+            if not _partition_mounts(part):
+                continue
+
+            log(f"UNMOUNT: {part} Versuch {attempt}/{retries}")
+            _best_effort(
+                ["udisksctl", "unmount", "-b", part],
+                timeout=10,
+            )
+            _best_effort(["umount", part], timeout=10)
+
+        _best_effort(["udevadm", "settle"], timeout=15)
+
+        remaining = [
+            part for part in partitions if _partition_mounts(part)
+        ]
+        if not remaining:
+            return True
+
+        time.sleep(min(0.25 * attempt, 1.0))
+
+    if lazy_fallback:
+        for part in reversed(partitions):
+            if _partition_mounts(part):
+                log(f"UNMOUNT-LAZY: {part}")
+                _best_effort(["umount", "-l", part], timeout=10)
+
+        _best_effort(["udevadm", "settle"], timeout=15)
+        time.sleep(0.35)
+
+    remaining = [
+        part for part in partitions if _partition_mounts(part)
+    ]
+    if remaining:
+        log(
+            f"UNMOUNT: {disk} weiterhin belegt: "
+            + ", ".join(remaining)
+        )
+        return False
+
+    return True
+
+
+def wipe_disk_for_restore(disk, attempts=8):
+    """wipefs gegen Desktop-/UDisks-Automount-Races absichern."""
+    last_detail = ""
+
+    for attempt in range(1, attempts + 1):
+        unmount_disk(
+            disk,
+            retries=3,
+            lazy_fallback=attempt >= 4,
+        )
+        _best_effort(["sync"], timeout=20)
+        _best_effort(["udevadm", "settle"], timeout=15)
 
         try:
-            mounts = output(
-                ["findmnt", "-rn", "-S", part, "-o", "TARGET"],
-                timeout=3,
-            ).splitlines()
-        except Exception:
-            mounts = []
+            result = run(
+                ["wipefs", "-a", disk],
+                check=False,
+                capture=True,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                if attempt > 1:
+                    log(f"WIPEFS: {disk} nach {attempt} Versuchen frei")
+                return
 
-        for mountpoint in reversed(mounts):
-            if mountpoint.strip():
-                run(["umount", mountpoint.strip()], check=False)
+            last_detail = (
+                (result.stderr or result.stdout or "").strip()
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_detail = f"Timeout nach {exc.timeout} s"
+        except Exception as exc:
+            last_detail = str(exc)
+
+        log(
+            f"WIPEFS RETRY {attempt}/{attempts}: {disk}: "
+            f"{last_detail or 'Gerät noch belegt'}"
+        )
+        time.sleep(min(0.35 * attempt, 1.5))
+
+    raise RuntimeError(
+        f"Der Zielstick {disk} blieb trotz mehrfacher "
+        "Aushängeversuche belegt. "
+        f"Letzte wipefs-Meldung: {last_detail or 'unbekannt'}"
+    )
 
 
 def disk_info(disk):
@@ -1387,7 +1502,37 @@ def backup(args):
 # ============================================================
 
 def create_restore_layout(disk, p1_size, p2_needed):
-    disk_size = int(output(["blockdev", "--getsize64", disk], timeout=3))
+    # Mehrere Parallel-Restores dürfen weiterhin gleichzeitig Daten
+    # schreiben. Nur die kurze Partitionstabellen-/udev-Phase wird
+    # systemweit serialisiert, damit sich mehrere Sticks nicht mit
+    # UDisks/GVFS und udev gegenseitig in die Quere kommen.
+    lock_path = Path(
+        "/run/lock/uwuntu-image-manager-restore-prepare.lock"
+    )
+    with lock_path.open("a+") as lock_handle:
+        log(f"RESTORE-PREPARE-LOCK: warte für {disk}")
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        log(f"RESTORE-PREPARE-LOCK: aktiv für {disk}")
+        try:
+            # Bereits laufende Desktop-Mounts zuerst beruhigen. Das
+            # eigentliche wipefs besitzt zusätzlich eigene Retries.
+            unmount_disk(
+                disk,
+                retries=4,
+                lazy_fallback=True,
+            )
+            return _create_restore_layout_locked(
+                disk,
+                p1_size,
+                p2_needed,
+            )
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            log(f"RESTORE-PREPARE-LOCK: frei für {disk}")
+
+
+def _create_restore_layout_locked(disk, p1_size, p2_needed):
+    disk_size = int(output(["blockdev", "--getsize64", disk], timeout=15))
     disk_mib = disk_size // MIB
 
     # Maximal 29 GiB. Ist der reale "32-GB"-Stick kleiner, wird
@@ -1445,9 +1590,8 @@ def create_restore_layout(disk, p1_size, p2_needed):
         f"Reserve={RESTORE_END_RESERVE_MIB}MiB"
     )
 
-    unmount_disk(disk)
+    wipe_disk_for_restore(disk)
 
-    run(["wipefs", "-a", disk])
     run(["parted", "-s", disk, "mklabel", "gpt"])
     run(
         [
@@ -1967,6 +2111,10 @@ def restore(args):
             "PRÜFEN",
         )
 
+        # Falls der Desktop während des Restores doch einen
+        # Datenträger erkannt hat, vor fsck erneut sauber aushängen.
+        unmount_disk(disk, retries=4, lazy_fallback=True)
+
         run(["fsck.vfat", "-a", p1], check=False)
         p.update(1, force=True)
 
@@ -2000,6 +2148,10 @@ def restore(args):
         p.finish(4)
 
         log(f"RESTORE ERFOLGREICH: {image} -> {disk}")
+
+        # partprobe kann UDisks nochmals aufwecken. Direkt vor dem
+        # Power-Off deshalb ein letzter robuster Aushängeversuch.
+        unmount_disk(disk, retries=4, lazy_fallback=True)
 
         # Erst nach einem bestätigten UDisks-Power-Off darf die Oberfläche
         # behaupten, dass der einzelne Stick sicher entfernt werden kann.
@@ -2839,7 +2991,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.20"
+VERSION = "1.21"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
