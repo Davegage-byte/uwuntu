@@ -493,6 +493,14 @@ def benchmark(args):
     block_bytes = 32 * MIB
     info = disk_info(disk)
 
+    transport = str(info.get("transport") or "").strip().lower()
+    removable = bool(info.get("removable"))
+    if transport != "usb" and not removable:
+        fail(
+            "Der USB-Benchmark ist aus Sicherheitsgründen nur für "
+            "USB- oder Wechseldatenträger freigegeben."
+        )
+
     if int(info.get("size_bytes") or 0) < total_bytes:
         fail("Der ausgewählte Datenträger ist kleiner als 512 MiB.")
 
@@ -3927,7 +3935,11 @@ class MainWindow(Gtk.ApplicationWindow):
     # USB-Benchmark
     # --------------------------------------------------------
     def open_benchmark(self, *_):
-        disks = list_disks()
+        disks = [
+            item
+            for item in list_disks()
+            if item.get("kind") in {"USB", "Wechselmedium"}
+        ]
 
         if not disks:
             self.error(
