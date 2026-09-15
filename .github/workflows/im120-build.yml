@@ -46,7 +46,7 @@ jobs:
           text = text.replace('VERSION = "1.19"', 'VERSION = "1.20"')'''
           new = '''assert text.count('APP_VERSION="1.19"') == 1
           assert text.count('APP_VERSION = "1.19"') == 1
-          assert text.count('VERSION = "1.19"') == 1
+          assert text.count('VERSION = "1.19"') == 2
           text = text.replace('APP_VERSION="1.19"', 'APP_VERSION="1.20"')
           text = text.replace('APP_VERSION = "1.19"', 'APP_VERSION = "1.20"')
           text = text.replace('VERSION = "1.19"', 'VERSION = "1.20"')'''
@@ -74,7 +74,7 @@ jobs:
               compile(m.group(1), f'<{tag}>', 'exec')
           assert text.count('APP_VERSION="1.20"') == 1
           assert text.count('APP_VERSION = "1.20"') == 1
-          assert text.count('VERSION = "1.20"') == 1
+          assert text.count('VERSION = "1.20"') == 2
           block = text.split('class BatchRestoreWindow(Gtk.Window):', 1)[1].split('\n\nclass ActionWindow', 1)[0]
           assert 'Gtk.ScrolledWindow()' not in block
           assert 'tiles = Gtk.Grid(column_spacing=6, row_spacing=6)' in block
