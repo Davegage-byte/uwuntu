@@ -1,0 +1,72 @@
+name: IM1.18 benchmark safety patch
+
+on:
+  push:
+    branches:
+      - experiment/im118-usb-benchmark-build
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'IM1.18 safety output'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restrict benchmark to removable or USB devices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Uwuntu Image Manager.sh')
+          t = p.read_text(encoding='utf-8')
+
+          old = '''    info = disk_info(disk)\n\n    if int(info.get("size_bytes") or 0) < total_bytes:\n'''
+          new = '''    info = disk_info(disk)\n\n    transport = str(info.get("transport") or "").strip().lower()\n    removable = bool(info.get("removable"))\n    if transport != "usb" and not removable:\n        fail(\n            "Der USB-Benchmark ist aus Sicherheitsgründen nur für "\n            "USB- oder Wechseldatenträger freigegeben."\n        )\n\n    if int(info.get("size_bytes") or 0) < total_bytes:\n'''
+          if t.count(old) != 1:
+              raise SystemExit(f'backend marker count={t.count(old)}')
+          t = t.replace(old, new, 1)
+
+          old = '''    def open_benchmark(self, *_):\n        disks = list_disks()\n\n        if not disks:\n'''
+          new = '''    def open_benchmark(self, *_):\n        disks = [\n            item\n            for item in list_disks()\n            if item.get("kind") in {"USB", "Wechselmedium"}\n        ]\n\n        if not disks:\n'''
+          if t.count(old) != 1:
+              raise SystemExit(f'ui marker count={t.count(old)}')
+          t = t.replace(old, new, 1)
+
+          p.write_text(t, encoding='utf-8', newline='\n')
+          PY
+
+      - name: Checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n "Uwuntu Image Manager.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          t=Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
+          assert 'transport != "usb" and not removable' in t
+          assert 'if item.get("kind") in {"USB", "Wechselmedium"}' in t
+          assert t.count('1.18') == 3
+          root=re.search(r"<<'PYROOT'\n(.*?)\nPYROOT",t,re.S)
+          app=re.search(r"<<'PYAPP'\n(.*?)\nPYAPP",t,re.S)
+          compile(root.group(1),'<root>','exec')
+          compile(app.group(1),'<app>','exec')
+          PY
+          cmp -s <(git show 760a8228c5646ac8179ac8d05cf8a8533525cd87:"Uwuntu Image Manager.sh") "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
+
+      - name: Commit output
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/im118-safety.yml
+          git add "Uwuntu Image Manager.sh"
+          git commit -m "IM1.18 safety output"
+          git push origin HEAD:experiment/im118-usb-benchmark-build
