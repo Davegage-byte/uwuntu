@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.20"
+APP_VERSION="1.19"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.20"
+APP_VERSION = "1.19"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -2839,7 +2839,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.20"
+VERSION = "1.19"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -3464,30 +3464,12 @@ progressbar.restore-error progress {
     background: #e85d5d;
 }
 .batch-summary {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 900;
 }
-.batch-stick {
-    background: #232329;
-    border: 1px solid #34343c;
-    border-radius: 8px;
-    padding: 5px 7px;
-}
-.batch-stick-title {
-    font-size: 13px;
+.stick-title {
+    font-size: 15px;
     font-weight: 900;
-}
-.batch-stick-detail {
-    color: #b6b6bf;
-    font-size: 11px;
-}
-progressbar.batch-progress trough {
-    min-height: 14px;
-    border-radius: 6px;
-}
-progressbar.batch-progress progress {
-    min-height: 14px;
-    border-radius: 6px;
 }
 .stick-ready {
     color: #61d36b;
@@ -3766,7 +3748,7 @@ class BatchTimeline(Gtk.DrawingArea):
     def __init__(self, owner):
         super().__init__()
         self.owner = owner
-        self.set_content_height(46)
+        self.set_content_height(66)
         self.set_hexpand(True)
         self.set_draw_func(self._draw)
 
@@ -3796,10 +3778,10 @@ class BatchTimeline(Gtk.DrawingArea):
             horizon = max(known)
         horizon = max(1.0, horizon)
 
-        x0 = 8.0
-        bar_w = max(10.0, float(width) - 16.0)
-        bar_y = 15.0
-        bar_h = 12.0
+        x0 = 10.0
+        bar_w = max(10.0, float(width) - 20.0)
+        bar_y = 30.0
+        bar_h = 18.0
 
         # Hintergrund.
         cr.set_source_rgb(0.20, 0.20, 0.24)
@@ -3820,7 +3802,7 @@ class BatchTimeline(Gtk.DrawingArea):
         cr.rectangle(x0, bar_y, bar_w * batch_fraction, bar_h)
         cr.fill()
 
-        cr.set_font_size(10.0)
+        cr.set_font_size(12.0)
 
         for index, (state, finish) in enumerate(zip(states, predictions), start=1):
             if finish is None:
@@ -3838,8 +3820,8 @@ class BatchTimeline(Gtk.DrawingArea):
                 cr.set_source_rgb(0.96, 0.65, 0.14)
 
             cr.set_line_width(2.0)
-            cr.move_to(x, 11.0)
-            cr.line_to(x, bar_y + bar_h + 4.0)
+            cr.move_to(x, 18.0)
+            cr.line_to(x, bar_y + bar_h + 5.0)
             cr.stroke()
 
             label = str(index)
@@ -3848,13 +3830,13 @@ class BatchTimeline(Gtk.DrawingArea):
                 label_w = ext.width
             except Exception:
                 label_w = ext[2]
-            cr.move_to(x - label_w / 2.0, 9.0)
+            cr.move_to(x - label_w / 2.0, 14.0)
             cr.show_text(label)
 
         # Zeitachse links/rechts klein beschriften.
         cr.set_source_rgb(0.65, 0.65, 0.70)
         cr.set_font_size(10.0)
-        cr.move_to(x0, float(height) - 2.0)
+        cr.move_to(x0, min(float(height) - 3.0, bar_y + bar_h + 16.0))
         cr.show_text("0:00")
 
         right = fmt_eta(max(0.0, horizon - elapsed))
@@ -3865,7 +3847,7 @@ class BatchTimeline(Gtk.DrawingArea):
             right_w = ext[2]
         cr.move_to(
             max(x0, x0 + bar_w - right_w),
-            float(height) - 2.0,
+            min(float(height) - 3.0, bar_y + bar_h + 16.0),
         )
         cr.show_text(right)
 
@@ -3879,9 +3861,7 @@ class BatchRestoreWindow(Gtk.Window):
             transient_for=parent,
             modal=True,
         )
-        # 2 Spalten x maximal 5 Reihen: zehn Sticks passen ohne Scrollen
-        # zusammen mit Übersicht und Gesamt-Zeitachse in ein normales Display.
-        self.set_default_size(1180, 690)
+        self.set_default_size(1080, 760)
         self.set_deletable(False)
 
         self.parent_window = parent
@@ -3893,59 +3873,46 @@ class BatchRestoreWindow(Gtk.Window):
 
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
-            spacing=6,
+            spacing=10,
         )
-        root.set_margin_top(10)
-        root.set_margin_bottom(10)
-        root.set_margin_start(10)
-        root.set_margin_end(10)
+        root.set_margin_top(16)
+        root.set_margin_bottom(16)
+        root.set_margin_start(16)
+        root.set_margin_end(16)
         self.set_child(root)
 
-        header = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=12,
+        root.append(make_label("PARALLEL-RESTORE", "card-title"))
+        root.append(
+            make_label(
+                "Alle ausgewählten Sticks werden gleichzeitig beschrieben. "
+                "Grün bedeutet erst dann: sicher ausgeworfen und entfernbar.",
+                "card-text",
+            )
         )
-        root.append(header)
-
-        title = make_label("PARALLEL-RESTORE", "card-title", wrap=False)
-        title.set_hexpand(True)
-        header.append(title)
-
-        legend = make_label(
-            "Orange = läuft · Grün = sicher ausgeworfen / entfernbar",
-            "subtitle",
-            wrap=False,
-        )
-        legend.set_xalign(1.0)
-        header.append(legend)
-
-        overview = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=12,
-        )
-        root.append(overview)
 
         self.summary = make_label("", "batch-summary", wrap=False)
-        self.summary.set_hexpand(True)
-        overview.append(self.summary)
+        root.append(self.summary)
+
+        self.timeline = BatchTimeline(self)
+        root.append(self.timeline)
 
         self.batch_eta = make_label(
             "Batch-Prognose wird berechnet …",
             "progress-info",
             wrap=False,
         )
-        self.batch_eta.set_xalign(1.0)
-        overview.append(self.batch_eta)
+        root.append(self.batch_eta)
 
-        self.timeline = BatchTimeline(self)
-        root.append(self.timeline)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        root.append(scroller)
 
-        # Kein Scroller: maximal zehn kompakte Kacheln werden als 2 x 5
-        # Dashboard angeordnet. So bleibt auch der Gesamtverlauf sichtbar.
-        tiles = Gtk.Grid(column_spacing=6, row_spacing=6)
-        tiles.set_column_homogeneous(True)
-        tiles.set_vexpand(True)
-        root.append(tiles)
+        rows_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=10,
+        )
+        scroller.set_child(rows_box)
 
         for index, disk in enumerate(disks, start=1):
             state = {
@@ -3964,46 +3931,71 @@ class BatchRestoreWindow(Gtk.Window):
             }
             self.states.append(state)
 
-            tile = Gtk.Box(
+            card = Gtk.Box(
                 orientation=Gtk.Orientation.VERTICAL,
-                spacing=2,
+                spacing=6,
             )
-            tile.add_css_class("batch-stick")
-            tile.set_hexpand(True)
-            tile.set_vexpand(True)
+            card.add_css_class("card")
 
-            model = compact_text(disk.get("model", "Unbekannt"), 27)
-            title_label = make_label(
-                f"Stick {index} · {model} · {disk['path']}",
-                "batch-stick-title",
+            title = make_label(
+                f"Stick {index} · {disk.get('model', 'Unbekannt')} · {disk['path']}",
+                "stick-title",
                 wrap=False,
             )
-            tile.append(title_label)
+            card.append(title)
 
             bar = Gtk.ProgressBar()
             bar.set_show_text(True)
             bar.set_fraction(0.0)
             bar.set_text("0 %")
-            bar.add_css_class("batch-progress")
             bar.add_css_class("restore-waiting")
-            tile.append(bar)
+            card.append(bar)
 
-            detail_label = make_label(
-                "Wartet auf Start …",
-                "batch-stick-detail",
+            info_row = Gtk.Box(
+                orientation=Gtk.Orientation.HORIZONTAL,
+                spacing=12,
+            )
+            card.append(info_row)
+
+            elapsed_label = make_label(
+                "Läuft: 0 s",
+                "progress-info",
                 wrap=False,
             )
-            tile.append(detail_label)
+            elapsed_label.set_size_request(170, -1)
+            info_row.append(elapsed_label)
 
-            position = index - 1
-            column = position % 2
-            row_number = position // 2
-            tiles.attach(tile, column, row_number, 1, 1)
+            phase_label = make_label(
+                "Wartet …",
+                "progress-info",
+                wrap=False,
+            )
+            phase_label.set_hexpand(True)
+            info_row.append(phase_label)
 
+            eta_label = make_label(
+                "Rest: berechne …",
+                "progress-info",
+                wrap=False,
+            )
+            eta_label.set_xalign(1.0)
+            eta_label.set_size_request(190, -1)
+            info_row.append(eta_label)
+
+            status_label = make_label(
+                "Bitte eingesteckt lassen.",
+                "subtitle",
+            )
+            card.append(status_label)
+
+            rows_box.append(card)
             self.rows.append(
                 {
                     "bar": bar,
-                    "detail": detail_label,
+                    "elapsed": elapsed_label,
+                    "phase": phase_label,
+                    "eta": eta_label,
+                    "status": status_label,
                 }
             )
 
@@ -4210,47 +4202,49 @@ class BatchRestoreWindow(Gtk.Window):
             self._set_bar_class(row["bar"], "restore-running")
 
         started = state.get("started")
-        elapsed = max(0.0, time.monotonic() - started) if started else 0.0
-        elapsed_text = fmt_duration(elapsed)
+        if started:
+            elapsed = max(0.0, time.monotonic() - started)
+        else:
+            elapsed = 0.0
+        row["elapsed"].set_text("Läuft: " + fmt_duration(elapsed))
 
-        detail = row["detail"]
-        detail.remove_css_class("stick-ready")
-        detail.remove_css_class("stick-error")
+        stage_index = state.get("stage_index") or 0
+        stage_count = state.get("stage_count") or 4
+        rate = fmt_rate(state.get("rate_bps"))
+        if stage_index:
+            row["phase"].set_text(
+                f"Phase {stage_index}/{stage_count} · {state['stage']} · {rate}"
+            )
+        else:
+            row["phase"].set_text(state["stage"])
+
+        if status in self.TERMINAL:
+            row["eta"].set_text("Rest: 0 s")
+        else:
+            row["eta"].set_text("Rest: ca. " + fmt_eta(state.get("eta")))
 
         if status == "ready":
-            detail.set_text(
-                "✓ FERTIG · sicher ausgeworfen · "
-                + elapsed_text
-                + " · kann entfernt werden"
+            row["status"].set_text(
+                "✓ Sicher ausgeworfen · kann jetzt entfernt werden"
             )
-            detail.add_css_class("stick-ready")
+            row["status"].remove_css_class("stick-error")
+            row["status"].add_css_class("stick-ready")
         elif status == "done_not_ejected":
-            detail.set_text(
-                "⚠ Restore fertig · "
-                + elapsed_text
-                + " · Auswerfen nicht bestätigt · NICHT entfernen"
+            row["status"].set_text(
+                "⚠ Restore fertig · Auswerfen fehlgeschlagen · noch nicht entfernen"
             )
+            row["status"].remove_css_class("stick-ready")
+            row["status"].remove_css_class("stick-error")
         elif status == "error":
-            detail.set_text(
-                "✕ FEHLER · " + compact_text(state.get("error"), 78)
+            row["status"].set_text(
+                "✕ FEHLER · " + compact_text(state.get("error"), 100)
             )
-            detail.add_css_class("stick-error")
+            row["status"].remove_css_class("stick-ready")
+            row["status"].add_css_class("stick-error")
         else:
-            stage_index = state.get("stage_index") or 0
-            stage_count = state.get("stage_count") or 4
-            rate = fmt_rate(state.get("rate_bps"))
-            eta = fmt_eta(state.get("eta"))
-            stage = compact_text(state.get("stage"), 31)
-
-            if stage_index:
-                detail.set_text(
-                    f"P{stage_index}/{stage_count} · {stage} · {rate} · "
-                    f"{elapsed_text} · Rest {eta}"
-                )
-            else:
-                detail.set_text(
-                    f"{stage} · {elapsed_text} · Rest {eta}"
-                )
+            row["status"].set_text("Bitte eingesteckt lassen.")
+            row["status"].remove_css_class("stick-ready")
+            row["status"].remove_css_class("stick-error")
 
     def _refresh_summary(self):
         counts = {
