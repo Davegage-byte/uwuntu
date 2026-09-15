@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.23"
+APP_VERSION="1.22"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -154,7 +154,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.23"
+APP_VERSION = "1.22"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -1052,12 +1052,7 @@ def prepare_compact_ext_image(source, target, source_size, progress):
 
     # Ein Vollcheck bleibt vor dem Verkleinern notwendig. Danach wird die
     # temporäre Kopie exakt auf die Minimalgröße des Dateisystems gekürzt.
-    ext_check = run(["e2fsck", "-fy", str(target)], check=False)
-    if ext_check.returncode not in (0, 1):
-        raise RuntimeError(
-            "Persistenz-Dateisystemprüfung vor dem Verkleinern "
-            f"fehlgeschlagen (e2fsck Status {ext_check.returncode})."
-        )
+    run(["e2fsck", "-fy", str(target)])
     run(["resize2fs", "-M", str(target)])
     compact_size = ext_filesystem_size_bytes(target)
     progress.update(2, force=True)
