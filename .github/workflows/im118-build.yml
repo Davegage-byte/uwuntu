@@ -1,4 +1,4 @@
-name: IM1.18 diagnostic
+name: IM1.18 USB benchmark build final
 
 on:
   push:
@@ -9,40 +9,346 @@ permissions:
   contents: write
 
 jobs:
-  diag:
-    if: github.event.head_commit.message != 'IM1.18 diag output'
+  build:
+    if: github.event.head_commit.message != 'IM1.18 experiment output'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Collect marker diagnostics
+
+      - name: Patch IM1.18
         shell: bash
         run: |
-          python3 - <<'PY' > im118_diag.txt
+          set -euo pipefail
+          cp -p "Uwuntu Image Manager.sh" "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
+
+          cat > /tmp/im118_backend.txt <<'EOF'
+          # ============================================================
+          # USB-Benchmark
+          # ============================================================
+
+          def benchmark(args):
+              disk = args.disk
+              validate_disk(disk)
+
+              total_bytes = 512 * MIB
+              block_bytes = 32 * MIB
+              info = disk_info(disk)
+
+              if int(info.get("size_bytes") or 0) < total_bytes:
+                  fail("Der ausgewählte Datenträger ist kleiner als 512 MiB.")
+
+              try:
+                  emit(
+                      "info",
+                      message=(
+                          f"USB-Benchmark: {info['model']} · {disk} · "
+                          "512 MiB lesen/schreiben"
+                      ),
+                  )
+
+                  unmount_disk(disk)
+                  run(["sync"], check=False)
+                  run(["blockdev", "--flushbufs", disk])
+
+                  # Nicht komprimierbares Testmuster. Die ersten 4 KiB bleiben Null,
+                  # damit keine zufällige gültige Partitionstabelle entsteht.
+                  pattern = b"\0" * 4096 + os.urandom(block_bytes - 4096)
+
+                  write_progress = Progress(
+                      "USB-Benchmark · 512 MiB schreiben",
+                      1,
+                      2,
+                      total_bytes,
+                      "SCHREIBEN",
+                  )
+
+                  write_started = time.monotonic()
+                  done = 0
+
+                  with open(disk, "r+b", buffering=0) as handle:
+                      while done < total_bytes:
+                          view = memoryview(pattern)
+                          while view:
+                              written = handle.write(view)
+                              if not written:
+                                  raise RuntimeError(
+                                      "USB-Benchmark konnte nicht weiter schreiben."
+                                  )
+                              view = view[written:]
+                          done += block_bytes
+                          write_progress.update(done)
+
+                      handle.flush()
+                      os.fsync(handle.fileno())
+
+                  write_seconds = max(0.001, time.monotonic() - write_started)
+                  write_progress.finish(total_bytes)
+
+                  run(["sync"], check=False)
+                  run(["blockdev", "--flushbufs", disk])
+
+                  read_progress = Progress(
+                      "USB-Benchmark · 512 MiB lesen",
+                      2,
+                      2,
+                      total_bytes,
+                      "LESEN",
+                  )
+
+                  read_started = time.monotonic()
+                  done = 0
+
+                  with open(disk, "rb", buffering=0) as handle:
+                      while done < total_bytes:
+                          chunk = handle.read(block_bytes)
+                          if len(chunk) != block_bytes:
+                              raise RuntimeError(
+                                  "USB-Benchmark konnte nicht 512 MiB vollständig lesen."
+                              )
+                          if chunk != pattern:
+                              raise RuntimeError(
+                                  "Die gelesenen Testdaten stimmen nicht mit den "
+                                  "geschriebenen Daten überein."
+                              )
+                          done += len(chunk)
+                          read_progress.update(done)
+
+                  read_seconds = max(0.001, time.monotonic() - read_started)
+                  read_progress.finish(total_bytes)
+
+                  write_mbps = total_bytes / write_seconds / 1_000_000
+                  read_mbps = total_bytes / read_seconds / 1_000_000
+                  total_seconds = write_seconds + read_seconds
+
+                  write_text = f"{write_mbps:.1f}".replace(".", ",")
+                  read_text = f"{read_mbps:.1f}".replace(".", ",")
+                  write_time_text = f"{write_seconds:.1f}".replace(".", ",")
+                  read_time_text = f"{read_seconds:.1f}".replace(".", ",")
+                  total_time_text = f"{total_seconds:.1f}".replace(".", ",")
+
+                  log(
+                      "USB-BENCHMARK ERFOLGREICH: "
+                      f"{disk}; write={write_mbps:.2f}MB/s; "
+                      f"read={read_mbps:.2f}MB/s; "
+                      f"write_s={write_seconds:.2f}; read_s={read_seconds:.2f}"
+                  )
+
+                  run(["sync"], check=False)
+                  run(["blockdev", "--rereadpt", disk], check=False)
+                  run(["udevadm", "settle"], check=False)
+                  poweroff = run(
+                      ["udisksctl", "power-off", "-b", disk],
+                      check=False,
+                  )
+
+                  if poweroff.returncode == 0:
+                      finish_note = (
+                          "Der Stick wurde sicher ausgeworfen und kann entfernt werden."
+                      )
+                  else:
+                      finish_note = (
+                          "Der Stick ist synchronisiert und ausgehängt. "
+                          "Er kann jetzt entfernt werden."
+                      )
+
+                  emit(
+                      "success",
+                      message="USB-Benchmark abgeschlossen.",
+                      detail=(
+                          f"{info['model']} · {disk}\n\n"
+                          f"Schreiben: {write_text} MB/s\n"
+                          f"Lesen: {read_text} MB/s\n"
+                          "Testmenge: 512 MiB\n"
+                          f"Schreibzeit: {write_time_text} s\n"
+                          f"Lesezeit: {read_time_text} s\n"
+                          f"Gesamt: {total_time_text} s\n\n"
+                          "Die ersten 512 MiB wurden für den Test überschrieben. "
+                          "Der Stick ist dadurch nicht mehr bootfähig und muss "
+                          "vor normaler Nutzung neu formatiert oder mit dem "
+                          "Uwuntu Image Manager wiederhergestellt werden.\n\n"
+                          + finish_note
+                      ),
+                  )
+
+              except SystemExit:
+                  raise
+              except Exception as exc:
+                  fail(f"USB-Benchmark fehlgeschlagen:\n{exc}")
+
+
+          EOF
+
+          cat > /tmp/im118_ui.txt <<'EOF'
+              # --------------------------------------------------------
+              # USB-Benchmark
+              # --------------------------------------------------------
+              def open_benchmark(self, *_):
+                  disks = list_disks()
+
+                  if not disks:
+                      self.error(
+                          "Kein geeigneter USB-/Wechseldatenträger wurde gefunden.\n\n"
+                          "Stick einstecken und die Funktion erneut öffnen."
+                      )
+                      return
+
+                  win = ActionWindow(self, "USB-Benchmark")
+                  win.root.append(make_label("USB-BENCHMARK", "card-title"))
+                  win.root.append(
+                      make_label(
+                          "Misst die sequenzielle Schreib- und Lesegeschwindigkeit "
+                          "mit jeweils 512 MiB. So lassen sich mehrere USB-Sticks "
+                          "schnell miteinander vergleichen.",
+                          "card-text",
+                      )
+                  )
+
+                  dropdown = dropdown_from_strings(
+                      [disk_display(item) for item in disks]
+                  )
+                  win.root.append(dropdown)
+
+                  warning = make_label(
+                      "ACHTUNG: Der Test überschreibt die ersten 512 MiB des "
+                      "ausgewählten Sticks. Vorhandene Partitionen/Daten werden "
+                      "dadurch unbrauchbar.",
+                      "warning",
+                  )
+                  win.root.append(warning)
+
+                  note = make_label(
+                      "Test: 512 MiB schreiben → Cache leeren → 512 MiB lesen "
+                      "und Daten prüfen. Ergebnis direkt in MB/s.",
+                      "details",
+                  )
+                  win.root.append(note)
+
+                  buttons = Gtk.Box(
+                      orientation=Gtk.Orientation.HORIZONTAL,
+                      spacing=8,
+                  )
+                  win.root.append(buttons)
+
+                  cancel = Gtk.Button(label="ABBRECHEN")
+                  cancel.add_css_class("secondary")
+                  cancel.set_hexpand(True)
+                  cancel.connect("clicked", lambda *_: win.close())
+                  buttons.append(cancel)
+
+                  start = Gtk.Button(label="BENCHMARK STARTEN")
+                  start.add_css_class("primary")
+                  start.set_hexpand(True)
+
+                  def clicked(*_):
+                      idx = dropdown.get_selected()
+                      if idx >= len(disks):
+                          return
+
+                      disk = disks[idx]
+
+                      self.confirm(
+                          "USB-STICK WIRKLICH TESTEN?",
+                          f"Ziel:\n{disk_display(disk)}\n\n"
+                          "Die ersten 512 MiB des Sticks werden überschrieben. "
+                          "Damit gehen vorhandene Partitionsinformationen und "
+                          "Daten auf dem Stick verloren.\n\n"
+                          "Nach dem Benchmark muss der Stick neu formatiert oder "
+                          "mit dem Uwuntu Image Manager wiederhergestellt werden.",
+                          lambda: (
+                              win.close(),
+                              self.run_backend(
+                                  "USB-BENCHMARK · 512 MiB",
+                                  ["benchmark", "--disk", disk["path"]],
+                              ),
+                          ),
+                      )
+
+                  start.connect("clicked", clicked)
+                  buttons.append(start)
+                  win.present()
+
+          EOF
+
+          python3 - <<'PY'
           from pathlib import Path
-          text = Path('Uwuntu Image Manager.sh').read_text(encoding='utf-8')
-          checks = {
-              'shell_version': 'APP_VERSION="1.17"',
-              'root_version': 'APP_VERSION = "1.17"',
-              'frontend_version': 'VERSION = "1.17"',
-              'image_marker': '# ============================================================\n# Image\n# ============================================================\n',
-              'parser': '    p = sub.add_parser("restore")\n    p.add_argument("--disk", required=True)\n    p.add_argument("--image", required=True)\n\n',
-              'dispatch': '    elif args.action == "restore":\n        restore(args)\n',
-              'bottom': '        open_log = Gtk.Button(label="LOG ÖFFNEN")\n        open_log.add_css_class("secondary")\n        open_log.set_hexpand(True)\n        open_log.connect("clicked", self.open_log)\n        bottom.attach(open_log, 1, 1, 1, 1)\n',
-              'online': '    # --------------------------------------------------------\n    # Online-Update\n    # --------------------------------------------------------\n',
-              'worker': '        def worker():\n            final_success = None\n            final_error = None\n            backend_restart = False\n',
-              'success': '                    if event.get("type") == "success":\n                        final_success = event.get("message", "Fertig.")\n                        backend_restart = bool(\n                            event.get("restart", False)\n                        )\n',
-              'detail': '                else:\n                    detail = (\n                        "Der Datenträger kann nach erfolgreichem "\n                        "Backup/Restore sicher entfernt werden."\n                    )\n',
-          }
-          for name, marker in checks.items():
-              print(f'{name}={text.count(marker)}')
-          print(f'count_1.17={text.count("1.17")}')
-          print(f'lines={len(text.splitlines())}')
+
+          path = Path("Uwuntu Image Manager.sh")
+          text = path.read_text(encoding="utf-8")
+          backend = Path("/tmp/im118_backend.txt").read_text(encoding="utf-8")
+          ui = Path("/tmp/im118_ui.txt").read_text(encoding="utf-8")
+
+          def one(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected 1 match, found {count}")
+              text = text.replace(old, new, 1)
+
+          one('APP_VERSION="1.17"', 'APP_VERSION="1.18"', 'shell version')
+          one('APP_VERSION = "1.17"', 'APP_VERSION = "1.18"', 'root version')
+          one('\nVERSION = "1.17"\n', '\nVERSION = "1.18"\n', 'frontend version')
+
+          image = '# ============================================================\n# Image\n# ============================================================\n'
+          one(image, backend + image, 'image marker')
+
+          parser = '    p = sub.add_parser("restore")\n    p.add_argument("--disk", required=True)\n    p.add_argument("--image", required=True)\n\n'
+          one(parser, parser + '    p = sub.add_parser("benchmark")\n    p.add_argument("--disk", required=True)\n\n', 'parser')
+
+          dispatch = '    elif args.action == "restore":\n        restore(args)\n'
+          one(dispatch, dispatch + '    elif args.action == "benchmark":\n        benchmark(args)\n', 'dispatch')
+
+          bottom = '        open_log = Gtk.Button(label="LOG ÖFFNEN")\n        open_log.add_css_class("secondary")\n        open_log.set_hexpand(True)\n        open_log.connect("clicked", self.open_log)\n        bottom.attach(open_log, 1, 1, 1, 1)\n'
+          one(bottom, bottom + '\n        benchmark_button = Gtk.Button(label="USB-BENCHMARK")\n        benchmark_button.add_css_class("secondary")\n        benchmark_button.set_hexpand(True)\n        benchmark_button.connect("clicked", self.open_benchmark)\n        bottom.attach(benchmark_button, 0, 2, 1, 1)\n', 'bottom grid')
+
+          online = '    # --------------------------------------------------------\n    # Online-Update\n    # --------------------------------------------------------\n'
+          one(online, ui + online, 'online marker')
+
+          worker = '        def worker():\n            final_success = None\n            final_error = None\n            backend_restart = False\n'
+          one(worker, '        def worker():\n            final_success = None\n            final_detail = ""\n            final_error = None\n            backend_restart = False\n', 'worker')
+
+          success = '                    if event.get("type") == "success":\n                        final_success = event.get("message", "Fertig.")\n                        backend_restart = bool(\n                            event.get("restart", False)\n                        )\n'
+          one(success, '                    if event.get("type") == "success":\n                        final_success = event.get("message", "Fertig.")\n                        final_detail = event.get("detail", "") or ""\n                        backend_restart = bool(\n                            event.get("restart", False)\n                        )\n', 'success event')
+
+          detail = '                else:\n                    detail = (\n                        "Der Datenträger kann nach erfolgreichem "\n                        "Backup/Restore sicher entfernt werden."\n                    )\n'
+          one(detail, '                else:\n                    detail = final_detail or (\n                        "Der Datenträger kann nach erfolgreichem "\n                        "Backup/Restore sicher entfernt werden."\n                    )\n', 'final detail')
+
+          path.write_text(text, encoding="utf-8", newline="\n")
           PY
-          cat im118_diag.txt
+
+      - name: Checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp -s <(git show 760a8228c5646ac8179ac8d05cf8a8533525cd87:"Uwuntu Image Manager.sh") "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
+          bash -n "Uwuntu Image Manager.sh"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path("Uwuntu Image Manager.sh").read_text(encoding="utf-8")
+          assert text.count("1.18") == 3
+          assert "def benchmark(args):" in text
+          assert "def open_benchmark(self, *_):" in text
+          assert 'sub.add_parser("benchmark")' in text
+          root = re.search(r"<<'PYROOT'\n(.*?)\nPYROOT", text, re.S)
+          app = re.search(r"<<'PYAPP'\n(.*?)\nPYAPP", text, re.S)
+          assert root and app
+          compile(root.group(1), "<root-helper>", "exec")
+          compile(app.group(1), "<frontend>", "exec")
+          Path("/tmp/root-helper.py").write_text(root.group(1), encoding="utf-8")
+          PY
+          SUDO_USER=runner python3 /tmp/root-helper.py --help | grep -q benchmark
+
+      - name: Commit output
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add im118_diag.txt
-          git commit -m "IM1.18 diag output"
+          rm -f im118_diag.txt
+          git rm .github/workflows/im118-build.yml
+          git add "Uwuntu Image Manager.sh" "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-15-06-40.sh"
+          git add -u
+          git commit -m "IM1.18 experiment output"
           git push origin HEAD:experiment/im118-usb-benchmark-build
