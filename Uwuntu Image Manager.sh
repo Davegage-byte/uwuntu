@@ -3055,7 +3055,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.22"
+VERSION = "1.23"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
