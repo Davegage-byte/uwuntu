@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   patch-uim:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Repository auschecken
@@ -30,8 +29,10 @@ jobs:
           cmp -s 'Uwuntu Image Manager.sh' "$backup"
 
       - name: UIM 1.23 patchen
-        shell: python
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
           from pathlib import Path
 
           path = Path('Uwuntu Image Manager.sh')
@@ -48,22 +49,23 @@ jobs:
               text = text.replace(old, new, 1)
 
           old = '    run(["e2fsck", "-fy", str(target)])\n    run(["resize2fs", "-M", str(target)])'
-          new = '''    ext_check = run(["e2fsck", "-fy", str(target)], check=False)
-    if ext_check.returncode not in (0, 1):
-        raise RuntimeError(
-            "Persistenz-Dateisystemprüfung vor dem Verkleinern "
-            f"fehlgeschlagen (e2fsck Status {ext_check.returncode})."
-        )
-    run(["resize2fs", "-M", str(target)])'''
+          new = (
+              '    ext_check = run(["e2fsck", "-fy", str(target)], check=False)\n'
+              '    if ext_check.returncode not in (0, 1):\n'
+              '        raise RuntimeError(\n'
+              '            "Persistenz-Dateisystemprüfung vor dem Verkleinern "\n'
+              '            f"fehlgeschlagen (e2fsck Status {ext_check.returncode})."\n'
+              '        )\n'
+              '    run(["resize2fs", "-M", str(target)])'
+          )
           count = text.count(old)
           if count != 1:
               raise SystemExit(f'e2fsck-Stelle unerwartet: {count} Treffer')
           text = text.replace(old, new, 1)
 
           path.write_text(text, encoding='utf-8')
-
-          workflow = Path('.github/workflows/uim-hotfix.yml')
-          workflow.unlink()
+          Path('.github/workflows/uim-hotfix.yml').unlink()
+          PY
 
       - name: Syntax und Patch prüfen
         shell: bash
@@ -78,7 +80,7 @@ jobs:
               ("<<'PYROOT'\n", "\nPYROOT\n", 'PYROOT'),
               ("<<'PYAPP'\n", "\nPYAPP\n", 'PYAPP'),
           ]:
-              before, sep, rest = text.partition(start)
+              _, sep, rest = text.partition(start)
               if not sep:
                   raise SystemExit(f'{label}: Startmarker fehlt')
               code, sep, _ = rest.partition(end)
@@ -98,11 +100,8 @@ jobs:
           set -Eeuo pipefail
           git config user.name 'Davegage-byte'
           git config user.email '74912940+Davegage-byte@users.noreply.github.com'
+          title='IM1.22→IM1.23 · IMAGE · e2fsck-Status 1 beim Backup akzeptiert'
+          body=$'Uwuntu Image Manager v1.23\n\nBeim Erstellen des kompakten Persistenz-Abbilds wird e2fsck -fy nun mit check=False ausgeführt. Die Rückgabewerte 0 (sauber) und 1 (Fehler erfolgreich korrigiert) werden als gültig akzeptiert; nur echte e2fsck-Fehler brechen das Backup weiterhin ab.\n\nZusätzlich wurden die zusammengehörigen Versionsstellen auf 1.23 angehoben und das vorgeschriebene unveränderte Backup des vorherigen Main-Stands angelegt. bash -n, beide Python-Heredocs und git diff --check werden vor dem Commit geprüft.'
           git add -A
-          git commit -m 'IM1.22→IM1.23 · IMAGE · e2fsck-Status 1 beim Backup akzeptiert' \
-            -m 'Uwuntu Image Manager v1.23
-
-Beim Erstellen des kompakten Persistenz-Abbilds wird e2fsck -fy nun mit check=False ausgeführt. Die Rückgabewerte 0 (sauber) und 1 (Fehler erfolgreich korrigiert) werden als gültig akzeptiert; nur echte e2fsck-Fehler brechen das Backup weiterhin ab.
-
-Zusätzlich wurden die zusammengehörigen Versionsstellen auf 1.23 angehoben und das vorgeschriebene unveränderte Backup des vorherigen Main-Stands angelegt. bash -n, beide Python-Heredocs und git diff --check werden vor dem Commit geprüft.'
+          git commit -m "$title" -m "$body"
           git push origin HEAD:fix/uim-e2fsck-exit1-20260915-1237
