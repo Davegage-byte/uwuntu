@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.18"
+APP_VERSION="1.17"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -94,7 +94,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.18"
+APP_VERSION = "1.17"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -479,160 +479,6 @@ def fs_info(part):
         "uuid": blk("UUID"),
         "size_bytes": size,
     }
-
-
-# ============================================================
-# USB-Benchmark
-# ============================================================
-
-def benchmark(args):
-    disk = args.disk
-    validate_disk(disk)
-
-    total_bytes = 512 * MIB
-    block_bytes = 32 * MIB
-    info = disk_info(disk)
-
-    if int(info.get("size_bytes") or 0) < total_bytes:
-        fail("Der ausgewählte Datenträger ist kleiner als 512 MiB.")
-
-    try:
-        emit(
-            "info",
-            message=(
-                f"USB-Benchmark: {info['model']} · {disk} · "
-                "512 MiB lesen/schreiben"
-            ),
-        )
-
-        unmount_disk(disk)
-        run(["sync"], check=False)
-        run(["blockdev", "--flushbufs", disk])
-
-        # Nicht komprimierbares Testmuster. Die ersten 4 KiB bleiben Null,
-        # damit keine zufällige gültige Partitionstabelle entsteht.
-        pattern = b"\0" * 4096 + os.urandom(block_bytes - 4096)
-
-        write_progress = Progress(
-            "USB-Benchmark · 512 MiB schreiben",
-            1,
-            2,
-            total_bytes,
-            "SCHREIBEN",
-        )
-
-        write_started = time.monotonic()
-        done = 0
-
-        with open(disk, "r+b", buffering=0) as handle:
-            while done < total_bytes:
-                view = memoryview(pattern)
-                while view:
-                    written = handle.write(view)
-                    if not written:
-                        raise RuntimeError(
-                            "USB-Benchmark konnte nicht weiter schreiben."
-                        )
-                    view = view[written:]
-                done += block_bytes
-                write_progress.update(done)
-
-            handle.flush()
-            os.fsync(handle.fileno())
-
-        write_seconds = max(0.001, time.monotonic() - write_started)
-        write_progress.finish(total_bytes)
-
-        run(["sync"], check=False)
-        run(["blockdev", "--flushbufs", disk])
-
-        read_progress = Progress(
-            "USB-Benchmark · 512 MiB lesen",
-            2,
-            2,
-            total_bytes,
-            "LESEN",
-        )
-
-        read_started = time.monotonic()
-        done = 0
-
-        with open(disk, "rb", buffering=0) as handle:
-            while done < total_bytes:
-                chunk = handle.read(block_bytes)
-                if len(chunk) != block_bytes:
-                    raise RuntimeError(
-                        "USB-Benchmark konnte nicht 512 MiB vollständig lesen."
-                    )
-                if chunk != pattern:
-                    raise RuntimeError(
-                        "Die gelesenen Testdaten stimmen nicht mit den "
-                        "geschriebenen Daten überein."
-                    )
-                done += len(chunk)
-                read_progress.update(done)
-
-        read_seconds = max(0.001, time.monotonic() - read_started)
-        read_progress.finish(total_bytes)
-
-        write_mbps = total_bytes / write_seconds / 1_000_000
-        read_mbps = total_bytes / read_seconds / 1_000_000
-        total_seconds = write_seconds + read_seconds
-
-        write_text = f"{write_mbps:.1f}".replace(".", ",")
-        read_text = f"{read_mbps:.1f}".replace(".", ",")
-        write_time_text = f"{write_seconds:.1f}".replace(".", ",")
-        read_time_text = f"{read_seconds:.1f}".replace(".", ",")
-        total_time_text = f"{total_seconds:.1f}".replace(".", ",")
-
-        log(
-            "USB-BENCHMARK ERFOLGREICH: "
-            f"{disk}; write={write_mbps:.2f}MB/s; "
-            f"read={read_mbps:.2f}MB/s; "
-            f"write_s={write_seconds:.2f}; read_s={read_seconds:.2f}"
-        )
-
-        run(["sync"], check=False)
-        run(["blockdev", "--rereadpt", disk], check=False)
-        run(["udevadm", "settle"], check=False)
-        poweroff = run(
-            ["udisksctl", "power-off", "-b", disk],
-            check=False,
-        )
-
-        if poweroff.returncode == 0:
-            finish_note = (
-                "Der Stick wurde sicher ausgeworfen und kann entfernt werden."
-            )
-        else:
-            finish_note = (
-                "Der Stick ist synchronisiert und ausgehängt. "
-                "Er kann jetzt entfernt werden."
-            )
-
-        emit(
-            "success",
-            message="USB-Benchmark abgeschlossen.",
-            detail=(
-                f"{info['model']} · {disk}\n\n"
-                f"Schreiben: {write_text} MB/s\n"
-                f"Lesen: {read_text} MB/s\n"
-                "Testmenge: 512 MiB\n"
-                f"Schreibzeit: {write_time_text} s\n"
-                f"Lesezeit: {read_time_text} s\n"
-                f"Gesamt: {total_time_text} s\n\n"
-                "Die ersten 512 MiB wurden für den Test überschrieben. "
-                "Der Stick ist dadurch nicht mehr bootfähig und muss "
-                "vor normaler Nutzung neu formatiert oder mit dem "
-                "Uwuntu Image Manager wiederhergestellt werden.\n\n"
-                + finish_note
-            ),
-        )
-
-    except SystemExit:
-        raise
-    except Exception as exc:
-        fail(f"USB-Benchmark fehlgeschlagen:\n{exc}")
 
 
 # ============================================================
@@ -2712,9 +2558,6 @@ def main():
     p.add_argument("--disk", required=True)
     p.add_argument("--image", required=True)
 
-    p = sub.add_parser("benchmark")
-    p.add_argument("--disk", required=True)
-
     p = sub.add_parser("ventoy-update")
     p.add_argument("--image", required=True)
     p.add_argument("--ventoy-root", required=True)
@@ -2731,8 +2574,6 @@ def main():
         backup(args)
     elif args.action == "restore":
         restore(args)
-    elif args.action == "benchmark":
-        benchmark(args)
     elif args.action == "ventoy-update":
         ventoy_update(args)
     elif args.action == "self-update":
@@ -2804,7 +2645,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.18"
+VERSION = "1.17"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -3794,12 +3635,6 @@ class MainWindow(Gtk.ApplicationWindow):
         open_log.connect("clicked", self.open_log)
         bottom.attach(open_log, 1, 1, 1, 1)
 
-        benchmark_button = Gtk.Button(label="USB-BENCHMARK")
-        benchmark_button.add_css_class("secondary")
-        benchmark_button.set_hexpand(True)
-        benchmark_button.connect("clicked", self.open_benchmark)
-        bottom.attach(benchmark_button, 0, 2, 1, 1)
-
     def action_card(self, title, text, callback):
         frame = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -3922,94 +3757,6 @@ class MainWindow(Gtk.ApplicationWindow):
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-
-    # --------------------------------------------------------
-    # USB-Benchmark
-    # --------------------------------------------------------
-    def open_benchmark(self, *_):
-        disks = list_disks()
-
-        if not disks:
-            self.error(
-                "Kein geeigneter USB-/Wechseldatenträger wurde gefunden.\n\n"
-                "Stick einstecken und die Funktion erneut öffnen."
-            )
-            return
-
-        win = ActionWindow(self, "USB-Benchmark")
-        win.root.append(make_label("USB-BENCHMARK", "card-title"))
-        win.root.append(
-            make_label(
-                "Misst die sequenzielle Schreib- und Lesegeschwindigkeit "
-                "mit jeweils 512 MiB. So lassen sich mehrere USB-Sticks "
-                "schnell miteinander vergleichen.",
-                "card-text",
-            )
-        )
-
-        dropdown = dropdown_from_strings(
-            [disk_display(item) for item in disks]
-        )
-        win.root.append(dropdown)
-
-        warning = make_label(
-            "ACHTUNG: Der Test überschreibt die ersten 512 MiB des "
-            "ausgewählten Sticks. Vorhandene Partitionen/Daten werden "
-            "dadurch unbrauchbar.",
-            "warning",
-        )
-        win.root.append(warning)
-
-        note = make_label(
-            "Test: 512 MiB schreiben → Cache leeren → 512 MiB lesen "
-            "und Daten prüfen. Ergebnis direkt in MB/s.",
-            "details",
-        )
-        win.root.append(note)
-
-        buttons = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=8,
-        )
-        win.root.append(buttons)
-
-        cancel = Gtk.Button(label="ABBRECHEN")
-        cancel.add_css_class("secondary")
-        cancel.set_hexpand(True)
-        cancel.connect("clicked", lambda *_: win.close())
-        buttons.append(cancel)
-
-        start = Gtk.Button(label="BENCHMARK STARTEN")
-        start.add_css_class("primary")
-        start.set_hexpand(True)
-
-        def clicked(*_):
-            idx = dropdown.get_selected()
-            if idx >= len(disks):
-                return
-
-            disk = disks[idx]
-
-            self.confirm(
-                "USB-STICK WIRKLICH TESTEN?",
-                f"Ziel:\n{disk_display(disk)}\n\n"
-                "Die ersten 512 MiB des Sticks werden überschrieben. "
-                "Damit gehen vorhandene Partitionsinformationen und "
-                "Daten auf dem Stick verloren.\n\n"
-                "Nach dem Benchmark muss der Stick neu formatiert oder "
-                "mit dem Uwuntu Image Manager wiederhergestellt werden.",
-                lambda: (
-                    win.close(),
-                    self.run_backend(
-                        "USB-BENCHMARK · 512 MiB",
-                        ["benchmark", "--disk", disk["path"]],
-                    ),
-                ),
-            )
-
-        start.connect("clicked", clicked)
-        buttons.append(start)
-        win.present()
 
     # --------------------------------------------------------
     # Online-Update
@@ -4418,7 +4165,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def worker():
             final_success = None
-            final_detail = ""
             final_error = None
             backend_restart = False
 
@@ -4444,7 +4190,6 @@ class MainWindow(Gtk.ApplicationWindow):
 
                     if event.get("type") == "success":
                         final_success = event.get("message", "Fertig.")
-                        final_detail = event.get("detail", "") or ""
                         backend_restart = bool(
                             event.get("restart", False)
                         )
@@ -4500,7 +4245,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     if app:
                         app.quit()
                 else:
-                    detail = final_detail or (
+                    detail = (
                         "Der Datenträger kann nach erfolgreichem "
                         "Backup/Restore sicher entfernt werden."
                     )
