@@ -33,6 +33,28 @@ jobs:
           cmp -s 'Uwuntu Image Manager.sh' "$backup"
           echo "IM_BACKUP=$backup" >> "$GITHUB_ENV"
 
+      - name: Fix builder version markers
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/im120_builder.py')
+          text = p.read_text(encoding='utf-8')
+          old = '''assert text.count('APP_VERSION="1.19"') == 2
+          assert text.count('VERSION = "1.19"') == 1
+          text = text.replace('APP_VERSION="1.19"', 'APP_VERSION="1.20"')
+          text = text.replace('VERSION = "1.19"', 'VERSION = "1.20"')'''
+          new = '''assert text.count('APP_VERSION="1.19"') == 1
+          assert text.count('APP_VERSION = "1.19"') == 1
+          assert text.count('VERSION = "1.19"') == 1
+          text = text.replace('APP_VERSION="1.19"', 'APP_VERSION="1.20"')
+          text = text.replace('APP_VERSION = "1.19"', 'APP_VERSION = "1.20"')
+          text = text.replace('VERSION = "1.19"', 'VERSION = "1.20"')'''
+          if old not in text:
+              raise SystemExit('builder version block not found')
+          p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
       - name: Build IM1.20
         run: python3 .github/im120_builder.py
 
@@ -50,7 +72,8 @@ jobs:
               if not m:
                   raise SystemExit(f'{tag} block not found')
               compile(m.group(1), f'<{tag}>', 'exec')
-          assert text.count('APP_VERSION="1.20"') == 2
+          assert text.count('APP_VERSION="1.20"') == 1
+          assert text.count('APP_VERSION = "1.20"') == 1
           assert text.count('VERSION = "1.20"') == 1
           block = text.split('class BatchRestoreWindow(Gtk.Window):', 1)[1].split('\n\nclass ActionWindow', 1)[0]
           assert 'Gtk.ScrolledWindow()' not in block
