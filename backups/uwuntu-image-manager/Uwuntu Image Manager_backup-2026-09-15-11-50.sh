@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.22"
+APP_VERSION="1.21"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -53,8 +53,6 @@ if [[ "$ROOT_MODE" -eq 1 ]]; then
         xdg-utils
         xdg-user-dirs
         desktop-file-utils
-        libglib2.0-bin
-        dbus-daemon
         tar
         coreutils
     )
@@ -68,63 +66,6 @@ if [[ "$ROOT_MODE" -eq 1 ]]; then
             apt-get install -y "${REQUIRED_PACKAGES[@]}"
         fi
     fi
-
-    # --------------------------------------------------------
-    # Imaging-Station: GNOME-Automount deaktivieren
-    # --------------------------------------------------------
-    # Der Image Manager arbeitet direkt auf den Blockgeräten. Automatisches
-    # Einhängen durch GNOME/GVFS kann dabei mit wipefs, fsck und parallelen
-    # Restores kollidieren. Deshalb wird der Desktop für den realen Benutzer
-    # gezielt auf manuelles Mounten gestellt.
-    run_user_gsettings() {
-        local user_uid user_runtime user_bus
-        user_uid="$(id -u "$REAL_USER")"
-        user_runtime="/run/user/$user_uid"
-        user_bus="$user_runtime/bus"
-
-        if [[ -S "$user_bus" ]]; then
-            if runuser -u "$REAL_USER" -- env \
-                HOME="$REAL_HOME" \
-                USER="$REAL_USER" \
-                LOGNAME="$REAL_USER" \
-                XDG_RUNTIME_DIR="$user_runtime" \
-                DBUS_SESSION_BUS_ADDRESS="unix:path=$user_bus" \
-                gsettings "$@"; then
-                return 0
-            fi
-        fi
-
-        # Fallback für Installation/Update ohne erreichbaren Desktop-Bus.
-        # Die Werte werden trotzdem dauerhaft in der dconf-Datenbank des
-        # realen Benutzers gespeichert.
-        runuser -u "$REAL_USER" -- env \
-            HOME="$REAL_HOME" \
-            USER="$REAL_USER" \
-            LOGNAME="$REAL_USER" \
-            dbus-run-session -- gsettings "$@"
-    }
-
-    MEDIA_SCHEMA="org.gnome.desktop.media-handling"
-
-    run_user_gsettings set "$MEDIA_SCHEMA" automount false
-    run_user_gsettings set "$MEDIA_SCHEMA" automount-open false
-    run_user_gsettings set "$MEDIA_SCHEMA" autorun-never true
-
-    MEDIA_AUTOMOUNT="$(run_user_gsettings get "$MEDIA_SCHEMA" automount)"
-    MEDIA_AUTOMOUNT_OPEN="$(run_user_gsettings get "$MEDIA_SCHEMA" automount-open)"
-    MEDIA_AUTORUN_NEVER="$(run_user_gsettings get "$MEDIA_SCHEMA" autorun-never)"
-
-    if [[ "$MEDIA_AUTOMOUNT" != "false" \
-        || "$MEDIA_AUTOMOUNT_OPEN" != "false" \
-        || "$MEDIA_AUTORUN_NEVER" != "true" ]]; then
-        echo "GNOME-Automount konnte nicht korrekt konfiguriert werden."
-        echo "automount=$MEDIA_AUTOMOUNT"
-        echo "automount-open=$MEDIA_AUTOMOUNT_OPEN"
-        echo "autorun-never=$MEDIA_AUTORUN_NEVER"
-        exit 11
-    fi
-
-    echo "GNOME-Automount für $REAL_USER deaktiviert: false / false / true"
 
     mkdir -p /usr/local/libexec
 
@@ -154,7 +95,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.22"
+APP_VERSION = "1.21"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -3050,7 +2991,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.22"
+VERSION = "1.21"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
