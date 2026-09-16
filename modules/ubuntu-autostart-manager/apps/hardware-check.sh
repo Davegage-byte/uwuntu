@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.88")
+        self.window.set_title("Hardware Check v4.5.89")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.88")
+        title_label = Gtk.Label(label="Hardware Check v4.5.89")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4473,7 +4473,7 @@ class App(Gtk.Application):
         self.wlan_diag_lines.append(
             f"[{time.strftime('%H:%M:%S')}] {str(text).strip()}"
         )
-        self.wlan_diag_lines = self.wlan_diag_lines[-5:]
+        self.wlan_diag_lines = self.wlan_diag_lines[-8:]
         label = getattr(self, "wlan_diag_live_label", None)
         if label is not None:
             label.set_text("\n".join(self.wlan_diag_lines))
@@ -4919,20 +4919,20 @@ class App(Gtk.Application):
 
         if success:
             if title is not None:
-                title.set_text("✅ WLAN-Diagnose gespeichert:")
+                title.set_text("✅ WLAN-Diagnosebericht gespeichert:")
             self._wlan_diag_set_title_color("green")
             if live is not None:
                 live.set_text(filename)
             delay = 4500
-            log(f"WLAN-Diagnose gespeichert: {filename}")
+            log(f"WLAN-Diagnosebericht gespeichert: {filename}")
         else:
             if title is not None:
-                title.set_text("❌ WLAN-Diagnose fehlgeschlagen")
+                title.set_text("❌ WLAN-Diagnosebericht fehlgeschlagen")
             self._wlan_diag_set_title_color("red")
             if live is not None:
                 live.set_text(error_text or "Unbekannter Fehler")
             delay = 6000
-            log(f"WLAN-Diagnose fehlgeschlagen: {error_text}")
+            log(f"WLAN-Diagnosebericht fehlgeschlagen: {error_text}")
 
         if self.wlan_diag_hide_source is not None:
             try:
@@ -4968,7 +4968,7 @@ class App(Gtk.Application):
             self.wlan_diag_spinner.set_visible(True)
             self.wlan_diag_spinner.start()
         if self.wlan_diag_title_label is not None:
-            self.wlan_diag_title_label.set_text("📋 WLAN-Diagnose läuft …")
+            self.wlan_diag_title_label.set_text("📋 WLAN-Diagnosebericht wird erstellt ...")
         self._wlan_diag_set_title_color("blue")
         if self.wlan_diag_live_label is not None:
             self.wlan_diag_live_label.set_text("Vorbereitung …")
@@ -4979,7 +4979,7 @@ class App(Gtk.Application):
             daemon=True,
         )
         self.wlan_diag_thread.start()
-        log("WLAN-Diagnose über F1-Menü gestartet")
+        log("WLAN-Diagnosebericht über F1-Menü gestartet")
         return False
 
     def close_hotkeys_window(self, *_):
@@ -5069,7 +5069,7 @@ class App(Gtk.Application):
         title.add_css_class("info-title")
         title_row.append(title)
 
-        diag_button = Gtk.Button(label="📋 WLAN-Diagnose")
+        diag_button = Gtk.Button(label="📋 WLAN-Diagnosebericht")
         diag_button.add_css_class("wlan-diag-button")
         diag_button.set_focusable(False)
         diag_button.connect("clicked", self.start_wlan_diagnosis)
@@ -5164,7 +5164,7 @@ class App(Gtk.Application):
         spinner = Gtk.Spinner()
         heading.append(spinner)
 
-        diag_title = Gtk.Label(label="📋 WLAN-Diagnose läuft …")
+        diag_title = Gtk.Label(label="📋 WLAN-Diagnosebericht wird erstellt ...")
         diag_title.set_xalign(0)
         diag_title.set_hexpand(True)
         diag_title.add_css_class("wlan-diag-title")
@@ -5179,7 +5179,7 @@ class App(Gtk.Application):
         live.set_hexpand(True)
         live.set_wrap(True)
         live.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        live.set_size_request(390, 92)
+        live.set_size_request(390, 150)
         live.add_css_class("wlan-diag-live")
         card.append(live)
 
