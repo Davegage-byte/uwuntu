@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.87")
+        self.window.set_title("Hardware Check v4.5.88")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.87")
+        title_label = Gtk.Label(label="Hardware Check v4.5.88")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4565,7 +4565,7 @@ class App(Gtk.Application):
                 handle.write(title + "\n")
                 handle.write("=" * 70 + "\n")
 
-            def write_command(handle, args, root=False, timeout=12, filter_pattern=None, tail=None):
+            def write_command(handle, args, root=False, timeout=12, filter_pattern=None, exclude_pattern=None, tail=None):
                 handle.write("\n$ " + " ".join(str(x) for x in args) + "\n")
                 handle.write("-" * 70 + "\n")
                 _, output = self._wlan_diag_run_command(
@@ -4579,8 +4579,13 @@ class App(Gtk.Application):
                 if filter_pattern is not None:
                     pattern = re.compile(filter_pattern, re.I)
                     lines = [line for line in lines if pattern.search(line)]
+                if exclude_pattern is not None:
+                    pattern = re.compile(exclude_pattern, re.I)
+                    lines = [line for line in lines if not pattern.search(line)]
                 if tail is not None:
                     lines = lines[-int(tail):]
+                if not lines and (filter_pattern is not None or exclude_pattern is not None):
+                    lines = ["[keine relevanten Treffer]"]
                 handle.write("\n".join(lines))
                 handle.write("\n")
 
@@ -4620,6 +4625,8 @@ class App(Gtk.Application):
                         ["iw", "dev", wifi_iface, "link"],
                         ["iw", "dev", wifi_iface, "info"],
                         ["iw", "dev", wifi_iface, "get", "power_save"],
+                        ["iw", "dev", wifi_iface, "station", "dump"],
+                        ["ip", "-s", "link", "show", "dev", wifi_iface],
                         [
                             "nmcli", "-f",
                             "IN-USE,SSID,BSSID,CHAN,FREQ,SIGNAL,RATE,SECURITY",
@@ -4672,6 +4679,7 @@ class App(Gtk.Application):
                 if wifi_iface:
                     write_command(handle, ["ethtool", "-i", wifi_iface], root=True)
                 write_command(handle, ["rfkill", "list"])
+                write_command(handle, ["iw", "reg", "get"])
                 for args in (
                     ["dmidecode", "-s", "system-product-name"],
                     ["dmidecode", "-s", "bios-version"],
@@ -4729,20 +4737,27 @@ class App(Gtk.Application):
                     root=True,
                     timeout=20,
                 )
-                write_section(handle, "8. SELF-HEAL – LETZTE 60 MINUTEN")
+                selfheal_lifecycle_pattern = (
+                    r"systemd\[1\]: (?:Starting|Finished|Started|Stopping|Stopped) "
+                    r"uwuntu-wifi-selfheal\.(?:service|timer)\b|"
+                    r"systemd\[1\]: uwuntu-wifi-selfheal\.(?:service|timer): "
+                    r"Deactivated successfully\."
+                )
+                write_section(handle, "8. SELF-HEAL – LETZTE 60 MINUTEN (BEREINIGT)")
                 write_command(
                     handle,
                     ["journalctl", "-b", "-u", "uwuntu-wifi-selfheal.service",
                      "--since", since, "--no-pager", "-o", "short-precise"],
                     root=True,
                     timeout=20,
+                    exclude_pattern=selfheal_lifecycle_pattern,
                 )
 
                 status("Kernel- und iwlwifi-Logs sammeln")
                 wlan_pattern = (
-                    r"iwlwifi|wlp|wlan|wifi|80211|cfg80211|firmware|rfkill|"
-                    r"beacon|deauth|disassoc|disconnect|authenticat|associat|"
-                    r"timeout|microcode|failed|error|reset|crash|warning"
+                    r"iwlwifi|iwlmld|cfg80211|mac80211|wlp[0-9a-z]+|wlan[0-9]+|"
+                    r"IEEE 802\.11|80211|rfkill|beacon|deauth|disassoc|"
+                    r"microcode|firmware.*(?:iwl|wifi)|(?:iwl|wifi).*firmware"
                 )
                 write_section(handle, "9. KERNEL WLAN – LETZTE 60 MINUTEN")
                 write_command(
@@ -4766,6 +4781,7 @@ class App(Gtk.Application):
                         r"disassoc|disconnect|authenticat|associat|supplicant-timeout|"
                         r"CONN_FAILED"
                     ),
+                    exclude_pattern=selfheal_lifecycle_pattern,
                 )
 
                 status("Routing, DNS und WLAN-Erreichbarkeit prüfen")
