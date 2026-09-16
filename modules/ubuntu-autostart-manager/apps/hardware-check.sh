@@ -257,6 +257,36 @@ button.info-serial-link:focus {
     font-weight: 800;
 }
 
+button.wlan-diag-button {
+    min-height: 26px;
+    padding: 2px 9px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 800;
+    color: #5aa2ff;
+    background: #232329;
+    border: 1px solid #5aa2ff;
+}
+.wlan-diag-shade {
+    background: rgba(23, 23, 28, 0.92);
+}
+.wlan-diag-card {
+    background: #232329;
+    border: 1px solid #5aa2ff;
+    border-radius: 10px;
+    padding: 14px;
+}
+.wlan-diag-title {
+    font-size: 14px;
+    font-weight: 800;
+}
+.wlan-diag-live {
+    color: #d7d7dd;
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: 600;
+}
+
 /* Update-Statusfarben bewusst spezifischer als .update-status.
    Dadurch kann dessen allgemeines Weiß die Zustandsfarbe nicht überschreiben. */
 .update-status.status-orange { color: #f5a623; }
@@ -2353,6 +2383,16 @@ class App(Gtk.Application):
         }
         self.info_window = None
         self.hotkeys_window = None
+        self.wlan_diag_button = None
+        self.wlan_diag_overlay = None
+        self.wlan_diag_spinner = None
+        self.wlan_diag_title_label = None
+        self.wlan_diag_live_label = None
+        self.wlan_diag_active = False
+        self.wlan_diag_thread = None
+        self.wlan_diag_lines = []
+        self.wlan_diag_hide_source = None
+        self.wlan_diag_stop = threading.Event()
         self.update_window = None
         self.update_status_label = None
         self.update_proc = None
@@ -2466,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.86")
+        self.window.set_title("Hardware Check v4.5.87")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.86")
+        title_label = Gtk.Label(label="Hardware Check v4.5.87")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4417,9 +4457,536 @@ class App(Gtk.Application):
         log("Systeminformationen per I mittig geöffnet")
         return False
 
+    def _wlan_diag_set_title_color(self, color=None):
+        label = getattr(self, "wlan_diag_title_label", None)
+        if label is None:
+            return False
+        for cls in ("status-green", "status-orange", "status-red", "status-blue"):
+            label.remove_css_class(cls)
+        if color:
+            label.add_css_class("status-" + color)
+        return False
+
+    def _wlan_diag_push_status(self, text):
+        if not getattr(self, "wlan_diag_active", False):
+            return False
+        self.wlan_diag_lines.append(
+            f"[{time.strftime('%H:%M:%S')}] {str(text).strip()}"
+        )
+        self.wlan_diag_lines = self.wlan_diag_lines[-5:]
+        label = getattr(self, "wlan_diag_live_label", None)
+        if label is not None:
+            label.set_text("\n".join(self.wlan_diag_lines))
+        return False
+
+    def _wlan_diag_hide_overlay(self):
+        self.wlan_diag_hide_source = None
+        overlay = getattr(self, "wlan_diag_overlay", None)
+        if overlay is not None and not self.wlan_diag_active:
+            overlay.set_visible(False)
+        return False
+
+    @staticmethod
+    def _wlan_diag_run_command(args, sudo_ok=False, root=False, timeout=12, env=None):
+        cmd = [str(value) for value in args]
+        sudo = shutil.which("sudo")
+        if root and sudo_ok and sudo:
+            cmd = [sudo, "-n"] + cmd
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                env=env,
+                check=False,
+            )
+            return proc.returncode, proc.stdout or ""
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            return 124, output + f"\n[Timeout nach {timeout}s]\n"
+        except Exception as exc:
+            return 99, f"[Befehl nicht ausführbar: {exc}]\n"
+
+    def _wlan_diag_worker(self):
+        output_path = None
+        try:
+            env = os.environ.copy()
+            env["LC_ALL"] = "C"
+            env["LANG"] = "C"
+
+            sudo_ok = False
+            sudo = shutil.which("sudo")
+            if sudo:
+                rc, _ = self._wlan_diag_run_command(
+                    [sudo, "-n", "true"],
+                    timeout=2,
+                    env=env,
+                )
+                sudo_ok = rc == 0
+
+            home = Path.home()
+            output_dir = home
+            for candidate in (home / "Schreibtisch", home / "Desktop"):
+                if candidate.is_dir():
+                    output_dir = candidate
+                    break
+
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            output_path = output_dir / f"Uwuntu-WLAN-Diagnose-{stamp}.txt"
+
+            rc, devices = self._wlan_diag_run_command(
+                ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"],
+                timeout=5,
+                env=env,
+            )
+            wifi_iface = ""
+            lan_iface = ""
+            if rc == 0:
+                for raw in devices.splitlines():
+                    parts = raw.rsplit(":", 1)
+                    if len(parts) != 2:
+                        continue
+                    dev, kind = parts
+                    if kind == "wifi" and not wifi_iface:
+                        wifi_iface = dev
+                    elif kind == "ethernet" and not lan_iface:
+                        lan_iface = dev
+
+            def status(text):
+                GLib.idle_add(self._wlan_diag_push_status, text)
+
+            def write_section(handle, title):
+                handle.write("\n\n" + "=" * 70 + "\n")
+                handle.write(title + "\n")
+                handle.write("=" * 70 + "\n")
+
+            def write_command(handle, args, root=False, timeout=12, filter_pattern=None, tail=None):
+                handle.write("\n$ " + " ".join(str(x) for x in args) + "\n")
+                handle.write("-" * 70 + "\n")
+                _, output = self._wlan_diag_run_command(
+                    args,
+                    sudo_ok=sudo_ok,
+                    root=root,
+                    timeout=timeout,
+                    env=env,
+                )
+                lines = output.splitlines()
+                if filter_pattern is not None:
+                    pattern = re.compile(filter_pattern, re.I)
+                    lines = [line for line in lines if pattern.search(line)]
+                if tail is not None:
+                    lines = lines[-int(tail):]
+                handle.write("\n".join(lines))
+                handle.write("\n")
+
+            status("Vorbereitung und Rechte prüfen")
+            with output_path.open("w", encoding="utf-8", errors="replace") as handle:
+                handle.write("UWUNTU WLAN DIAGNOSE – SOFORTAUFNAHME\n")
+                handle.write("=" * 70 + "\n")
+                handle.write(f"Zeit:              {time.strftime('%Y-%m-%d %H:%M:%S %z')}\n")
+                handle.write(f"Hostname:          {os.uname().nodename}\n")
+                handle.write(f"WLAN:              {wifi_iface or 'NICHT ERKANNT'}\n")
+                handle.write(f"LAN:               {lan_iface or 'NICHT ERKANNT'}\n")
+                handle.write("Ziel-SSID:         Guest\n")
+                handle.write(f"Root-Zugriff:      {'sudo -n' if sudo_ok else 'ohne Root-Rechte'}\n")
+                try:
+                    uptime = Path("/proc/uptime").read_text().split()[0]
+                except Exception:
+                    uptime = "unbekannt"
+                handle.write(f"Monotone Uptime:   {uptime} Sekunden\n")
+
+                status("Netzwerkzustand erfassen")
+                write_section(handle, "1. SOFORTIGER NETZWERK-ZUSTAND")
+                for args in (
+                    ["nmcli", "general", "status"],
+                    ["nmcli", "radio"],
+                    ["nmcli", "device", "status"],
+                    ["nmcli", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show", "--active"],
+                    ["ip", "-4", "address"],
+                    ["ip", "route"],
+                ):
+                    write_command(handle, args)
+
+                status("WLAN-Link und Access Points erfassen")
+                write_section(handle, "2. WLAN LIVE")
+                if wifi_iface:
+                    for args in (
+                        ["nmcli", "device", "show", wifi_iface],
+                        ["iw", "dev", wifi_iface, "link"],
+                        ["iw", "dev", wifi_iface, "info"],
+                        ["iw", "dev", wifi_iface, "get", "power_save"],
+                        [
+                            "nmcli", "-f",
+                            "IN-USE,SSID,BSSID,CHAN,FREQ,SIGNAL,RATE,SECURITY",
+                            "device", "wifi", "list", "ifname", wifi_iface,
+                            "--rescan", "no",
+                        ],
+                    ):
+                        write_command(handle, args)
+                else:
+                    handle.write("\nKein WLAN-Interface erkannt.\n")
+
+                status("NetworkManager und wpa_supplicant sammeln")
+                write_section(handle, "3. WPA_SUPPLICANT / GUEST-PROFIL")
+                if wifi_iface:
+                    write_command(
+                        handle,
+                        ["wpa_cli", "-i", wifi_iface, "status"],
+                        root=True,
+                    )
+                write_command(
+                    handle,
+                    ["systemctl", "status", "wpa_supplicant", "--no-pager", "-l"],
+                )
+                profile_fields = ",".join((
+                    "connection.id",
+                    "connection.uuid",
+                    "connection.interface-name",
+                    "connection.autoconnect",
+                    "connection.autoconnect-priority",
+                    "connection.autoconnect-retries",
+                    "802-11-wireless.ssid",
+                    "802-11-wireless.bssid",
+                    "802-11-wireless.mac-address",
+                    "802-11-wireless.cloned-mac-address",
+                    "802-11-wireless.powersave",
+                    "ipv4.method",
+                    "ipv6.method",
+                ))
+                write_command(
+                    handle,
+                    ["nmcli", "-f", profile_fields, "connection", "show", "Guest"],
+                )
+
+                write_section(handle, "4. WLAN-HARDWARE")
+                write_command(
+                    handle,
+                    ["lspci", "-nnk"],
+                    filter_pattern=r"Network controller|Ethernet controller|Subsystem:|Kernel driver|Kernel modules",
+                )
+                if wifi_iface:
+                    write_command(handle, ["ethtool", "-i", wifi_iface], root=True)
+                write_command(handle, ["rfkill", "list"])
+                for args in (
+                    ["dmidecode", "-s", "system-product-name"],
+                    ["dmidecode", "-s", "bios-version"],
+                    ["dmidecode", "-s", "bios-release-date"],
+                ):
+                    write_command(handle, args, root=True)
+
+                status("Self-Heal-Zustand erfassen")
+                write_section(handle, "5. UWUNTU WLAN SELF-HEAL")
+                write_command(
+                    handle,
+                    ["systemctl", "status", "uwuntu-wifi-selfheal.timer", "--no-pager", "-l"],
+                )
+                write_command(
+                    handle,
+                    ["systemctl", "status", "uwuntu-wifi-selfheal.service", "--no-pager", "-l"],
+                )
+                write_command(
+                    handle,
+                    ["tail", "-n", "1000", "/var/log/uwuntu-wifi-selfheal.log"],
+                    root=True,
+                )
+                script = Path("/usr/local/sbin/uwuntu-wifi-selfheal.sh")
+                if script.exists():
+                    handle.write("\nInstallierte Self-Heal-Version:\n")
+                    try:
+                        for line in script.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).splitlines():
+                            if (
+                                line.startswith("# Version")
+                                or line.startswith("AUTOCONNECT_GRACE_SECONDS=")
+                                or line.startswith("READY_STABLE_SECONDS=")
+                                or line.startswith("READY_WAIT_SECONDS=")
+                            ):
+                                handle.write(line + "\n")
+                    except Exception as exc:
+                        handle.write(f"[nicht lesbar: {exc}]\n")
+
+                status("NetworkManager- und WPA-Logs sammeln")
+                since = "-60 min"
+                write_section(handle, "6. NETWORKMANAGER – LETZTE 60 MINUTEN")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "-u", "NetworkManager", "--since", since,
+                     "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=20,
+                )
+                write_section(handle, "7. WPA_SUPPLICANT – LETZTE 60 MINUTEN")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "-u", "wpa_supplicant", "--since", since,
+                     "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=20,
+                )
+                write_section(handle, "8. SELF-HEAL – LETZTE 60 MINUTEN")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "-u", "uwuntu-wifi-selfheal.service",
+                     "--since", since, "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=20,
+                )
+
+                status("Kernel- und iwlwifi-Logs sammeln")
+                wlan_pattern = (
+                    r"iwlwifi|wlp|wlan|wifi|80211|cfg80211|firmware|rfkill|"
+                    r"beacon|deauth|disassoc|disconnect|authenticat|associat|"
+                    r"timeout|microcode|failed|error|reset|crash|warning"
+                )
+                write_section(handle, "9. KERNEL WLAN – LETZTE 60 MINUTEN")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "-k", "--since", since,
+                     "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=20,
+                    filter_pattern=wlan_pattern,
+                )
+                write_section(handle, "10. KOMBINIERTE WLAN-EREIGNISSE")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "--since", since,
+                     "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=25,
+                    filter_pattern=(
+                        r"NetworkManager|wpa_supplicant|uwuntu-wifi-selfheal|"
+                        r"iwlwifi|wlp|wlan|wifi|rfkill|dhcp|beacon|deauth|"
+                        r"disassoc|disconnect|authenticat|associat|supplicant-timeout|"
+                        r"CONN_FAILED"
+                    ),
+                )
+
+                status("Routing, DNS und WLAN-Erreichbarkeit prüfen")
+                write_section(handle, "11. DNS / ROUTING / ERREICHBARKEIT")
+                for args in (
+                    ["ip", "rule"],
+                    ["ip", "route"],
+                    ["resolvectl", "status"],
+                ):
+                    write_command(handle, args)
+                if wifi_iface:
+                    _, gateway_text = self._wlan_diag_run_command(
+                        ["nmcli", "-g", "IP4.GATEWAY", "device", "show", wifi_iface],
+                        timeout=4,
+                        env=env,
+                    )
+                    gateway = next(
+                        (line.strip() for line in gateway_text.splitlines() if line.strip()),
+                        "",
+                    )
+                    if gateway:
+                        write_command(
+                            handle,
+                            ["ping", "-I", wifi_iface, "-c", "3", "-W", "1", gateway],
+                            timeout=6,
+                        )
+                    write_command(
+                        handle,
+                        ["ping", "-I", wifi_iface, "-c", "3", "-W", "1", "1.1.1.1"],
+                        timeout=6,
+                    )
+                    write_command(
+                        handle,
+                        ["resolvectl", "query", "-i", wifi_iface, "example.com"],
+                        timeout=8,
+                    )
+
+                status("Boot-Historie und Konfiguration ergänzen")
+                write_section(handle, "12. BOOT / SYSTEM")
+                for args in (
+                    ["uptime"],
+                    ["uptime", "-s"],
+                    ["who", "-b"],
+                    ["uname", "-a"],
+                    ["journalctl", "--list-boots", "--no-pager"],
+                ):
+                    write_command(handle, args)
+                write_command(handle, ["cat", "/etc/os-release"])
+
+                write_section(handle, "13. VORHERIGER BOOT – WLAN-EREIGNISSE")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "-1", "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=25,
+                    filter_pattern=(
+                        r"NetworkManager|wpa_supplicant|uwuntu-wifi-selfheal|"
+                        r"iwlwifi|wlp|wlan|wifi|rfkill|dhcp|beacon|deauth|"
+                        r"disassoc|disconnect|authenticat|associat|CONN_FAILED"
+                    ),
+                    tail=1500,
+                )
+
+                write_section(handle, "14. NETWORKMANAGER KONFIGURATION")
+                config_paths = [Path("/etc/NetworkManager/NetworkManager.conf")]
+                config_paths.extend(sorted(Path("/etc/NetworkManager/conf.d").glob("*.conf")))
+                config_paths.extend(sorted(Path("/usr/lib/NetworkManager/conf.d").glob("*.conf")))
+                for path in config_paths:
+                    if not path.is_file():
+                        continue
+                    handle.write(f"\n----- {path} -----\n")
+                    _, text = self._wlan_diag_run_command(
+                        ["cat", str(path)],
+                        sudo_ok=sudo_ok,
+                        root=True,
+                        timeout=5,
+                        env=env,
+                    )
+                    handle.write(text)
+                    if text and not text.endswith("\n"):
+                        handle.write("\n")
+
+                write_section(handle, "15. IWLWIFI / FIRMWARE – AKTUELLER BOOT")
+                write_command(
+                    handle,
+                    ["journalctl", "-b", "-k", "--no-pager", "-o", "short-precise"],
+                    root=True,
+                    timeout=20,
+                    filter_pattern=r"iwlwifi|cfg80211|firmware.*wifi|wireless",
+                )
+
+                status("Diagnosedatei abschließen")
+                write_section(handle, "16. ABSCHLUSS")
+                handle.write(f"Ende: {time.strftime('%Y-%m-%d %H:%M:%S %z')}\n")
+                handle.write(f"Datei: {output_path}\n")
+
+            try:
+                os.chmod(output_path, 0o600)
+            except Exception:
+                pass
+
+            if self.wlan_diag_stop.is_set():
+                return
+
+            GLib.idle_add(
+                self._wlan_diag_finish,
+                True,
+                output_path.name,
+                "",
+            )
+        except Exception as exc:
+            log(f"WLAN-Diagnose Fehler: {exc}")
+            if self.wlan_diag_stop.is_set():
+                return
+            GLib.idle_add(
+                self._wlan_diag_finish,
+                False,
+                output_path.name if output_path else "",
+                str(exc),
+            )
+
+    def _wlan_diag_finish(self, success, filename, error_text):
+        self.wlan_diag_active = False
+        button = getattr(self, "wlan_diag_button", None)
+        if button is not None:
+            button.set_sensitive(True)
+
+        spinner = getattr(self, "wlan_diag_spinner", None)
+        if spinner is not None:
+            spinner.stop()
+            spinner.set_visible(False)
+
+        title = getattr(self, "wlan_diag_title_label", None)
+        live = getattr(self, "wlan_diag_live_label", None)
+
+        if success:
+            if title is not None:
+                title.set_text("✅ WLAN-Diagnose gespeichert:")
+            self._wlan_diag_set_title_color("green")
+            if live is not None:
+                live.set_text(filename)
+            delay = 4500
+            log(f"WLAN-Diagnose gespeichert: {filename}")
+        else:
+            if title is not None:
+                title.set_text("❌ WLAN-Diagnose fehlgeschlagen")
+            self._wlan_diag_set_title_color("red")
+            if live is not None:
+                live.set_text(error_text or "Unbekannter Fehler")
+            delay = 6000
+            log(f"WLAN-Diagnose fehlgeschlagen: {error_text}")
+
+        if self.wlan_diag_hide_source is not None:
+            try:
+                GLib.source_remove(self.wlan_diag_hide_source)
+            except Exception:
+                pass
+        self.wlan_diag_hide_source = GLib.timeout_add(
+            delay,
+            self._wlan_diag_hide_overlay,
+        )
+        return False
+
+    def start_wlan_diagnosis(self, *_):
+        if self.wlan_diag_active:
+            return False
+
+        if self.wlan_diag_hide_source is not None:
+            try:
+                GLib.source_remove(self.wlan_diag_hide_source)
+            except Exception:
+                pass
+            self.wlan_diag_hide_source = None
+
+        self.wlan_diag_active = True
+        self.wlan_diag_stop.clear()
+        self.wlan_diag_lines = []
+
+        if self.wlan_diag_button is not None:
+            self.wlan_diag_button.set_sensitive(False)
+        if self.wlan_diag_overlay is not None:
+            self.wlan_diag_overlay.set_visible(True)
+        if self.wlan_diag_spinner is not None:
+            self.wlan_diag_spinner.set_visible(True)
+            self.wlan_diag_spinner.start()
+        if self.wlan_diag_title_label is not None:
+            self.wlan_diag_title_label.set_text("📋 WLAN-Diagnose läuft …")
+        self._wlan_diag_set_title_color("blue")
+        if self.wlan_diag_live_label is not None:
+            self.wlan_diag_live_label.set_text("Vorbereitung …")
+
+        self.wlan_diag_thread = threading.Thread(
+            target=self._wlan_diag_worker,
+            name="uwuntu-wlan-diagnose",
+            daemon=True,
+        )
+        self.wlan_diag_thread.start()
+        log("WLAN-Diagnose über F1-Menü gestartet")
+        return False
+
     def close_hotkeys_window(self, *_):
+        # Während die Diagnose läuft bleibt das F1-Fenster offen, damit der
+        # Benutzer den Live-Status bis zum Abschluss sehen kann.
+        if self.wlan_diag_active:
+            return True
+
         window = self.hotkeys_window
         self.hotkeys_window = None
+        self.wlan_diag_button = None
+        self.wlan_diag_overlay = None
+        self.wlan_diag_spinner = None
+        self.wlan_diag_title_label = None
+        self.wlan_diag_live_label = None
+
+        if self.wlan_diag_hide_source is not None:
+            try:
+                GLib.source_remove(self.wlan_diag_hide_source)
+            except Exception:
+                pass
+            self.wlan_diag_hide_source = None
+
         if window is not None:
             try:
                 window.destroy()
@@ -4429,6 +4996,9 @@ class App(Gtk.Application):
 
     def on_hotkeys_key(self, controller, keyval, keycode, state):
         name = Gdk.keyval_name(keyval) or ""
+
+        if self.wlan_diag_active:
+            return True
 
         # F1 öffnet die Übersicht ausschließlich. Solange sie bereits offen
         # ist, hat F1 bewusst keine weitere Funktion. Geschlossen wird nur
@@ -4475,10 +5045,22 @@ class App(Gtk.Application):
         outer.set_margin_start(12)
         outer.set_margin_end(12)
 
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+
         title = Gtk.Label(label="SHORTCUTS / HOTKEYS")
         title.set_xalign(0)
+        title.set_hexpand(True)
         title.add_css_class("info-title")
-        outer.append(title)
+        title_row.append(title)
+
+        diag_button = Gtk.Button(label="📋 WLAN-Diagnose")
+        diag_button.add_css_class("wlan-diag-button")
+        diag_button.set_focusable(False)
+        diag_button.connect("clicked", self.start_wlan_diagnosis)
+        title_row.append(diag_button)
+        self.wlan_diag_button = diag_button
+
+        outer.append(title_row)
 
         grid = Gtk.Grid()
         grid.set_row_spacing(8)
@@ -4546,7 +5128,55 @@ class App(Gtk.Application):
         note.add_css_class("hotkey-note")
         outer.append(note)
 
-        window.set_child(outer)
+        overlay = Gtk.Overlay()
+        overlay.set_child(outer)
+
+        shade = Gtk.Grid()
+        shade.set_hexpand(True)
+        shade.set_vexpand(True)
+        shade.set_halign(Gtk.Align.FILL)
+        shade.set_valign(Gtk.Align.FILL)
+        shade.add_css_class("wlan-diag-shade")
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.set_halign(Gtk.Align.CENTER)
+        card.set_valign(Gtk.Align.CENTER)
+        card.set_size_request(430, -1)
+        card.add_css_class("wlan-diag-card")
+
+        heading = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        spinner = Gtk.Spinner()
+        heading.append(spinner)
+
+        diag_title = Gtk.Label(label="📋 WLAN-Diagnose läuft …")
+        diag_title.set_xalign(0)
+        diag_title.set_hexpand(True)
+        diag_title.add_css_class("wlan-diag-title")
+        diag_title.add_css_class("status-blue")
+        heading.append(diag_title)
+        card.append(heading)
+
+        live = Gtk.Label(label="Vorbereitung …")
+        live.set_xalign(0)
+        live.set_yalign(0)
+        live.set_halign(Gtk.Align.FILL)
+        live.set_hexpand(True)
+        live.set_wrap(True)
+        live.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        live.set_size_request(390, 92)
+        live.add_css_class("wlan-diag-live")
+        card.append(live)
+
+        shade.attach(card, 0, 0, 1, 1)
+        shade.set_visible(False)
+        overlay.add_overlay(shade)
+
+        self.wlan_diag_overlay = shade
+        self.wlan_diag_spinner = spinner
+        self.wlan_diag_title_label = diag_title
+        self.wlan_diag_live_label = live
+
+        window.set_child(overlay)
         self.hotkeys_window = window
         self.present_centered(window)
         log("Shortcut-/Hotkey-Übersicht per F1 geöffnet")
@@ -7214,6 +7844,7 @@ except Exception:
         self.mark_keyboard_alias(name, pressed=False)
 
     def do_shutdown(self):
+        self.wlan_diag_stop.set()
         self.stop_power_dialog_helper()
         self.restore_keyboard_shortcuts_with_retries(force=True)
         self.restore_alt_space_after_keyboard_test()
