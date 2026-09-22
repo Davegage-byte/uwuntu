@@ -370,11 +370,9 @@ jobs:
           git config user.name 'Davegage-byte'
           git config user.email '74912940+Davegage-byte@users.noreply.github.com'
           git add -A
-          git commit             -m 'IM1.23→IM1.24 · IMAGE · 4K-Random-Benchmark ergänzt'             -m 'Uwuntu Image Manager v1.24
-
-Der bestehende destruktive USB-Benchmark misst zusätzlich zur sequenziellen 512-MiB-Rate jetzt 4K-Random-Schreiben und 4K-Random-Lesen mit fio, Direct I/O und QD1. Jeder Random-Test läuft nur 8 Sekunden und bleibt auf die bereits vom Benchmark überschriebene erste 512-MiB-Region begrenzt.
-
-Die Ergebnisanzeige enthält Random-IOPS, MB/s und mittlere Latenz. fio wird als benötigtes Paket automatisch mitinstalliert. Der bestehende Schutz vor Systemdatenträgern und die Löschwarnung bleiben erhalten.
-
-Geprüft: bash -n, beide Python-Heredocs via compile(), git diff --check und Identität des Pflicht-Backups mit dem vorherigen Main-Stand.'
+          git commit -m 'IM1.23→IM1.24 · IMAGE · 4K-Random-Benchmark ergänzt' \
+            -m 'Uwuntu Image Manager v1.24' \
+            -m 'Der bestehende destruktive USB-Benchmark misst zusätzlich zur sequenziellen 512-MiB-Rate jetzt 4K-Random-Schreiben und 4K-Random-Lesen mit fio, Direct I/O und QD1. Jeder Random-Test läuft nur 8 Sekunden und bleibt auf die bereits vom Benchmark überschriebene erste 512-MiB-Region begrenzt.' \
+            -m 'Die Ergebnisanzeige enthält Random-IOPS, MB/s und mittlere Latenz. fio wird als benötigtes Paket automatisch mitinstalliert. Der bestehende Schutz vor Systemdatenträgern und die Löschwarnung bleiben erhalten.' \
+            -m 'Geprüft: bash -n, beide Python-Heredocs via compile(), git diff --check und Identität des Pflicht-Backups mit dem vorherigen Main-Stand.'
           git push origin HEAD:feature/uim-random-benchmark-20260922
