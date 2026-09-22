@@ -1,0 +1,319 @@
+name: Test IM v1.27 Ventoy Universal IMG
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - codex/im-v127-ventoy-universal-img
+    paths:
+      - .github/workflows/test-im-v127-ventoy-img.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test-Abhängigkeiten installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dosfstools e2fsprogs partclone zstd util-linux
+
+      - name: Image Manager Full Path prüfen
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          BASE=023f3df63fdf039b1ae5e5060541713e03fde134
+          FILE="Uwuntu Image Manager.sh"
+          BACKUP="backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-22-10-12.sh"
+
+          bash -n "$FILE"
+          git diff --check "$BASE"..HEAD
+          cmp -s <(git show "$BASE:$FILE") "$BACKUP"
+
+          grep -q 'APP_VERSION="1.27"' "$FILE"
+          grep -q 'APP_VERSION = "1.27"' "$FILE"
+          grep -q 'VERSION = "1.27"' "$FILE"
+          grep -q 'ventoy-universal-export' "$FILE"
+          grep -q 'UNIVERSAL-IMAGE → VENTOY (.IMG)' "$FILE"
+
+          sudo env SUDO_USER="$USER" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" python3 - <<'PY'
+          import ast
+          import hashlib
+          import io
+          import json
+          import os
+          import subprocess
+          import tarfile
+          import tempfile
+          import time
+          import types
+          from pathlib import Path
+
+          repo = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          script = (repo / "Uwuntu Image Manager.sh").read_text(encoding="utf-8")
+
+          root_marker = "cat > \"$ROOT_HELPER\" <<'PYROOT'\n"
+          root_code = script.split(root_marker, 1)[1].split("\nPYROOT\n", 1)[0]
+          compile(root_code, "<PYROOT>", "exec")
+
+          app_marker = "cat > \"$USER_APP_DIR/uwuntu_image_manager.py\" <<'PYAPP'\n"
+          app_code = script.split(app_marker, 1)[1].split("\nPYAPP\n", 1)[0]
+          compile(app_code, "<PYAPP>", "exec")
+
+          root_tree = ast.parse(root_code)
+          root_functions = {
+              node.name for node in root_tree.body
+              if isinstance(node, ast.FunctionDef)
+          }
+          for name in (
+              "ventoy_universal_export",
+              "restore_universal_payload_to_device",
+              "copy_file_with_progress",
+          ):
+              assert name in root_functions, name
+
+          app_tree = ast.parse(app_code)
+          main_window = next(
+              node for node in app_tree.body
+              if isinstance(node, ast.ClassDef) and node.name == "MainWindow"
+          )
+          assert any(
+              isinstance(node, ast.FunctionDef) and node.name == "open_ventoy"
+              for node in main_window.body
+          )
+
+          ns = {"__name__": "uwuntu_test"}
+          exec(compile(root_code, "<PYROOT>", "exec"), ns)
+
+          image_dir = ns["IMAGE_DIR"]
+          image_dir.mkdir(parents=True, exist_ok=True)
+
+          with tempfile.TemporaryDirectory(prefix="im127-test-") as tmp_s:
+              tmp = Path(tmp_s)
+              payload_dir = tmp / "payload"
+              payload_dir.mkdir()
+              (payload_dir / "EFI").mkdir()
+              (payload_dir / "EFI" / "BOOT").mkdir()
+              (payload_dir / "EFI" / "BOOT" / "BOOTX64.EFI").write_bytes(
+                  b"ventoy-universal-test"
+              )
+              (payload_dir / "DIAG.TXT").write_text(
+                  "HP/Lenovo diagnostic placeholder\n",
+                  encoding="utf-8",
+              )
+
+              fat_template = tmp / "source-fat.img"
+              with fat_template.open("wb") as handle:
+                  handle.truncate(128 * 1024 * 1024)
+              subprocess.run(
+                  ["mkfs.vfat", "-F", "16", "-n", "DIAGTEST", str(fat_template)],
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+              )
+
+              with fat_template.open("rb") as handle:
+                  vbr = handle.read(512)
+
+              member = "partition-1.files.tar.zst"
+              member_path = tmp / member
+              progress = ns["Progress"](
+                  "Testarchiv", 1, 1, 1024, "LESEN"
+              )
+              stream_bytes = ns["stream_portable_tar_to_zstd"](
+                  payload_dir,
+                  member_path,
+                  1024,
+                  progress,
+              )
+
+              vbr_member = "partition-1.vbr.bin"
+              vbr_path = tmp / vbr_member
+              vbr_path.write_bytes(vbr)
+
+              sector_size = 512
+              start_sector = 2048
+              target_size_bytes = 128 * 1024 * 1024
+              target_size_sectors = target_size_bytes // sector_size
+              minimum_target_bytes = (
+                  start_sector * sector_size
+                  + target_size_bytes
+                  + 16 * 1024 * 1024
+              )
+
+              metadata = {
+                  "format": "uwuntu-usb-v1",
+                  "tool_version": "1.27",
+                  "name": "HP Diagnostics Test",
+                  "source": {
+                      "model": "Synthetic USB",
+                      "path": "/dev/sdz",
+                      "size_bytes": 16 * 1024**3,
+                  },
+                  "partition_table": {
+                      "label": "dos",
+                      "id": "0x1234abcd",
+                      "sector_size": sector_size,
+                      "mbr_gap_bytes": 0,
+                  },
+                  "partitions": [
+                      {
+                          "number": 1,
+                          "source_start_sector": start_sector,
+                          "source_size_sectors": target_size_sectors,
+                          "source_size_bytes": target_size_bytes,
+                          "type": "c",
+                          "bootable": True,
+                          "uuid": "",
+                          "name": "",
+                          "attrs": "",
+                          "fstype": "vfat",
+                          "label": "DIAGTEST",
+                          "fs_uuid": "1A2B-3C4D",
+                          "backup_method": "files-fat",
+                          "backup": member,
+                          "stream_bytes": stream_bytes,
+                          "vbr_backup": vbr_member,
+                          "fat_bits": 16,
+                          "used_bytes": 1024,
+                          "target_size_bytes": target_size_bytes,
+                          "target_start_sector": start_sector,
+                          "target_size_sectors": target_size_sectors,
+                      }
+                  ],
+                  "minimum_target_bytes": minimum_target_bytes,
+                  "checksums": {
+                      member: hashlib.sha256(member_path.read_bytes()).hexdigest(),
+                      vbr_member: hashlib.sha256(vbr_path.read_bytes()).hexdigest(),
+                  },
+              }
+
+              uwusb = image_dir / "HP_Diagnostics_Test.uwusb"
+              meta_bytes = (
+                  json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"
+              ).encode("utf-8")
+
+              with tarfile.open(uwusb, "w") as tf:
+                  info = tarfile.TarInfo("metadata.json")
+                  info.size = len(meta_bytes)
+                  tf.addfile(info, io.BytesIO(meta_bytes))
+                  tf.add(member_path, arcname=member)
+                  tf.add(vbr_path, arcname=vbr_member)
+
+              ventoy_root = tmp / "Ventoy"
+              ventoy_root.mkdir()
+              (ventoy_root / "ventoy").mkdir()
+              (ventoy_root / "ventoy" / "ventoy.json").write_text(
+                  "{}\n", encoding="utf-8"
+              )
+
+              original_validate = ns["validate_ventoy_root"]
+              original_disk_for_path = ns["disk_for_path"]
+
+              ns["validate_ventoy_root"] = (
+                  lambda root, require_persistence=True:
+                  (Path(root).resolve(), "/dev/fake-ventoy")
+              )
+              ns["disk_for_path"] = lambda path: ""
+
+              args = types.SimpleNamespace(
+                  image=str(uwusb),
+                  ventoy_root=str(ventoy_root),
+              )
+
+              ns["ventoy_universal_export"](args)
+
+              exported = ventoy_root / "HP_Diagnostics_Test.img"
+              assert exported.is_file(), exported
+              assert exported.stat().st_size == minimum_target_bytes
+
+              table = subprocess.run(
+                  ["sfdisk", "--json", str(exported)],
+                  check=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  text=True,
+              )
+              parsed = json.loads(table.stdout)["partitiontable"]
+              assert parsed["label"] == "dos"
+              assert len(parsed["partitions"]) == 1
+
+              loopdev = subprocess.check_output(
+                  [
+                      "losetup",
+                      "--find",
+                      "--show",
+                      "--partscan",
+                      str(exported),
+                  ],
+                  text=True,
+              ).strip()
+
+              mount_dir = tmp / "check-mount"
+              mount_dir.mkdir()
+
+              try:
+                  subprocess.run(["udevadm", "settle"], check=False)
+                  part = Path(loopdev + "p1")
+                  for _ in range(20):
+                      if part.exists():
+                          break
+                      time.sleep(0.2)
+                  assert part.exists(), part
+
+                  fstype = subprocess.check_output(
+                      ["blkid", "-s", "TYPE", "-o", "value", str(part)],
+                      text=True,
+                  ).strip()
+                  label = subprocess.check_output(
+                      ["blkid", "-s", "LABEL", "-o", "value", str(part)],
+                      text=True,
+                  ).strip()
+                  assert fstype in {"vfat", "fat", "fat16"}
+                  assert label == "DIAGTEST"
+
+                  subprocess.run(
+                      ["mount", "-o", "ro", str(part), str(mount_dir)],
+                      check=True,
+                  )
+                  assert (
+                      mount_dir / "EFI" / "BOOT" / "BOOTX64.EFI"
+                  ).read_bytes() == b"ventoy-universal-test"
+                  assert (mount_dir / "DIAG.TXT").is_file()
+                  subprocess.run(["umount", str(mount_dir)], check=True)
+              finally:
+                  subprocess.run(
+                      ["umount", str(mount_dir)],
+                      check=False,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+                  subprocess.run(
+                      ["losetup", "-d", loopdev],
+                      check=False,
+                  )
+
+              ns["validate_ventoy_root"] = original_validate
+              ns["disk_for_path"] = original_disk_for_path
+              uwusb.unlink(missing_ok=True)
+
+          print("IM v1.27 Ventoy-Universal-IMG Full-Path-Test OK")
+          PY
+
+          git diff --name-only "$BASE"..HEAD | sort > /tmp/actual
+          printf '%s\n' \
+            ".github/workflows/test-im-v127-ventoy-img.yml" \
+            "Uwuntu Image Manager.sh" \
+            "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-22-10-12.sh" \
+            | sort > /tmp/expected
+          diff -u /tmp/expected /tmp/actual
