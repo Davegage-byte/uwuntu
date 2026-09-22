@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.25"
+APP_VERSION="1.26"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -155,9 +155,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.25"
+APP_VERSION = "1.26"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
+UNIVERSAL_FORMAT_VERSION = "uwuntu-usb-v1"
+UNIVERSAL_END_RESERVE_MIB = 16
+UNIVERSAL_BOOT_GAP_MAX_MIB = 64
 
 UPDATE_API_URL = (
     "https://api.github.com/repos/"
@@ -1207,12 +1210,14 @@ def stream_partclone_to_zstd(source, target, total, progress):
 
 def ext_partclone_program(fstype):
     fstype = str(fstype or "").lower()
+    if fstype == "ext2":
+        return "partclone.ext2"
     if fstype == "ext3":
         return "partclone.ext3"
     if fstype == "ext4":
         return "partclone.ext4"
     raise RuntimeError(
-        f"Nicht unterstütztes Persistenz-Dateisystem: {fstype or 'unbekannt'}"
+        f"Nicht unterstütztes ext-Dateisystem: {fstype or 'unbekannt'}"
     )
 
 
@@ -1524,6 +1529,1343 @@ def check_member_hash(result, expected):
 
     if expected and result.get("hash") != expected:
         raise RuntimeError("Image-Prüfsumme stimmt nicht.")
+
+
+
+# ============================================================
+# Universal USB-Images
+# ============================================================
+
+def normalize_image_title(value):
+    title = " ".join(str(value or "").split())
+
+    if not title:
+        fail("Bitte einen Namen für das Universal-USB-Image angeben.")
+
+    if len(title) > 80:
+        fail("Der Image-Name darf maximal 80 Zeichen lang sein.")
+
+    if any(ord(ch) < 32 for ch in title):
+        fail("Der Image-Name enthält ungültige Steuerzeichen.")
+
+    return title
+
+
+def safe_universal_image_path(path):
+    p = Path(path).expanduser().resolve()
+    root = IMAGE_DIR.resolve()
+
+    try:
+        p.relative_to(root)
+    except Exception:
+        fail(
+            "Universal-Images dürfen nur aus dem Uwuntu-Image-Ordner "
+            "verwendet werden:\n"
+            f"{IMAGE_DIR}"
+        )
+
+    if p.suffix.lower() != ".uwusb":
+        fail("Die ausgewählte Datei ist kein .uwusb-Image.")
+
+    if not p.is_file():
+        fail(f"Universal-Image wurde nicht gefunden: {p}")
+
+    return p
+
+
+def read_universal_metadata(image):
+    try:
+        with tarfile.open(image, "r") as tf:
+            member = tf.getmember("metadata.json")
+            handle = tf.extractfile(member)
+            if handle is None:
+                raise RuntimeError("metadata.json fehlt")
+            data = json.loads(handle.read().decode("utf-8"))
+    except Exception as exc:
+        fail(f"Universal-Image konnte nicht gelesen werden:\n{exc}")
+
+    if data.get("format") != UNIVERSAL_FORMAT_VERSION:
+        fail(
+            "Dieses Universal-Image hat ein nicht unterstütztes Format.\n"
+            f"Gefunden: {data.get('format', 'unbekannt')}"
+        )
+
+    return data
+
+
+def run_input(args, input_text, timeout=30):
+    log("CMD: " + " ".join(map(str, args)))
+    result = subprocess.run(
+        args,
+        input=input_text,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+    )
+
+    if result.stdout:
+        log("STDOUT:\n" + result.stdout[-12000:])
+    if result.stderr:
+        log("STDERR:\n" + result.stderr[-12000:])
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"Befehl fehlgeschlagen ({result.returncode}): "
+            + " ".join(map(str, args))
+            + (f"\n{detail}" if detail else "")
+        )
+
+    return result
+
+
+def align_up(value, alignment):
+    value = int(value)
+    alignment = max(1, int(alignment))
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def universal_partition_table(disk):
+    try:
+        payload = json.loads(
+            output(["sfdisk", "--json", disk], timeout=10)
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Die Partitionstabelle des Quellsticks konnte nicht gelesen "
+            "werden."
+        ) from exc
+
+    table = payload.get("partitiontable") or {}
+    label = str(table.get("label") or "").lower()
+
+    if label not in {"dos", "gpt"}:
+        raise RuntimeError(
+            "Universal-Kompakt-Images unterstützen aktuell MBR/DOS- "
+            "und GPT-Partitionstabellen.\n"
+            f"Gefunden: {label or 'keine/ unbekannt'}"
+        )
+
+    sector_size = int(
+        table.get("sectorsize")
+        or output(["blockdev", "--getss", disk], timeout=5)
+    )
+
+    source_parts = table.get("partitions") or []
+    if not source_parts:
+        raise RuntimeError(
+            "Auf dem Stick wurde keine normale Partition gefunden. "
+            "Superfloppy-/partitionlose Medien werden in v1 noch nicht "
+            "kompakt gesichert."
+        )
+
+    partitions = []
+
+    for expected_number, item in enumerate(source_parts, start=1):
+        node = str(item.get("node") or "")
+        match = re.search(r"(?:p)?(\d+)$", node)
+        number = int(match.group(1)) if match else expected_number
+
+        if number != expected_number:
+            raise RuntimeError(
+                "Nicht fortlaufende oder ungewöhnliche Partitionsnummern "
+                "werden für Universal-Kompakt-Images noch nicht unterstützt."
+            )
+
+        part_type = str(item.get("type") or "").strip()
+
+        if label == "dos":
+            type_lower = part_type.lower().replace("0x", "")
+            if type_lower in {"5", "05", "f", "0f", "85"} or number > 4:
+                raise RuntimeError(
+                    "Erweiterte/logische MBR-Partitionen werden in der "
+                    "ersten Universal-Image-Version noch nicht unterstützt."
+                )
+
+        start = int(item.get("start") or 0)
+        size = int(item.get("size") or 0)
+
+        if start <= 0 or size <= 0 or not Path(node).exists():
+            raise RuntimeError(
+                f"Partition {number} besitzt ungültige Geometriedaten."
+            )
+
+        info = fs_info(node)
+
+        partitions.append(
+            {
+                "number": number,
+                "path": node,
+                "source_start_sector": start,
+                "source_size_sectors": size,
+                "source_size_bytes": size * sector_size,
+                "type": part_type,
+                "bootable": bool(item.get("bootable")),
+                "uuid": str(item.get("uuid") or ""),
+                "name": str(item.get("name") or ""),
+                "attrs": str(item.get("attrs") or ""),
+                "fstype": str(info.get("fstype") or "").lower(),
+                "label": str(info.get("label") or ""),
+                "fs_uuid": str(info.get("uuid") or ""),
+            }
+        )
+
+    return {
+        "label": label,
+        "id": str(table.get("id") or ""),
+        "sector_size": sector_size,
+        "partitions": partitions,
+    }
+
+
+def fat_bits_from_device(path):
+    with open(path, "rb", buffering=0) as handle:
+        boot = handle.read(512)
+
+    if len(boot) < 64:
+        raise RuntimeError("FAT-Bootsektor ist zu kurz.")
+
+    bytes_per_sector = int.from_bytes(boot[11:13], "little")
+    sectors_per_cluster = boot[13]
+    reserved = int.from_bytes(boot[14:16], "little")
+    fats = boot[16]
+    root_entries = int.from_bytes(boot[17:19], "little")
+    total16 = int.from_bytes(boot[19:21], "little")
+    fat16 = int.from_bytes(boot[22:24], "little")
+    total32 = int.from_bytes(boot[32:36], "little")
+    fat32 = int.from_bytes(boot[36:40], "little")
+
+    total = total16 or total32
+    fat_size = fat16 or fat32
+
+    if (
+        bytes_per_sector <= 0
+        or sectors_per_cluster <= 0
+        or total <= 0
+        or fat_size <= 0
+    ):
+        raise RuntimeError("FAT-Geometrie konnte nicht bestimmt werden.")
+
+    root_dir_sectors = (
+        (root_entries * 32) + (bytes_per_sector - 1)
+    ) // bytes_per_sector
+    data_sectors = total - (
+        reserved + fats * fat_size + root_dir_sectors
+    )
+    clusters = data_sectors // sectors_per_cluster
+
+    if clusters < 4085:
+        return 12
+    if clusters < 65525:
+        return 16
+    return 32
+
+
+def fat_compact_size_bytes(source_size, used_bytes, fat_bits):
+    source_size = int(source_size)
+    used_bytes = max(0, int(used_bytes))
+
+    desired = int(used_bytes * 1.25) + 64 * MIB
+
+    if fat_bits == 32:
+        desired = max(desired, 512 * MIB)
+    elif fat_bits == 16:
+        desired = max(desired, 64 * MIB)
+    else:
+        desired = max(desired, 16 * MIB)
+
+    desired = align_up(desired, 16 * MIB)
+    return min(source_size, max(desired, used_bytes + 32 * MIB))
+
+
+def mount_read_only(part, mount_dir, fstype):
+    options = "ro"
+    if fstype in {"ext2", "ext3", "ext4"}:
+        options = "ro,noload"
+    run(["mount", "-o", options, part, str(mount_dir)])
+
+
+def mounted_used_bytes(mount_dir):
+    stats = os.statvfs(mount_dir)
+    block = int(stats.f_frsize or stats.f_bsize or 4096)
+    return max(0, int(stats.f_blocks - stats.f_bfree) * block)
+
+
+def stream_portable_tar_to_zstd(mountpoint, target, estimate, progress):
+    log_handle = LOG_FILE.open("a", encoding="utf-8")
+
+    tar_proc = subprocess.Popen(
+        [
+            "tar",
+            "--one-file-system",
+            "-C",
+            str(mountpoint),
+            "-cpf",
+            "-",
+            ".",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=log_handle,
+    )
+    zstd_proc = subprocess.Popen(
+        ["zstd", "-T0", "-3", "-q", "-o", str(target)],
+        stdin=subprocess.PIPE,
+        stdout=log_handle,
+        stderr=log_handle,
+    )
+
+    done = 0
+    tar_rc = None
+    zstd_rc = None
+
+    try:
+        while True:
+            chunk = tar_proc.stdout.read(CHUNK)
+            if not chunk:
+                break
+            zstd_proc.stdin.write(chunk)
+            done += len(chunk)
+            progress.update(done)
+
+        zstd_proc.stdin.close()
+        tar_rc = tar_proc.wait()
+        zstd_rc = zstd_proc.wait()
+    finally:
+        try:
+            tar_proc.stdout.close()
+        except Exception:
+            pass
+        log_handle.close()
+
+    if tar_rc != 0:
+        raise RuntimeError("Datei-Backup der FAT-Partition ist fehlgeschlagen.")
+    if zstd_rc != 0:
+        raise RuntimeError("Komprimierung der FAT-Partition ist fehlgeschlagen.")
+
+    progress.finish(done)
+    return done
+
+
+def stream_raw_to_zstd(source, target, total, progress):
+    log_handle = LOG_FILE.open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        ["zstd", "-T0", "-3", "-q", "-o", str(target)],
+        stdin=subprocess.PIPE,
+        stdout=log_handle,
+        stderr=log_handle,
+    )
+
+    done = 0
+
+    try:
+        with open(source, "rb", buffering=0) as src:
+            while done < int(total):
+                chunk = src.read(min(CHUNK, int(total) - done))
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+                done += len(chunk)
+                progress.update(done)
+
+        proc.stdin.close()
+        rc = proc.wait()
+    finally:
+        log_handle.close()
+
+    if rc != 0:
+        raise RuntimeError("Raw-Partition konnte nicht komprimiert werden.")
+    if done != int(total):
+        raise RuntimeError(
+            f"Raw-Partition wurde unvollständig gelesen ({done}/{total} Bytes)."
+        )
+
+    progress.finish(done)
+    return done
+
+
+def restore_tar_member(image, member_name, expected_hash, mountpoint, progress):
+    zstd, thread, result, log_handle = feed_member_to_zstd(
+        image,
+        member_name,
+        expected_hash,
+    )
+
+    tar_log = LOG_FILE.open("a", encoding="utf-8")
+    tar_proc = subprocess.Popen(
+        [
+            "tar",
+            "--no-same-owner",
+            "--no-same-permissions",
+            "-xpf",
+            "-",
+            "-C",
+            str(mountpoint),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=tar_log,
+        stderr=tar_log,
+    )
+
+    done = 0
+    try:
+        while True:
+            chunk = zstd.stdout.read(CHUNK)
+            if not chunk:
+                break
+            tar_proc.stdin.write(chunk)
+            done += len(chunk)
+            progress.update(done)
+
+        tar_proc.stdin.close()
+        zstd_rc = zstd.wait()
+        tar_rc = tar_proc.wait()
+        thread.join()
+    finally:
+        log_handle.close()
+        tar_log.close()
+
+    if zstd_rc != 0:
+        raise RuntimeError("Datei-Backup konnte nicht dekomprimiert werden.")
+    if tar_rc != 0:
+        raise RuntimeError("Dateien konnten nicht wiederhergestellt werden.")
+
+    check_member_hash(result, expected_hash)
+    progress.finish(done)
+
+
+def restore_raw_member(
+    image,
+    member_name,
+    expected_hash,
+    expected_bytes,
+    target,
+    progress,
+):
+    zstd, thread, result, log_handle = feed_member_to_zstd(
+        image,
+        member_name,
+        expected_hash,
+    )
+
+    done = 0
+    try:
+        with open(target, "r+b", buffering=0) as dst:
+            while True:
+                chunk = zstd.stdout.read(CHUNK)
+                if not chunk:
+                    break
+                dst.write(chunk)
+                done += len(chunk)
+                progress.update(done)
+
+            dst.flush()
+            os.fsync(dst.fileno())
+
+        rc = zstd.wait()
+        thread.join()
+    finally:
+        log_handle.close()
+
+    if rc != 0:
+        raise RuntimeError("Raw-Partition konnte nicht dekomprimiert werden.")
+
+    check_member_hash(result, expected_hash)
+
+    if done != int(expected_bytes):
+        raise RuntimeError(
+            "Raw-Partition hat eine unerwartete Größe "
+            f"({done} statt {expected_bytes} Bytes)."
+        )
+
+    progress.finish(done)
+
+
+def restore_generic_partclone_member(
+    image,
+    member_name,
+    method,
+    target,
+    expected_stream,
+    expected_hash,
+    progress,
+):
+    if not method.startswith("partclone-"):
+        raise RuntimeError("Ungültige Partclone-Methode im Universal-Image.")
+
+    fstype = method.split("-", 1)[1]
+    program = ext_partclone_program(fstype)
+
+    zstd, thread, result, log_handle = feed_member_to_zstd(
+        image,
+        member_name,
+        expected_hash,
+    )
+
+    partclone_log = LOG_FILE.open("a", encoding="utf-8")
+    partclone_proc = subprocess.Popen(
+        [program, "-r", "-s", "-", "-o", str(target), "-q"],
+        stdin=subprocess.PIPE,
+        stdout=partclone_log,
+        stderr=partclone_log,
+    )
+
+    done = 0
+    pipeline_error = None
+    zstd_rc = None
+    partclone_rc = None
+
+    try:
+        while True:
+            chunk = zstd.stdout.read(CHUNK)
+            if not chunk:
+                break
+            partclone_proc.stdin.write(chunk)
+            done += len(chunk)
+            progress.update(done)
+
+        partclone_proc.stdin.close()
+        zstd_rc = zstd.wait()
+        partclone_rc = partclone_proc.wait()
+        thread.join()
+    except Exception as exc:
+        pipeline_error = exc
+        try:
+            partclone_proc.stdin.close()
+        except Exception:
+            pass
+        for proc in (zstd, partclone_proc):
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+        try:
+            thread.join(timeout=5)
+        except Exception:
+            pass
+    finally:
+        log_handle.close()
+        partclone_log.close()
+
+    if pipeline_error is not None:
+        if result.get("error"):
+            raise result["error"]
+        raise RuntimeError(
+            f"Partclone-Restore fehlgeschlagen: {pipeline_error}"
+        ) from pipeline_error
+    if zstd_rc != 0 or partclone_rc != 0:
+        raise RuntimeError("Partclone-Restore der Universal-Partition fehlgeschlagen.")
+
+    check_member_hash(result, expected_hash)
+
+    if done != int(expected_stream):
+        raise RuntimeError(
+            "Partclone-Stream hat eine unerwartete Größe "
+            f"({done} statt {expected_stream} Bytes)."
+        )
+
+    progress.finish(done)
+
+
+def package_universal_image(temp_dir, members, final_path, progress):
+    expected = sum((temp_dir / name).stat().st_size for name in members)
+    partial = final_path.with_suffix(final_path.suffix + ".partial")
+    partial.unlink(missing_ok=True)
+
+    log_handle = LOG_FILE.open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        ["tar", "-cf", str(partial), "-C", str(temp_dir), *members],
+        stdout=log_handle,
+        stderr=log_handle,
+    )
+
+    previous = 0
+    try:
+        while proc.poll() is None:
+            try:
+                current = partial.stat().st_size
+            except Exception:
+                current = previous
+            previous = current
+            progress.update(min(current, expected))
+            time.sleep(0.35)
+
+        rc = proc.wait()
+    finally:
+        log_handle.close()
+
+    if rc != 0:
+        partial.unlink(missing_ok=True)
+        raise RuntimeError("Das .uwusb-Image konnte nicht verpackt werden.")
+
+    progress.finish(expected)
+    partial.replace(final_path)
+    chown_user(final_path)
+
+
+def _read_member_checked(image, member_name, expected_hash):
+    data = read_member(image, member_name)
+    if hashlib.sha256(data).hexdigest() != expected_hash:
+        raise RuntimeError(
+            f"Prüfsumme stimmt nicht: {member_name}"
+        )
+    return data
+
+
+def merge_fat_boot_code(target, source_vbr, fat_bits):
+    if len(source_vbr) < 512:
+        raise RuntimeError("Gesicherter FAT-Bootsektor ist unvollständig.")
+
+    with open(target, "r+b", buffering=0) as handle:
+        target_vbr = bytearray(handle.read(512))
+
+        if len(target_vbr) < 512:
+            raise RuntimeError("Neuer FAT-Bootsektor ist unvollständig.")
+
+        code_start = 90 if int(fat_bits) == 32 else 62
+        target_vbr[code_start:510] = source_vbr[code_start:510]
+        target_vbr[510:512] = source_vbr[510:512]
+
+        handle.seek(0)
+        handle.write(target_vbr)
+
+        if int(fat_bits) == 32:
+            bytes_per_sector = int.from_bytes(
+                target_vbr[11:13],
+                "little",
+            )
+            backup_sector = int.from_bytes(
+                target_vbr[50:52],
+                "little",
+            )
+            if bytes_per_sector > 0 and backup_sector > 0:
+                handle.seek(backup_sector * bytes_per_sector)
+                handle.write(target_vbr)
+
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def universal_layout(partitions, sector_size):
+    alignment = max(1, MIB // int(sector_size))
+    cursor = 0
+
+    for index, part in enumerate(partitions):
+        if index == 0:
+            start = int(part["source_start_sector"])
+        else:
+            start = align_up(cursor, alignment)
+
+        size_sectors = max(
+            1,
+            math.ceil(int(part["target_size_bytes"]) / int(sector_size)),
+        )
+
+        if part["backup_method"] != "raw-zstd":
+            size_sectors = align_up(size_sectors, alignment)
+
+        part["target_start_sector"] = start
+        part["target_size_sectors"] = size_sectors
+        cursor = start + size_sectors
+
+    reserve = max(1, (UNIVERSAL_END_RESERVE_MIB * MIB) // int(sector_size))
+    required_sectors = cursor + reserve
+
+    return required_sectors * int(sector_size)
+
+
+def universal_backup(args):
+    disk = args.disk
+    validate_disk(disk)
+
+    if disk_for_path(IMAGE_DIR) == disk:
+        fail("Der Image-Ordner liegt auf dem ausgewählten Quellstick.")
+
+    image_title = normalize_image_title(args.name)
+    source = disk_info(disk)
+
+    emit(
+        "info",
+        message=(
+            f"Universal-Quelle: {source['model']} · {disk} · "
+            f"{source['size_bytes']} Bytes"
+        ),
+    )
+
+    unmount_disk(disk, retries=4, lazy_fallback=True)
+    table = universal_partition_table(disk)
+    partitions = table["partitions"]
+
+    # Stufen: Analyse + je FAT/RAW 1, je ext 2 + Metadaten + Paket.
+    stage_count = 3 + sum(
+        2 if part["fstype"] in {"ext2", "ext3", "ext4"} else 1
+        for part in partitions
+    )
+    stage_index = 1
+
+    emit(
+        "progress",
+        stage="USB-Struktur analysieren",
+        stage_index=stage_index,
+        stage_count=stage_count,
+        fraction=1.0,
+        done=1,
+        total=1,
+        rate_bps=0,
+        eta_seconds=0,
+        direction="PRÜFEN",
+    )
+
+    stamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d_%H-%M-%S")
+    safe_name = normalize_filename(image_title)[:60]
+    final = IMAGE_DIR / f"USB_{safe_name}_{stamp}.uwusb"
+
+    temp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=".uwusb-build-",
+            dir=str(IMAGE_DIR),
+        )
+    )
+    chown_user(temp_dir)
+
+    members = []
+    checksums = {}
+    mount_dir = Path(tempfile.mkdtemp(prefix="uwusb-src-", dir="/mnt"))
+
+    try:
+        if table["label"] == "dos":
+            with open(disk, "rb", buffering=0) as handle:
+                mbr_head = handle.read(446)
+
+            mbr_path = temp_dir / "mbr_head.bin"
+            mbr_path.write_bytes(mbr_head)
+            members.append(mbr_path.name)
+            checksums[mbr_path.name] = hash_file(mbr_path)
+
+            first_start_bytes = (
+                int(partitions[0]["source_start_sector"])
+                * int(table["sector_size"])
+            )
+            gap_bytes = max(0, first_start_bytes - int(table["sector_size"]))
+
+            if 0 < gap_bytes <= UNIVERSAL_BOOT_GAP_MAX_MIB * MIB:
+                with open(disk, "rb", buffering=0) as handle:
+                    handle.seek(int(table["sector_size"]))
+                    gap = handle.read(gap_bytes)
+
+                gap_path = temp_dir / "mbr_gap.bin"
+                gap_path.write_bytes(gap)
+                members.append(gap_path.name)
+                checksums[gap_path.name] = hash_file(gap_path)
+                table["mbr_gap_bytes"] = len(gap)
+            else:
+                table["mbr_gap_bytes"] = 0
+
+        for part in partitions:
+            number = int(part["number"])
+            fstype = part["fstype"]
+            source_size = int(part["source_size_bytes"])
+
+            if fstype in {"vfat", "fat", "fat16", "fat32"}:
+                stage_index += 1
+                fat_bits = fat_bits_from_device(part["path"])
+
+                run(["mount", "-o", "ro", part["path"], str(mount_dir)])
+                try:
+                    used_bytes = mounted_used_bytes(mount_dir)
+                    target_size = fat_compact_size_bytes(
+                        source_size,
+                        used_bytes,
+                        fat_bits,
+                    )
+
+                    member = f"partition-{number}.files.tar.zst"
+                    member_path = temp_dir / member
+                    p = Progress(
+                        f"Partition {number} · FAT-Dateien sichern",
+                        stage_index,
+                        stage_count,
+                        max(1, used_bytes),
+                        "LESEN",
+                    )
+                    stream_bytes = stream_portable_tar_to_zstd(
+                        mount_dir,
+                        member_path,
+                        used_bytes,
+                        p,
+                    )
+                finally:
+                    run(["umount", str(mount_dir)], check=False)
+
+                vbr_member = f"partition-{number}.vbr.bin"
+                vbr_path = temp_dir / vbr_member
+                with open(part["path"], "rb", buffering=0) as handle:
+                    vbr_path.write_bytes(handle.read(512))
+
+                members.extend([member, vbr_member])
+                checksums[member] = hash_file(member_path)
+                checksums[vbr_member] = hash_file(vbr_path)
+
+                part.update(
+                    {
+                        "backup_method": "files-fat",
+                        "backup": member,
+                        "stream_bytes": stream_bytes,
+                        "vbr_backup": vbr_member,
+                        "fat_bits": fat_bits,
+                        "used_bytes": used_bytes,
+                        "target_size_bytes": target_size,
+                    }
+                )
+
+            elif fstype in {"ext2", "ext3", "ext4"}:
+                stage_index += 1
+                compact = temp_dir / f"partition-{number}.compact.ext"
+                p = Progress(
+                    f"Partition {number} · ext kompakt vorbereiten",
+                    stage_index,
+                    stage_count,
+                    3,
+                    "VORBEREITEN",
+                )
+                compact_size = prepare_compact_ext_image(
+                    part["path"],
+                    compact,
+                    source_size,
+                    p,
+                )
+
+                stage_index += 1
+                member = f"partition-{number}.{fstype}.partclone.zst"
+                member_path = temp_dir / member
+                p = Progress(
+                    f"Partition {number} · {fstype} sichern",
+                    stage_index,
+                    stage_count,
+                    compact_size,
+                    "LESEN",
+                )
+                stream_bytes = stream_ext_partclone_to_zstd(
+                    compact,
+                    member_path,
+                    compact_size,
+                    p,
+                    fstype,
+                )
+                compact.unlink(missing_ok=True)
+
+                members.append(member)
+                checksums[member] = hash_file(member_path)
+
+                target_size = min(
+                    source_size,
+                    align_up(compact_size + 128 * MIB, 16 * MIB),
+                )
+                part.update(
+                    {
+                        "backup_method": f"partclone-{fstype}",
+                        "backup": member,
+                        "stream_bytes": stream_bytes,
+                        "compact_size_bytes": compact_size,
+                        "used_bytes": compact_size,
+                        "target_size_bytes": target_size,
+                    }
+                )
+
+            else:
+                stage_index += 1
+                member = f"partition-{number}.raw.zst"
+                member_path = temp_dir / member
+                p = Progress(
+                    f"Partition {number} · Raw sichern",
+                    stage_index,
+                    stage_count,
+                    source_size,
+                    "LESEN",
+                )
+                stream_bytes = stream_raw_to_zstd(
+                    part["path"],
+                    member_path,
+                    source_size,
+                    p,
+                )
+
+                members.append(member)
+                checksums[member] = hash_file(member_path)
+
+                part.update(
+                    {
+                        "backup_method": "raw-zstd",
+                        "backup": member,
+                        "stream_bytes": stream_bytes,
+                        "used_bytes": source_size,
+                        "target_size_bytes": source_size,
+                    }
+                )
+
+        minimum_target_bytes = universal_layout(
+            partitions,
+            table["sector_size"],
+        )
+
+        stage_index += 1
+        p = Progress(
+            "Universal-Image prüfen und beschreiben",
+            stage_index,
+            stage_count,
+            max(1, len(members) + 1),
+            "PRÜFEN",
+        )
+        for idx, member in enumerate(members, start=1):
+            if member not in checksums:
+                checksums[member] = hash_file(temp_dir / member)
+            p.update(idx, force=True)
+
+        metadata = {
+            "format": UNIVERSAL_FORMAT_VERSION,
+            "tool_version": APP_VERSION,
+            "name": image_title,
+            "created": dt.datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            ),
+            "source": source,
+            "partition_table": {
+                "label": table["label"],
+                "id": table["id"],
+                "sector_size": table["sector_size"],
+                "mbr_gap_bytes": int(table.get("mbr_gap_bytes") or 0),
+            },
+            "partitions": partitions,
+            "minimum_target_bytes": minimum_target_bytes,
+            "checksums": checksums,
+            "notes": (
+                "FAT-Partitionen werden dateibasiert kompakt gesichert; "
+                "ext2/3/4 wird dateisystemtreu verkleinert und mit Partclone "
+                "gesichert. Andere Dateisysteme werden partitionsweise raw "
+                "gesichert und deshalb nicht verkleinert."
+            ),
+        }
+
+        meta_path = temp_dir / "metadata.json"
+        meta_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        members.insert(0, meta_path.name)
+        p.finish(len(members))
+
+        stage_index += 1
+        expected = sum((temp_dir / name).stat().st_size for name in members)
+        p = Progress(
+            "Einzelnes .uwusb-Image erstellen",
+            stage_index,
+            stage_count,
+            expected,
+            "SCHREIBEN",
+        )
+        package_universal_image(temp_dir, members, final, p)
+
+        methods = ", ".join(
+            f"P{part['number']} {part['backup_method']}"
+            for part in partitions
+        )
+
+        log(
+            "UNIVERSAL-BACKUP ERFOLGREICH: "
+            f"{disk} -> {final}; min={minimum_target_bytes}; {methods}"
+        )
+
+        emit(
+            "success",
+            message="Universal-USB-Image erfolgreich erstellt.",
+            detail=(
+                f"Name: {image_title}\n"
+                f"Quelle: {source['model']} · "
+                f"{source['size_bytes'] / (1024**3):.2f} GiB\n"
+                f"Minimale Zielgröße: "
+                f"{minimum_target_bytes / (1024**3):.2f} GiB\n"
+                f"Partitionen: {len(partitions)}\n"
+                f"Methoden: {methods}\n\n"
+                f"Datei: {final.name}"
+            ),
+            image=str(final),
+            minimum_target_bytes=minimum_target_bytes,
+        )
+
+        run(["sync"], check=False)
+        run(["udisksctl", "power-off", "-b", disk], check=False)
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(f"Universal-Backup fehlgeschlagen:\n{exc}")
+    finally:
+        try:
+            if subprocess.run(
+                ["mountpoint", "-q", str(mount_dir)]
+            ).returncode == 0:
+                run(["umount", str(mount_dir)], check=False)
+        except Exception:
+            pass
+        shutil.rmtree(mount_dir, ignore_errors=True)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def sfdisk_quote(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def create_universal_layout(disk, metadata):
+    table = metadata["partition_table"]
+    label = str(table.get("label") or "")
+    source_sector_size = int(table.get("sector_size") or 0)
+    target_sector_size = int(
+        output(["blockdev", "--getss", disk], timeout=5)
+    )
+
+    if source_sector_size <= 0 or target_sector_size != source_sector_size:
+        raise RuntimeError(
+            "Quell- und Zielstick verwenden unterschiedliche logische "
+            "Sektorgrößen. Dieser Restore wird aus Sicherheitsgründen "
+            "nicht durchgeführt."
+        )
+
+    target_size = int(output(["blockdev", "--getsize64", disk], timeout=10))
+    required = int(metadata.get("minimum_target_bytes") or 0)
+
+    if required <= 0:
+        raise RuntimeError("Minimale Zielgröße fehlt im Universal-Image.")
+
+    if target_size < required:
+        fail(
+            "Der Zielstick ist für dieses Universal-Image zu klein.\n\n"
+            f"Benötigt: {required / (1024**3):.2f} GiB\n"
+            f"Vorhanden: {target_size / (1024**3):.2f} GiB"
+        )
+
+    lines = [
+        f"label: {label}",
+        "unit: sectors",
+    ]
+
+    label_id = str(table.get("id") or "").strip()
+    if label_id:
+        lines.insert(1, f"label-id: {label_id}")
+
+    lines.append("")
+
+    for part in metadata["partitions"]:
+        fields = [
+            f"start={int(part['target_start_sector'])}",
+            f"size={int(part['target_size_sectors'])}",
+        ]
+
+        part_type = str(part.get("type") or "").strip()
+        if part_type:
+            fields.append(f"type={part_type}")
+
+        if label == "dos" and part.get("bootable"):
+            fields.append("bootable")
+
+        if label == "gpt":
+            uuid = str(part.get("uuid") or "").strip()
+            name = str(part.get("name") or "")
+            attrs = str(part.get("attrs") or "").strip()
+
+            if uuid:
+                fields.append(f"uuid={uuid}")
+            if name:
+                fields.append(f"name={sfdisk_quote(name)}")
+            if attrs:
+                fields.append(f"attrs={sfdisk_quote(attrs)}")
+
+        lines.append(", ".join(fields))
+
+    script = "\n".join(lines) + "\n"
+
+    wipe_disk_for_restore(disk)
+    run_input(
+        ["sfdisk", "--wipe", "always", "--wipe-partitions", "always", disk],
+        script,
+        timeout=30,
+    )
+
+    run(["partprobe", disk], check=False)
+    run(["udevadm", "settle"], check=False)
+
+    for part in metadata["partitions"]:
+        wait_partition(part_path(disk, int(part["number"])))
+
+    return target_size
+
+
+def restore_universal_boot_area(image, disk, metadata):
+    table = metadata["partition_table"]
+    if table.get("label") != "dos":
+        return
+
+    checksums = metadata["checksums"]
+
+    if "mbr_head.bin" in checksums:
+        data = _read_member_checked(
+            image,
+            "mbr_head.bin",
+            checksums["mbr_head.bin"],
+        )
+        with open(disk, "r+b", buffering=0) as handle:
+            handle.seek(0)
+            handle.write(data[:446])
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    gap_bytes = int(table.get("mbr_gap_bytes") or 0)
+    if gap_bytes > 0 and "mbr_gap.bin" in checksums:
+        gap = _read_member_checked(
+            image,
+            "mbr_gap.bin",
+            checksums["mbr_gap.bin"],
+        )
+        if len(gap) != gap_bytes:
+            raise RuntimeError("Gesicherter MBR-Bootbereich hat falsche Größe.")
+
+        sector_size = int(table["sector_size"])
+        with open(disk, "r+b", buffering=0) as handle:
+            handle.seek(sector_size)
+            handle.write(gap)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def mkfs_fat_from_metadata(target, part):
+    bits = int(part.get("fat_bits") or 32)
+    if bits not in {12, 16, 32}:
+        raise RuntimeError("Ungültiger FAT-Typ im Universal-Image.")
+
+    args = ["mkfs.vfat", "-F", str(bits)]
+
+    label = str(part.get("label") or "").strip()
+    if label:
+        args += ["-n", label[:11]]
+
+    uuid = str(part.get("fs_uuid") or "").replace("-", "")
+    if re.fullmatch(r"[0-9A-Fa-f]{8}", uuid):
+        args += ["-i", uuid.upper()]
+
+    args.append(target)
+    run(args)
+
+
+def universal_restore(args):
+    image = safe_universal_image_path(args.image)
+    disk = args.disk
+    validate_disk(disk)
+
+    image_disk = disk_for_path(image)
+    if image_disk and image_disk == disk:
+        fail("Das Restore-Ziel enthält gleichzeitig das ausgewählte Image.")
+
+    metadata = read_universal_metadata(image)
+    mount_dir = Path(tempfile.mkdtemp(prefix="uwusb-dst-", dir="/mnt"))
+
+    try:
+        partitions = metadata.get("partitions") or []
+        if not partitions:
+            raise RuntimeError("Universal-Image enthält keine Partitionen.")
+
+        total_stages = len(partitions) + 2
+
+        emit(
+            "stage",
+            stage="Zielstick kompakt partitionieren",
+            stage_index=1,
+            stage_count=total_stages,
+            direction="SCHREIBEN",
+        )
+        create_universal_layout(disk, metadata)
+        restore_universal_boot_area(image, disk, metadata)
+        emit(
+            "progress",
+            stage="Zielstick kompakt partitionieren",
+            stage_index=1,
+            stage_count=total_stages,
+            fraction=1.0,
+            done=1,
+            total=1,
+            rate_bps=0,
+            eta_seconds=0,
+            direction="SCHREIBEN",
+        )
+
+        for idx, part in enumerate(partitions, start=2):
+            number = int(part["number"])
+            target = part_path(disk, number)
+            method = str(part.get("backup_method") or "")
+            member = str(part.get("backup") or "")
+            expected_hash = metadata["checksums"].get(member, "")
+
+            if not expected_hash:
+                raise RuntimeError(
+                    f"Prüfsumme für Partition {number} fehlt."
+                )
+
+            if method == "files-fat":
+                mkfs_fat_from_metadata(target, part)
+
+                vbr_member = str(part.get("vbr_backup") or "")
+                if vbr_member:
+                    vbr_hash = metadata["checksums"].get(vbr_member, "")
+                    if not vbr_hash:
+                        raise RuntimeError(
+                            f"FAT-Bootsektor-Prüfsumme für Partition "
+                            f"{number} fehlt."
+                        )
+                    source_vbr = _read_member_checked(
+                        image,
+                        vbr_member,
+                        vbr_hash,
+                    )
+                    merge_fat_boot_code(
+                        target,
+                        source_vbr,
+                        int(part.get("fat_bits") or 32),
+                    )
+
+                run(["mount", target, str(mount_dir)])
+                try:
+                    p = Progress(
+                        f"Partition {number} · FAT-Dateien wiederherstellen",
+                        idx,
+                        total_stages,
+                        int(part.get("stream_bytes") or 1),
+                        "SCHREIBEN",
+                    )
+                    restore_tar_member(
+                        image,
+                        member,
+                        expected_hash,
+                        mount_dir,
+                        p,
+                    )
+                    run(["sync"], check=False)
+                finally:
+                    run(["umount", str(mount_dir)], check=False)
+
+                check = run(["fsck.vfat", "-a", target], check=False)
+                if check.returncode not in (0, 1):
+                    raise RuntimeError(
+                        f"FAT-Prüfung von Partition {number} fehlgeschlagen."
+                    )
+
+            elif method.startswith("partclone-ext"):
+                p = Progress(
+                    f"Partition {number} · ext wiederherstellen",
+                    idx,
+                    total_stages,
+                    int(part.get("stream_bytes") or 1),
+                    "SCHREIBEN",
+                )
+                restore_generic_partclone_member(
+                    image,
+                    member,
+                    method,
+                    target,
+                    int(part.get("stream_bytes") or 0),
+                    expected_hash,
+                    p,
+                )
+                run(["resize2fs", target])
+                check = run(["e2fsck", "-p", target], check=False)
+                if check.returncode not in (0, 1):
+                    raise RuntimeError(
+                        f"ext-Prüfung von Partition {number} fehlgeschlagen."
+                    )
+
+            elif method == "raw-zstd":
+                p = Progress(
+                    f"Partition {number} · Raw wiederherstellen",
+                    idx,
+                    total_stages,
+                    int(part.get("source_size_bytes") or 1),
+                    "SCHREIBEN",
+                )
+                restore_raw_member(
+                    image,
+                    member,
+                    expected_hash,
+                    int(part.get("source_size_bytes") or 0),
+                    target,
+                    p,
+                )
+
+            else:
+                raise RuntimeError(
+                    f"Nicht unterstützte Universal-Backup-Methode: {method}"
+                )
+
+        final_stage = total_stages
+        p = Progress(
+            "Universal-Stick prüfen und sicher auswerfen",
+            final_stage,
+            total_stages,
+            3,
+            "PRÜFEN",
+        )
+
+        unmount_disk(disk, retries=4, lazy_fallback=True)
+        run(["sync"], check=False)
+        p.update(1, force=True)
+
+        run(["partprobe", disk], check=False)
+        run(["udevadm", "settle"], check=False)
+        p.update(2, force=True)
+
+        unmount_disk(disk, retries=4, lazy_fallback=True)
+        poweroff = run(
+            ["udisksctl", "power-off", "-b", disk],
+            check=False,
+            capture=True,
+        )
+        safe_to_remove = poweroff.returncode == 0
+        p.finish(3)
+
+        image_name = str(metadata.get("name") or image.stem)
+        log(f"UNIVERSAL-RESTORE ERFOLGREICH: {image} -> {disk}")
+
+        emit(
+            "success",
+            message=(
+                f"Universal-USB-Image „{image_name}“ wurde "
+                "erfolgreich wiederhergestellt."
+            ),
+            detail=(
+                "Der Zielstick wurde auf die kompakte Image-Struktur "
+                "angepasst.\n\n"
+                + (
+                    "Der Stick wurde sicher ausgeworfen und kann entfernt werden."
+                    if safe_to_remove
+                    else
+                    "Restore abgeschlossen; automatisches sicheres Auswerfen "
+                    "wurde nicht bestätigt. Stick bitte noch nicht entfernen."
+                )
+            ),
+            safe_to_remove=safe_to_remove,
+            disk=disk,
+        )
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        fail(f"Universal-Restore fehlgeschlagen:\n{exc}")
+    finally:
+        try:
+            if subprocess.run(
+                ["mountpoint", "-q", str(mount_dir)]
+            ).returncode == 0:
+                run(["umount", str(mount_dir)], check=False)
+        except Exception:
+            pass
+        shutil.rmtree(mount_dir, ignore_errors=True)
 
 
 # ============================================================
@@ -3157,6 +4499,14 @@ def main():
     p = sub.add_parser("backup")
     p.add_argument("--disk", required=True)
 
+    p = sub.add_parser("universal-backup")
+    p.add_argument("--disk", required=True)
+    p.add_argument("--name", required=True)
+
+    p = sub.add_parser("universal-restore")
+    p.add_argument("--disk", required=True)
+    p.add_argument("--image", required=True)
+
     p = sub.add_parser("restore")
     p.add_argument("--disk", required=True)
     p.add_argument("--image", required=True)
@@ -3178,6 +4528,10 @@ def main():
 
     if args.action == "backup":
         backup(args)
+    elif args.action == "universal-backup":
+        universal_backup(args)
+    elif args.action == "universal-restore":
+        universal_restore(args)
     elif args.action == "restore":
         restore(args)
     elif args.action == "benchmark":
@@ -3253,7 +4607,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.25"
+VERSION = "1.26"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -3718,6 +5072,102 @@ def image_details(item):
         f"Persistenzdaten: {fmt_bytes(p2.get('partclone_stream_bytes') or p2.get('tar_stream_bytes'))}\n"
         f"Datei: {item['path'].name}"
     )
+
+
+
+def read_universal_image_metadata(path):
+    try:
+        with tarfile.open(path, "r") as tf:
+            handle = tf.extractfile("metadata.json")
+            if handle is None:
+                return None
+            data = json.loads(handle.read().decode("utf-8"))
+
+        if data.get("format") != "uwuntu-usb-v1":
+            return None
+
+        return data
+    except Exception:
+        return None
+
+
+def universal_image_items():
+    result = []
+
+    for path in IMAGE_DIR.glob("*.uwusb"):
+        meta = read_universal_image_metadata(path)
+        if not meta:
+            continue
+
+        result.append(
+            {
+                "path": path,
+                "meta": meta,
+                "mtime": path.stat().st_mtime,
+                "size": path.stat().st_size,
+                "kind": "universal",
+            }
+        )
+
+    result.sort(key=lambda item: item["mtime"], reverse=True)
+    return result
+
+
+def universal_image_display(item):
+    meta = item["meta"]
+    name = meta.get("name") or item["path"].stem
+    return (
+        f"{name} · {parse_created(meta.get('created'))} · "
+        f"{fmt_bytes(item['size'])}"
+    )
+
+
+def universal_image_details(item):
+    meta = item["meta"]
+    source = meta.get("source", {})
+    partitions = meta.get("partitions") or []
+
+    methods = ", ".join(
+        f"P{part.get('number')} {part.get('backup_method', '–')}"
+        for part in partitions
+    )
+
+    return (
+        f"Name: {meta.get('name') or item['path'].stem}\n"
+        f"Erstellt: {parse_created(meta.get('created'))}\n"
+        f"Quelle: {source.get('model', 'Unbekannt')} "
+        f"({source.get('path', '–')})\n"
+        f"Quellgröße: {fmt_bytes(source.get('size_bytes'))}\n"
+        f"Minimale Zielgröße: "
+        f"{fmt_bytes(meta.get('minimum_target_bytes'))}\n"
+        f"Partitionen: {len(partitions)}"
+        + (f"\nMethoden: {methods}" if methods else "")
+        + f"\nImagegröße: {fmt_bytes(item['size'])}\n"
+        f"Datei: {item['path'].name}"
+    )
+
+
+def stored_image_items():
+    items = []
+
+    for item in image_items():
+        items.append({**item, "kind": "uwuntu"})
+
+    items.extend(universal_image_items())
+    items.sort(key=lambda item: item["mtime"], reverse=True)
+    return items
+
+
+def stored_image_display(item):
+    if item.get("kind") == "universal":
+        return "USB · " + universal_image_display(item)
+    return "UWUNTU · " + image_display(item)
+
+
+def stored_image_details(item):
+    if item.get("kind") == "universal":
+        return universal_image_details(item)
+    return image_details(item)
 
 
 # ============================================================
@@ -4811,6 +6261,17 @@ class MainWindow(Gtk.ApplicationWindow):
 
         root.append(
             self.action_card(
+                "UNIVERSAL USB-IMAGES",
+                "Sichert Diagnose-, Service-, Firmware- und andere USB-Sticks "
+                "kompakt und stellt sie auch auf kleineren Zielsticks wieder "
+                "her. FAT und ext werden verkleinert; unbekannte Dateisysteme "
+                "werden sicher partitionsweise raw erhalten.",
+                self.open_universal,
+            )
+        )
+
+        root.append(
+            self.action_card(
                 "VENTOY AKTUALISIEREN",
                 "Aktualisiert auf einem bereits eingerichteten Ventoy-Stick "
                 "ausschließlich persistence/Uwuntu.dat. ventoy.json, Theme, "
@@ -4914,12 +6375,12 @@ class MainWindow(Gtk.ApplicationWindow):
         )
 
     def open_images(self, *_):
-        images = image_items()
+        images = stored_image_items()
 
         if not images:
             self.error(
                 "Im Uwuntu-Image-Ordner wurde noch kein gültiges "
-                ".uwuntu-Image gefunden."
+                ".uwuntu- oder .uwusb-Image gefunden."
             )
             return
 
@@ -4927,25 +6388,25 @@ class MainWindow(Gtk.ApplicationWindow):
         win.root.append(make_label("GESPEICHERTE IMAGES", "card-title"))
         win.root.append(
             make_label(
-                "Wähle ein Image aus, um die gespeicherten Details "
-                "anzuzeigen.",
+                "Wähle ein Uwuntu- oder Universal-USB-Image aus, um die "
+                "gespeicherten Details anzuzeigen.",
                 "card-text",
             )
         )
 
         image_dd = dropdown_from_strings(
-            [image_display(item) for item in images]
+            [stored_image_display(item) for item in images]
         )
         win.root.append(image_dd)
 
-        details = make_label(image_details(images[0]), "details")
+        details = make_label(stored_image_details(images[0]), "details")
         win.root.append(details)
 
         def image_changed(dd, _pspec):
             idx = dd.get_selected()
 
             if idx < len(images):
-                details.set_text(image_details(images[idx]))
+                details.set_text(stored_image_details(images[idx]))
 
         image_dd.connect("notify::selected", image_changed)
 
@@ -5063,6 +6524,285 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.run_backend(
                         "USB-BENCHMARK · SEQ + 4K RANDOM",
                         ["benchmark", "--disk", disk["path"]],
+                    ),
+                ),
+            )
+
+        start.connect("clicked", clicked)
+        buttons.append(start)
+        win.present()
+
+
+    # --------------------------------------------------------
+    # Universal USB-Images
+    # --------------------------------------------------------
+    def open_universal(self, *_):
+        win = ActionWindow(self, "Universal USB-Images")
+        win.root.append(
+            make_label("UNIVERSAL USB-IMAGES", "card-title")
+        )
+        win.root.append(
+            make_label(
+                "Für Hersteller-Diagnose-, Service-, Firmware- und andere "
+                "Bootsticks. FAT- und ext-Partitionen werden kompakt gesichert, "
+                "damit ein Image auf kleinere Sticks passen kann.",
+                "card-text",
+            )
+        )
+
+        backup = Gtk.Button(label="UNIVERSAL USB SICHERN")
+        backup.add_css_class("primary")
+        backup.connect(
+            "clicked",
+            lambda *_: (win.close(), self.open_universal_backup()),
+        )
+        win.root.append(backup)
+
+        restore = Gtk.Button(label="UNIVERSAL USB WIEDERHERSTELLEN")
+        restore.add_css_class("primary")
+        restore.connect(
+            "clicked",
+            lambda *_: (win.close(), self.open_universal_restore()),
+        )
+        win.root.append(restore)
+
+        note = make_label(
+            "Unterstützt kompakt: FAT12/16/32 und ext2/3/4. "
+            "Andere Partitionen werden raw gesichert und können deshalb nur "
+            "dann auf einen kleineren Stick, wenn ihre ursprüngliche "
+            "Partitionsgröße dort weiterhin Platz hat.",
+            "details",
+        )
+        win.root.append(note)
+
+        close = Gtk.Button(label="SCHLIESSEN")
+        close.add_css_class("secondary")
+        close.connect("clicked", lambda *_: win.close())
+        win.root.append(close)
+        win.present()
+
+    def open_universal_backup(self, *_):
+        disks = [
+            item
+            for item in list_disks()
+            if item.get("kind") in {"USB", "Wechselmedium"}
+        ]
+
+        if not disks:
+            self.error(
+                "Kein geeigneter USB-/Wechseldatenträger wurde gefunden."
+            )
+            return
+
+        win = ActionWindow(self, "Universal USB sichern")
+        win.root.append(
+            make_label("UNIVERSAL USB SICHERN", "card-title")
+        )
+        win.root.append(
+            make_label(
+                "Wähle den Quellstick und vergib einen eindeutigen Namen, "
+                "zum Beispiel „HP Diagnostics“ oder „Lenovo Planar“.",
+                "card-text",
+            )
+        )
+
+        dropdown = dropdown_from_strings(
+            [disk_display(item) for item in disks]
+        )
+        win.root.append(dropdown)
+
+        name_label = make_label("IMAGE-NAME", "progress-info")
+        win.root.append(name_label)
+
+        name_entry = Gtk.Entry()
+        name_entry.set_placeholder_text(
+            "z. B. HP Diagnostics 2026"
+        )
+        win.root.append(name_entry)
+
+        note = make_label(
+            "Der Quellstick wird nur gelesen. Das Image wird als .uwusb "
+            f"unter {IMAGE_DIR} gespeichert. Nach dem Backup zeigt der "
+            "Manager die minimale Zielgröße an.",
+            "details",
+        )
+        win.root.append(note)
+
+        buttons = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        win.root.append(buttons)
+
+        cancel = Gtk.Button(label="ABBRECHEN")
+        cancel.add_css_class("secondary")
+        cancel.set_hexpand(True)
+        cancel.connect("clicked", lambda *_: win.close())
+        buttons.append(cancel)
+
+        start = Gtk.Button(label="UNIVERSAL-BACKUP STARTEN")
+        start.add_css_class("primary")
+        start.set_hexpand(True)
+
+        def clicked(*_):
+            idx = dropdown.get_selected()
+            if idx >= len(disks):
+                return
+
+            name = " ".join(name_entry.get_text().split())
+            if not name:
+                self.error("Bitte einen Namen für das Image eingeben.")
+                return
+            if len(name) > 80:
+                self.error("Der Image-Name darf maximal 80 Zeichen lang sein.")
+                return
+
+            disk = disks[idx]
+
+            self.confirm(
+                "UNIVERSAL-BACKUP STARTEN?",
+                f"Name:\n{name}\n\n"
+                f"Quelle:\n{disk_display(disk)}\n\n"
+                "Der Quellstick wird nicht verändert und nur für die "
+                "Sicherung vorübergehend ausgehängt.",
+                lambda: (
+                    win.close(),
+                    self.run_backend(
+                        "UNIVERSAL USB SICHERN",
+                        [
+                            "universal-backup",
+                            "--disk",
+                            disk["path"],
+                            "--name",
+                            name,
+                        ],
+                        show_total_time=True,
+                    ),
+                ),
+            )
+
+        start.connect("clicked", clicked)
+        buttons.append(start)
+        win.present()
+
+    def open_universal_restore(self, *_):
+        images = universal_image_items()
+
+        if not images:
+            self.error(
+                "Es wurde noch kein gültiges .uwusb-Image gefunden."
+            )
+            return
+
+        disks = [
+            item
+            for item in list_disks()
+            if item.get("kind") in {"USB", "Wechselmedium"}
+        ]
+
+        if not disks:
+            self.error("Kein geeigneter Zielstick wurde gefunden.")
+            return
+
+        win = ActionWindow(self, "Universal USB wiederherstellen")
+        win.root.append(
+            make_label("UNIVERSAL USB WIEDERHERSTELLEN", "card-title")
+        )
+        win.root.append(
+            make_label(
+                "Wähle das benannte Universal-Image und einen Zielstick. "
+                "Der Zielstick darf kleiner als das Original sein, muss aber "
+                "mindestens die angezeigte Mindestgröße besitzen.",
+                "card-text",
+            )
+        )
+
+        image_dd = dropdown_from_strings(
+            [universal_image_display(item) for item in images]
+        )
+        win.root.append(image_dd)
+
+        details = make_label(
+            universal_image_details(images[0]),
+            "details",
+        )
+        win.root.append(details)
+
+        def image_changed(dd, _pspec):
+            idx = dd.get_selected()
+            if idx < len(images):
+                details.set_text(universal_image_details(images[idx]))
+
+        image_dd.connect("notify::selected", image_changed)
+
+        target_dd = dropdown_from_strings(
+            [disk_display(item) for item in disks]
+        )
+        win.root.append(target_dd)
+
+        warning = make_label(
+            "ACHTUNG: Der ausgewählte Zielstick wird vollständig gelöscht.",
+            "warning",
+        )
+        win.root.append(warning)
+
+        buttons = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+        win.root.append(buttons)
+
+        cancel = Gtk.Button(label="ABBRECHEN")
+        cancel.add_css_class("secondary")
+        cancel.set_hexpand(True)
+        cancel.connect("clicked", lambda *_: win.close())
+        buttons.append(cancel)
+
+        start = Gtk.Button(label="UNIVERSAL-RESTORE STARTEN")
+        start.add_css_class("primary")
+        start.set_hexpand(True)
+
+        def clicked(*_):
+            image_idx = image_dd.get_selected()
+            target_idx = target_dd.get_selected()
+
+            if image_idx >= len(images) or target_idx >= len(disks):
+                return
+
+            image = images[image_idx]
+            target = disks[target_idx]
+            name = image["meta"].get("name") or image["path"].stem
+            minimum = int(
+                image["meta"].get("minimum_target_bytes") or 0
+            )
+
+            if target["size"] < minimum:
+                self.error(
+                    "Dieser Zielstick ist zu klein.\n\n"
+                    f"Benötigt: {fmt_bytes(minimum)}\n"
+                    f"Vorhanden: {fmt_bytes(target['size'])}"
+                )
+                return
+
+            self.confirm(
+                "ZIELSTICK WIRKLICH LÖSCHEN?",
+                f"Image:\n{name}\n\n"
+                f"Ziel:\n{disk_display(target)}\n\n"
+                f"Minimale Zielgröße: {fmt_bytes(minimum)}\n\n"
+                "Alle vorhandenen Partitionen und Daten auf dem Zielstick "
+                "werden gelöscht.",
+                lambda: (
+                    win.close(),
+                    self.run_backend(
+                        "UNIVERSAL USB WIEDERHERSTELLEN",
+                        [
+                            "universal-restore",
+                            "--image",
+                            str(image["path"]),
+                            "--disk",
+                            target["path"],
+                        ],
+                        show_total_time=True,
                     ),
                 ),
             )
