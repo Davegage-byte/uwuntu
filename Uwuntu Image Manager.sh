@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.26"
+APP_VERSION="1.27"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -155,7 +155,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.26"
+APP_VERSION = "1.27"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 UNIVERSAL_FORMAT_VERSION = "uwuntu-usb-v1"
@@ -3823,7 +3823,7 @@ def restore(args):
 # Ventoy Update
 # ============================================================
 
-def validate_ventoy_root(root):
+def validate_ventoy_root(root, require_persistence=True):
     p = Path(root).resolve()
 
     if not p.is_dir():
@@ -3835,7 +3835,7 @@ def validate_ventoy_root(root):
             "ventoy/ventoy.json."
         )
 
-    if not (p / "persistence").is_dir():
+    if require_persistence and not (p / "persistence").is_dir():
         fail(
             "Der ausgewählte Ventoy-Stick besitzt keinen "
             "persistence-Ordner."
@@ -3866,6 +3866,393 @@ def validate_ventoy_root(root):
 
 def loop_mount(image_file, mountpoint):
     run(["mount", "-o", "loop", str(image_file), str(mountpoint)])
+
+
+
+def copy_file_with_progress(source, target, total, progress):
+    done = 0
+
+    with open(source, "rb", buffering=0) as src:
+        with open(target, "wb", buffering=0) as dst:
+            while True:
+                chunk = src.read(CHUNK)
+                if not chunk:
+                    break
+
+                dst.write(chunk)
+                done += len(chunk)
+                progress.update(done)
+
+            dst.flush()
+            os.fsync(dst.fileno())
+
+    if done != int(total):
+        raise RuntimeError(
+            "Ventoy-IMG wurde unvollständig kopiert "
+            f"({done} statt {total} Bytes)."
+        )
+
+    progress.finish(done)
+    return done
+
+
+def restore_universal_payload_to_device(
+    image,
+    device,
+    metadata,
+    mount_dir,
+    stage_count,
+):
+    partitions = metadata.get("partitions") or []
+    if not partitions:
+        raise RuntimeError("Universal-Image enthält keine Partitionen.")
+
+    emit(
+        "stage",
+        stage="Ventoy-IMG kompakt partitionieren",
+        stage_index=1,
+        stage_count=stage_count,
+        direction="SCHREIBEN",
+    )
+
+    create_universal_layout(device, metadata)
+    restore_universal_boot_area(image, device, metadata)
+
+    emit(
+        "progress",
+        stage="Ventoy-IMG kompakt partitionieren",
+        stage_index=1,
+        stage_count=stage_count,
+        fraction=1.0,
+        done=1,
+        total=1,
+        rate_bps=0,
+        eta_seconds=0,
+        direction="SCHREIBEN",
+    )
+
+    for idx, part in enumerate(partitions, start=2):
+        number = int(part["number"])
+        target = part_path(device, number)
+        method = str(part.get("backup_method") or "")
+        member = str(part.get("backup") or "")
+        expected_hash = metadata["checksums"].get(member, "")
+
+        if not expected_hash:
+            raise RuntimeError(
+                f"Prüfsumme für Partition {number} fehlt."
+            )
+
+        if method == "files-fat":
+            mkfs_fat_from_metadata(target, part)
+
+            vbr_member = str(part.get("vbr_backup") or "")
+            if vbr_member:
+                vbr_hash = metadata["checksums"].get(vbr_member, "")
+                if not vbr_hash:
+                    raise RuntimeError(
+                        f"FAT-Bootsektor-Prüfsumme für Partition "
+                        f"{number} fehlt."
+                    )
+
+                source_vbr = _read_member_checked(
+                    image,
+                    vbr_member,
+                    vbr_hash,
+                )
+                merge_fat_boot_code(
+                    target,
+                    source_vbr,
+                    int(part.get("fat_bits") or 32),
+                )
+
+            run(["mount", target, str(mount_dir)])
+            try:
+                p = Progress(
+                    f"IMG Partition {number} · FAT-Dateien",
+                    idx,
+                    stage_count,
+                    int(part.get("stream_bytes") or 1),
+                    "SCHREIBEN",
+                )
+                restore_tar_member(
+                    image,
+                    member,
+                    expected_hash,
+                    mount_dir,
+                    p,
+                )
+                run(["sync"], check=False)
+            finally:
+                run(["umount", str(mount_dir)], check=False)
+
+            check = run(["fsck.vfat", "-a", target], check=False)
+            if check.returncode not in (0, 1):
+                raise RuntimeError(
+                    f"FAT-Prüfung von Partition {number} fehlgeschlagen."
+                )
+
+        elif method.startswith("partclone-ext"):
+            p = Progress(
+                f"IMG Partition {number} · ext",
+                idx,
+                stage_count,
+                int(part.get("stream_bytes") or 1),
+                "SCHREIBEN",
+            )
+            restore_generic_partclone_member(
+                image,
+                member,
+                method,
+                target,
+                int(part.get("stream_bytes") or 0),
+                expected_hash,
+                p,
+            )
+            run(["resize2fs", target])
+            check = run(["e2fsck", "-p", target], check=False)
+            if check.returncode not in (0, 1):
+                raise RuntimeError(
+                    f"ext-Prüfung von Partition {number} fehlgeschlagen."
+                )
+
+        elif method == "raw-zstd":
+            p = Progress(
+                f"IMG Partition {number} · Raw",
+                idx,
+                stage_count,
+                int(part.get("source_size_bytes") or 1),
+                "SCHREIBEN",
+            )
+            restore_raw_member(
+                image,
+                member,
+                expected_hash,
+                int(part.get("source_size_bytes") or 0),
+                target,
+                p,
+            )
+
+        else:
+            raise RuntimeError(
+                f"Nicht unterstützte Universal-Backup-Methode: {method}"
+            )
+
+
+def ventoy_universal_export(args):
+    image = safe_universal_image_path(args.image)
+    root, disk = validate_ventoy_root(
+        args.ventoy_root,
+        require_persistence=False,
+    )
+    metadata = read_universal_metadata(image)
+
+    image_disk = disk_for_path(image)
+    if image_disk and image_disk == disk:
+        fail(
+            "Das ausgewählte .uwusb-Image liegt auf demselben "
+            "Ventoy-Stick. Bitte das Image zuerst auf den internen "
+            "Image-Ordner kopieren."
+        )
+
+    required = int(metadata.get("minimum_target_bytes") or 0)
+    if required <= 0:
+        fail("Minimale Zielgröße fehlt im Universal-Image.")
+
+    name = normalize_image_title(
+        metadata.get("name") or image.stem
+    )
+    safe_name = normalize_filename(name)[:80]
+    target = root / f"{safe_name}.img"
+    partial = root / f".{safe_name}.img.partial"
+
+    try:
+        destination_fstype = output(
+            ["findmnt", "-T", str(root), "-n", "-o", "FSTYPE"],
+            timeout=5,
+        ).strip().lower()
+    except Exception:
+        destination_fstype = ""
+
+    if destination_fstype in {"vfat", "fat", "fat32", "msdos"}:
+        if required >= 4 * 1024**3:
+            fail(
+                "Die Ventoy-Datenpartition ist FAT32 und das erzeugte IMG "
+                "wäre mindestens 4 GiB groß. FAT32 kann diese Datei nicht "
+                "speichern. Bitte die Ventoy-Datenpartition z. B. als exFAT "
+                "verwenden."
+            )
+
+    ventoy_usage = shutil.disk_usage(root)
+    if ventoy_usage.free < required + 64 * MIB:
+        fail(
+            "Auf dem Ventoy-Stick ist nicht genug freier Speicher.\n\n"
+            f"IMG-Größe: {required / (1024**3):.2f} GiB\n"
+            f"Frei: {ventoy_usage.free / (1024**3):.2f} GiB"
+        )
+
+    local_usage = shutil.disk_usage(IMAGE_DIR)
+    if local_usage.free < required + 128 * MIB:
+        fail(
+            "Auf dem Image-Manager-Laufwerk ist nicht genug temporärer "
+            "Speicher zum Erzeugen des Ventoy-IMG.\n\n"
+            f"Benötigt: ca. {required / (1024**3):.2f} GiB"
+        )
+
+    build_dir = Path(
+        tempfile.mkdtemp(
+            prefix=".uwusb-ventoy-build-",
+            dir=str(IMAGE_DIR),
+        )
+    )
+    chown_user(build_dir)
+
+    build_img = build_dir / f"{safe_name}.img"
+    mount_dir = Path(
+        tempfile.mkdtemp(prefix="uwusb-ventoy-img-", dir="/mnt")
+    )
+    loopdev = ""
+
+    partitions = metadata.get("partitions") or []
+    total_stages = len(partitions) + 3
+
+    partial.unlink(missing_ok=True)
+
+    try:
+        with open(build_img, "wb") as handle:
+            handle.truncate(required)
+
+        loopdev = output(
+            [
+                "losetup",
+                "--find",
+                "--show",
+                "--partscan",
+                str(build_img),
+            ],
+            timeout=15,
+        ).strip()
+
+        if not loopdev:
+            raise RuntimeError(
+                "Temporäres Loop-Gerät für das Ventoy-IMG konnte nicht "
+                "angelegt werden."
+            )
+
+        restore_universal_payload_to_device(
+            image,
+            loopdev,
+            metadata,
+            mount_dir,
+            total_stages,
+        )
+
+        verify_stage = len(partitions) + 2
+        p = Progress(
+            "Ventoy-IMG prüfen und schließen",
+            verify_stage,
+            total_stages,
+            3,
+            "PRÜFEN",
+        )
+
+        unmount_disk(loopdev, retries=4, lazy_fallback=True)
+        run(["sync"], check=False)
+        p.update(1, force=True)
+
+        verify = run(
+            ["sfdisk", "--verify", loopdev],
+            check=False,
+            capture=True,
+            timeout=20,
+        )
+        if verify.returncode != 0:
+            detail = (verify.stderr or verify.stdout or "").strip()
+            raise RuntimeError(
+                "Die Partitionstabelle des erzeugten Ventoy-IMG konnte "
+                "nicht verifiziert werden."
+                + (f"\n{detail}" if detail else "")
+            )
+
+        p.update(2, force=True)
+
+        run(["losetup", "-d", loopdev], check=False)
+        loopdev = ""
+        run(["sync"], check=False)
+        p.finish(3)
+
+        copy_stage = len(partitions) + 3
+        p = Progress(
+            "IMG auf Ventoy kopieren",
+            copy_stage,
+            total_stages,
+            required,
+            "SCHREIBEN",
+        )
+
+        copy_file_with_progress(
+            build_img,
+            partial,
+            required,
+            p,
+        )
+
+        run(["sync"], check=False)
+        partial.replace(target)
+        run(["sync"], check=False)
+
+        log(
+            "VENTOY UNIVERSAL-EXPORT ERFOLGREICH: "
+            f"{image} -> {target}; size={required}"
+        )
+
+        emit(
+            "success",
+            message=(
+                f"Universal-Image „{name}“ wurde als Ventoy-IMG "
+                "bereitgestellt."
+            ),
+            detail=(
+                f"Datei: {target.name}\n"
+                f"Pfad: {target}\n"
+                f"IMG-Größe: {required / (1024**3):.2f} GiB\n\n"
+                "Ventoy kann die .img-Datei beim nächsten Start direkt "
+                "anzeigen. Ob ein Hersteller-Tool vollständig aus einem "
+                "virtuellen IMG läuft, hängt vom jeweiligen Tool ab."
+            ),
+            ventoy_image=str(target),
+        )
+
+    except SystemExit:
+        raise
+    except Exception as exc:
+        partial.unlink(missing_ok=True)
+        fail(f"Ventoy-IMG-Export fehlgeschlagen:\n{exc}")
+    finally:
+        if loopdev:
+            try:
+                unmount_disk(
+                    loopdev,
+                    retries=2,
+                    lazy_fallback=True,
+                )
+            except Exception:
+                pass
+            try:
+                run(["losetup", "-d", loopdev], check=False)
+            except Exception:
+                pass
+
+        try:
+            if subprocess.run(
+                ["mountpoint", "-q", str(mount_dir)]
+            ).returncode == 0:
+                run(["umount", str(mount_dir)], check=False)
+        except Exception:
+            pass
+
+        shutil.rmtree(mount_dir, ignore_errors=True)
+        shutil.rmtree(build_dir, ignore_errors=True)
 
 
 def ventoy_update(args):
@@ -4527,6 +4914,10 @@ def main():
     p.add_argument("--image", required=True)
     p.add_argument("--ventoy-root", required=True)
 
+    p = sub.add_parser("ventoy-universal-export")
+    p.add_argument("--image", required=True)
+    p.add_argument("--ventoy-root", required=True)
+
     p = sub.add_parser("self-update")
     p.add_argument("--expected-version", default="")
 
@@ -4547,6 +4938,8 @@ def main():
         benchmark(args)
     elif args.action == "ventoy-update":
         ventoy_update(args)
+    elif args.action == "ventoy-universal-export":
+        ventoy_universal_export(args)
     elif args.action == "self-update":
         self_update(args)
 
@@ -4616,7 +5009,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.26"
+VERSION = "1.27"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -7133,10 +7526,12 @@ class MainWindow(Gtk.ApplicationWindow):
     # --------------------------------------------------------
     def open_ventoy(self, *_):
         images = image_items()
+        universal_images = universal_image_items()
 
-        if not images:
+        if not images and not universal_images:
             self.error(
-                "Es wurde noch kein gültiges .uwuntu-Image gefunden."
+                "Es wurde noch kein gültiges .uwuntu- oder "
+                ".uwusb-Image gefunden."
             )
             return
 
@@ -7145,8 +7540,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if not roots:
             self.error(
                 "Kein eingerichteter Uwuntu-Ventoy-Stick wurde gefunden.\n\n"
-                "Erwartet werden ventoy/ventoy.json und der Ordner "
-                "persistence/."
+                "Erwartet wird ventoy/ventoy.json auf der "
+                "Ventoy-Datenpartition."
             )
             return
 
@@ -7158,98 +7553,196 @@ class MainWindow(Gtk.ApplicationWindow):
 
         win.root.append(
             make_label(
-                "Der Ventoy-Stick muss bereits unter Windows eingerichtet "
-                "sein. Dieses Tool ersetzt nur persistence/Uwuntu.dat. "
-                "Alle übrigen Ventoy-Dateien bleiben unangetastet.",
+                "Hier kannst du entweder die Uwuntu-Persistenz des "
+                "bestehenden Ventoy-Sticks aktualisieren oder ein "
+                "Universal-USB-Image automatisch in ein bootfähiges .img "
+                "umwandeln und direkt auf Ventoy kopieren.",
                 "card-text",
             )
         )
-
-        image_dd = dropdown_from_strings(
-            [image_display(item) for item in images]
-        )
-        win.root.append(image_dd)
-
-        details = make_label(image_details(images[0]), "details")
-        win.root.append(details)
-
-        def image_changed(dd, _pspec):
-            idx = dd.get_selected()
-
-            if idx < len(images):
-                details.set_text(image_details(images[idx]))
-
-        image_dd.connect("notify::selected", image_changed)
 
         ventoy_dd = dropdown_from_strings(
             [ventoy_display(item) for item in roots]
         )
         win.root.append(ventoy_dd)
 
+        if images:
+            win.root.append(
+                make_label(
+                    "UWUNTU-PERSISTENZ AKTUALISIEREN",
+                    "progress-info",
+                )
+            )
+
+            image_dd = dropdown_from_strings(
+                [image_display(item) for item in images]
+            )
+            win.root.append(image_dd)
+
+            details = make_label(image_details(images[0]), "details")
+            win.root.append(details)
+
+            def image_changed(dd, _pspec):
+                idx = dd.get_selected()
+                if idx < len(images):
+                    details.set_text(image_details(images[idx]))
+
+            image_dd.connect("notify::selected", image_changed)
+
+            uwuntu_update = Gtk.Button(
+                label="UWUNTU-PERSISTENZ AKTUALISIEREN"
+            )
+            uwuntu_update.add_css_class("primary")
+
+            def update_uwuntu(*_):
+                image_idx = image_dd.get_selected()
+                root_idx = ventoy_dd.get_selected()
+
+                if image_idx >= len(images) or root_idx >= len(roots):
+                    return
+
+                image = images[image_idx]
+                ventoy = roots[root_idx]
+
+                if not ventoy["has_dat"]:
+                    self.error(
+                        "Auf diesem Ventoy-Stick fehlt die vorhandene "
+                        "persistence/Uwuntu.dat. Die Ersteinrichtung bleibt "
+                        "bewusst dem Windows-PC vorbehalten."
+                    )
+                    return
+
+                self.confirm(
+                    "VENTOY-PERSISTENZ AKTUALISIEREN?",
+                    f"Image:\n{image_display(image)}\n\n"
+                    f"Ventoy:\n{ventoy_display(ventoy)}\n\n"
+                    "Die bisherige Uwuntu.dat wird als "
+                    "Uwuntu.dat.previous aufbewahrt.",
+                    lambda: (
+                        win.close(),
+                        self.run_backend(
+                            "VENTOY · UWUNTU-PERSISTENZ",
+                            [
+                                "ventoy-update",
+                                "--image",
+                                str(image["path"]),
+                                "--ventoy-root",
+                                str(ventoy["root"]),
+                            ],
+                        ),
+                    ),
+                )
+
+            uwuntu_update.connect("clicked", update_uwuntu)
+            win.root.append(uwuntu_update)
+
+        if universal_images:
+            win.root.append(
+                make_label(
+                    "UNIVERSAL-IMAGE AUF VENTOY",
+                    "progress-info",
+                )
+            )
+
+            universal_dd = dropdown_from_strings(
+                [
+                    universal_image_display(item)
+                    for item in universal_images
+                ]
+            )
+            win.root.append(universal_dd)
+
+            universal_details = make_label(
+                universal_image_details(universal_images[0]),
+                "details",
+            )
+            win.root.append(universal_details)
+
+            def universal_changed(dd, _pspec):
+                idx = dd.get_selected()
+                if idx < len(universal_images):
+                    universal_details.set_text(
+                        universal_image_details(
+                            universal_images[idx]
+                        )
+                    )
+
+            universal_dd.connect(
+                "notify::selected",
+                universal_changed,
+            )
+
+            export_note = make_label(
+                "Der Manager erzeugt daraus automatisch ein kompaktes "
+                "Raw-IMG in der berechneten Mindestgröße und kopiert es "
+                "ins Hauptverzeichnis des Ventoy-Sticks. Ein vorhandenes "
+                "IMG mit demselben Namen wird erst nach erfolgreicher "
+                "Neuerstellung ersetzt.",
+                "details",
+            )
+            win.root.append(export_note)
+
+            export_button = Gtk.Button(
+                label="UNIVERSAL-IMAGE → VENTOY (.IMG)"
+            )
+            export_button.add_css_class("primary")
+
+            def export_universal(*_):
+                image_idx = universal_dd.get_selected()
+                root_idx = ventoy_dd.get_selected()
+
+                if (
+                    image_idx >= len(universal_images)
+                    or root_idx >= len(roots)
+                ):
+                    return
+
+                image = universal_images[image_idx]
+                ventoy = roots[root_idx]
+                meta = image["meta"]
+                name = meta.get("name") or image["path"].stem
+                size = int(meta.get("minimum_target_bytes") or 0)
+
+                self.confirm(
+                    "UNIVERSAL-IMAGE AUF VENTOY KOPIEREN?",
+                    f"Image:\n{name}\n\n"
+                    f"Ventoy:\n{ventoy_display(ventoy)}\n\n"
+                    f"Erzeugtes IMG: ca. {fmt_bytes(size)}\n\n"
+                    "Das .uwusb-Image bleibt unverändert. Auf dem "
+                    "Ventoy-Stick wird eine .img-Datei erzeugt bzw. "
+                    "nach erfolgreicher Erstellung ersetzt.",
+                    lambda: (
+                        win.close(),
+                        self.run_backend(
+                            "VENTOY · UNIVERSAL-IMG",
+                            [
+                                "ventoy-universal-export",
+                                "--image",
+                                str(image["path"]),
+                                "--ventoy-root",
+                                str(ventoy["root"]),
+                            ],
+                            show_total_time=True,
+                        ),
+                    ),
+                )
+
+            export_button.connect("clicked", export_universal)
+            win.root.append(export_button)
+
         warning = make_label(
-            "Nicht verändert: ventoy.json · Theme · Uwuntu.iso · "
-            "Windows-ISO · sonstige Ventoy-Einstellungen",
+            "Ventoy kann .img-Dateien direkt starten. Einzelne "
+            "Hersteller-Tools können trotzdem einen echten beschreibbaren "
+            "USB-Stick erwarten; in diesem Fall bleibt das .uwusb-Image "
+            "für den Restore auf einen physischen Stick erhalten.",
             "warning",
         )
         win.root.append(warning)
 
-        buttons = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=8,
-        )
-        win.root.append(buttons)
-
-        cancel = Gtk.Button(label="ABBRECHEN")
-        cancel.add_css_class("secondary")
-        cancel.set_hexpand(True)
-        cancel.connect("clicked", lambda *_: win.close())
-        buttons.append(cancel)
-
-        start = Gtk.Button(label="VENTOY UPDATE STARTEN")
-        start.add_css_class("primary")
-        start.set_hexpand(True)
-
-        def clicked(*_):
-            image_idx = image_dd.get_selected()
-            root_idx = ventoy_dd.get_selected()
-
-            if image_idx >= len(images) or root_idx >= len(roots):
-                return
-
-            image = images[image_idx]
-            ventoy = roots[root_idx]
-
-            if not ventoy["has_dat"]:
-                self.error(
-                    "Auf diesem Ventoy-Stick fehlt die vorhandene "
-                    "persistence/Uwuntu.dat. Die Ersteinrichtung bleibt "
-                    "bewusst dem Windows-PC vorbehalten."
-                )
-                return
-
-            self.confirm(
-                "VENTOY AKTUALISIEREN?",
-                f"Image:\n{image_display(image)}\n\n"
-                f"Ventoy:\n{ventoy_display(ventoy)}\n\n"
-                "Die bisherige Uwuntu.dat wird als "
-                "Uwuntu.dat.previous aufbewahrt.",
-                lambda: (
-                    win.close(),
-                    self.run_backend(
-                        "VENTOY AKTUALISIEREN",
-                        [
-                            "ventoy-update",
-                            "--image",
-                            str(image["path"]),
-                            "--ventoy-root",
-                            str(ventoy["root"]),
-                        ],
-                    ),
-                ),
-            )
-
-        start.connect("clicked", clicked)
-        buttons.append(start)
+        close = Gtk.Button(label="SCHLIESSEN")
+        close.add_css_class("secondary")
+        close.connect("clicked", lambda *_: win.close())
+        win.root.append(close)
 
         win.present()
 
