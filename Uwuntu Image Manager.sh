@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.23"
+APP_VERSION="1.24"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -47,6 +47,7 @@ if [[ "$ROOT_MODE" -eq 1 ]]; then
         zstd
         dosfstools
         e2fsprogs
+        fio
         parted
         util-linux
         udisks2
@@ -154,7 +155,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.23"
+APP_VERSION = "1.24"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -180,6 +181,8 @@ RESTORE_MAX_TOTAL_MIB = 29 * 1024
 RESTORE_END_RESERVE_MIB = 128
 
 CHUNK = 4 * 1024 * 1024
+BENCHMARK_RANDOM_SECONDS = 8
+BENCHMARK_RANDOM_SIZE = 512 * MIB
 
 
 # ============================================================
@@ -659,6 +662,88 @@ def fs_info(part):
 # USB-Benchmark
 # ============================================================
 
+def fio_random_benchmark(disk, rw, stage_index, direction):
+    if rw not in {"randread", "randwrite"}:
+        raise RuntimeError(f"Ungültiger fio-Modus: {rw}")
+
+    progress = Progress(
+        f"USB-Benchmark · 4K Random {direction.lower()}",
+        stage_index,
+        4,
+        BENCHMARK_RANDOM_SECONDS,
+        direction,
+    )
+
+    command = [
+        "fio",
+        f"--name=uwuntu-4k-{rw}",
+        f"--filename={disk}",
+        f"--rw={rw}",
+        "--bs=4k",
+        "--direct=1",
+        "--iodepth=1",
+        f"--runtime={BENCHMARK_RANDOM_SECONDS}",
+        "--time_based",
+        f"--size={BENCHMARK_RANDOM_SIZE}",
+        "--offset=0",
+        "--numjobs=1",
+        "--group_reporting",
+        "--randrepeat=0",
+        "--norandommap=1",
+        "--output-format=json",
+        "--eta=never",
+    ]
+
+    log("CMD: " + " ".join(command))
+    started = time.monotonic()
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=BENCHMARK_RANDOM_SECONDS + 20,
+    )
+
+    elapsed = max(0.001, time.monotonic() - started)
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"fio 4K Random {direction.lower()} fehlgeschlagen "
+            f"({result.returncode})."
+            + (f"\n{detail}" if detail else "")
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+        job = (payload.get("jobs") or [])[0]
+        stats = job["read" if rw == "randread" else "write"]
+        iops = float(stats.get("iops") or 0.0)
+        bw_bytes = float(stats.get("bw_bytes") or 0.0)
+        latency = stats.get("clat_ns") or stats.get("lat_ns") or {}
+        latency_ms = float(latency.get("mean") or 0.0) / 1_000_000
+    except Exception as exc:
+        raise RuntimeError(
+            "fio-Ergebnis konnte nicht ausgewertet werden."
+        ) from exc
+
+    if iops <= 0 or bw_bytes <= 0:
+        raise RuntimeError(
+            f"fio 4K Random {direction.lower()} lieferte "
+            "keine gültigen Leistungswerte."
+        )
+
+    progress.finish(BENCHMARK_RANDOM_SECONDS)
+
+    return {
+        "iops": iops,
+        "mbps": bw_bytes / 1_000_000,
+        "latency_ms": latency_ms,
+        "seconds": elapsed,
+    }
+
+
 def benchmark(args):
     disk = args.disk
     validate_disk(disk)
@@ -683,7 +768,7 @@ def benchmark(args):
             "info",
             message=(
                 f"USB-Benchmark: {info['model']} · {disk} · "
-                "512 MiB lesen/schreiben"
+                "512 MiB sequenziell + 4K Random QD1"
             ),
         )
 
@@ -698,7 +783,7 @@ def benchmark(args):
         write_progress = Progress(
             "USB-Benchmark · 512 MiB schreiben",
             1,
-            2,
+            4,
             total_bytes,
             "SCHREIBEN",
         )
@@ -731,7 +816,7 @@ def benchmark(args):
         read_progress = Progress(
             "USB-Benchmark · 512 MiB lesen",
             2,
-            2,
+            4,
             total_bytes,
             "LESEN",
         )
@@ -757,12 +842,44 @@ def benchmark(args):
         read_seconds = max(0.001, time.monotonic() - read_started)
         read_progress.finish(total_bytes)
 
+        random_write = fio_random_benchmark(
+            disk,
+            "randwrite",
+            3,
+            "SCHREIBEN",
+        )
+
+        run(["sync"], check=False)
+        run(["blockdev", "--flushbufs", disk])
+
+        random_read = fio_random_benchmark(
+            disk,
+            "randread",
+            4,
+            "LESEN",
+        )
+
         write_mbps = total_bytes / write_seconds / 1_000_000
         read_mbps = total_bytes / read_seconds / 1_000_000
-        total_seconds = write_seconds + read_seconds
+        total_seconds = (
+            write_seconds
+            + read_seconds
+            + random_write["seconds"]
+            + random_read["seconds"]
+        )
 
         write_text = f"{write_mbps:.1f}".replace(".", ",")
         read_text = f"{read_mbps:.1f}".replace(".", ",")
+        random_write_iops_text = f"{random_write['iops']:.0f}".replace(".", ",")
+        random_read_iops_text = f"{random_read['iops']:.0f}".replace(".", ",")
+        random_write_mbps_text = f"{random_write['mbps']:.1f}".replace(".", ",")
+        random_read_mbps_text = f"{random_read['mbps']:.1f}".replace(".", ",")
+        random_write_latency_text = (
+            f"{random_write['latency_ms']:.2f}".replace(".", ",")
+        )
+        random_read_latency_text = (
+            f"{random_read['latency_ms']:.2f}".replace(".", ",")
+        )
         write_time_text = f"{write_seconds:.1f}".replace(".", ",")
         read_time_text = f"{read_seconds:.1f}".replace(".", ",")
         total_time_text = f"{total_seconds:.1f}".replace(".", ",")
@@ -771,6 +888,10 @@ def benchmark(args):
             "USB-BENCHMARK ERFOLGREICH: "
             f"{disk}; write={write_mbps:.2f}MB/s; "
             f"read={read_mbps:.2f}MB/s; "
+            f"randwrite={random_write['iops']:.2f}IOPS/"
+            f"{random_write['mbps']:.2f}MB/s; "
+            f"randread={random_read['iops']:.2f}IOPS/"
+            f"{random_read['mbps']:.2f}MB/s; "
             f"write_s={write_seconds:.2f}; read_s={read_seconds:.2f}"
         )
 
@@ -797,11 +918,19 @@ def benchmark(args):
             message="USB-Benchmark abgeschlossen.",
             detail=(
                 f"{info['model']} · {disk}\n\n"
+                "SEQUENZIELL · 512 MiB\n"
                 f"Schreiben: {write_text} MB/s\n"
                 f"Lesen: {read_text} MB/s\n"
-                "Testmenge: 512 MiB\n"
                 f"Schreibzeit: {write_time_text} s\n"
-                f"Lesezeit: {read_time_text} s\n"
+                f"Lesezeit: {read_time_text} s\n\n"
+                "4K RANDOM · QD1 · DIRECT I/O\n"
+                f"Schreiben: {random_write_iops_text} IOPS · "
+                f"{random_write_mbps_text} MB/s · "
+                f"{random_write_latency_text} ms\n"
+                f"Lesen: {random_read_iops_text} IOPS · "
+                f"{random_read_mbps_text} MB/s · "
+                f"{random_read_latency_text} ms\n"
+                f"Je Random-Test: {BENCHMARK_RANDOM_SECONDS} s\n\n"
                 f"Gesamt: {total_time_text} s\n\n"
                 "Die ersten 512 MiB wurden für den Test überschrieben. "
                 "Der Stick ist dadurch nicht mehr bootfähig und muss "
@@ -3055,7 +3184,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.23"
+VERSION = "1.24"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
@@ -4800,9 +4929,10 @@ class MainWindow(Gtk.ApplicationWindow):
         win.root.append(make_label("USB-BENCHMARK", "card-title"))
         win.root.append(
             make_label(
-                "Misst die sequenzielle Schreib- und Lesegeschwindigkeit "
-                "mit jeweils 512 MiB. So lassen sich mehrere USB-Sticks "
-                "schnell miteinander vergleichen.",
+                "Misst zuerst die sequenzielle Schreib- und Lesegeschwindigkeit "
+                "mit jeweils 512 MiB und danach 4K-Random-Zugriffe mit QD1 "
+                "für Lesen und Schreiben. Die beiden Random-Tests dauern "
+                "jeweils nur 8 Sekunden.",
                 "card-text",
             )
         )
@@ -4821,8 +4951,9 @@ class MainWindow(Gtk.ApplicationWindow):
         win.root.append(warning)
 
         note = make_label(
-            "Test: 512 MiB schreiben → Cache leeren → 512 MiB lesen "
-            "und Daten prüfen. Ergebnis direkt in MB/s.",
+            "Test: 512 MiB sequenziell schreiben und verifizieren → "
+            "4K Random Write 8 s → Cache leeren → 4K Random Read 8 s. "
+            "Ergebnis: MB/s sowie Random-IOPS und Latenz.",
             "details",
         )
         win.root.append(note)
@@ -4861,7 +4992,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 lambda: (
                     win.close(),
                     self.run_backend(
-                        "USB-BENCHMARK · 512 MiB",
+                        "USB-BENCHMARK · SEQ + 4K RANDOM",
                         ["benchmark", "--disk", disk["path"]],
                     ),
                 ),
