@@ -217,11 +217,11 @@ jobs:
           PY
 
           mapfile -t changed < <(git diff --name-only "$BASE"..HEAD | sort)
-          printf '%s\n' "\${changed[@]}"
+          printf '%s\n' "${changed[@]}"
           printf '%s\n' \
             ".github/workflows/test-im-v126-universal.yml" \
             "Uwuntu Image Manager.sh" \
             "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-22-09-48.sh" \
             | sort > /tmp/expected
-          printf '%s\n' "\${changed[@]}" > /tmp/actual
+          printf '%s\n' "${changed[@]}" > /tmp/actual
           diff -u /tmp/expected /tmp/actual
