@@ -5606,17 +5606,16 @@ def find_ventoy_roots():
         if root in seen:
             continue
 
-        if (
-            (root / "ventoy/ventoy.json").is_file()
-            and (root / "persistence").is_dir()
-        ):
+        if (root / "ventoy/ventoy.json").is_file():
             seen.add(root)
 
-            dat = root / "persistence/Uwuntu.dat"
+            persistence = root / "persistence"
+            dat = persistence / "Uwuntu.dat"
 
             roots.append(
                 {
                     "root": root,
+                    "has_persistence": persistence.is_dir(),
                     "has_dat": dat.is_file(),
                     "dat_size": dat.stat().st_size if dat.is_file() else 0,
                 }
