@@ -6,6 +6,9 @@ on:
       - codex/im-v125-uwuntu-rating
     paths:
       - .github/workflows/test-im-v125-rating.yml
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
