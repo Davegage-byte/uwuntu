@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 APP_NAME="Uwuntu Image Manager"
-APP_VERSION="1.24"
+APP_VERSION="1.25"
 
 ROOT_HELPER="/usr/local/libexec/uwuntu-image-manager-root"
 SUDOERS_FILE="/etc/sudoers.d/uwuntu-image-manager"
@@ -155,7 +155,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-APP_VERSION = "1.24"
+APP_VERSION = "1.25"
 FORMAT_VERSION = "uwuntu-image-v3"
 SUPPORTED_FORMAT_VERSIONS = {"uwuntu-image-v1", "uwuntu-image-v2", FORMAT_VERSION}
 
@@ -744,6 +744,61 @@ def fio_random_benchmark(disk, rw, stage_index, direction):
     }
 
 
+def classify_uwuntu_benchmark(random_write_iops):
+    """Bewertet die Eignung eines Sticks für persistentes Uwuntu.
+
+    Maßgeblich ist 4K Random Write bei QD1 und Direct I/O, weil kleine
+    Schreibzugriffe bei OverlayFS, Journal, Logs, Snap und Desktop-State
+    wesentlich stärker ins Gewicht fallen als die sequenzielle Spitzenrate.
+    """
+    iops = float(random_write_iops or 0.0)
+
+    if iops >= 300:
+        return {
+            "level": "very_good",
+            "icon": "🟢",
+            "label": "SEHR GUT",
+            "note": "Für persistentes Uwuntu sehr gut geeignet.",
+        }
+    if iops >= 100:
+        return {
+            "level": "good",
+            "icon": "🟢",
+            "label": "GUT",
+            "note": "Für persistentes Uwuntu gut geeignet.",
+        }
+    if iops >= 30:
+        return {
+            "level": "usable",
+            "icon": "🟡",
+            "label": "NUTZBAR",
+            "note": (
+                "Für Uwuntu nutzbar; bei vielen kleinen Schreibzugriffen "
+                "können Wartezeiten auftreten."
+            ),
+        }
+    if iops >= 10:
+        return {
+            "level": "slow",
+            "icon": "🟠",
+            "label": "LANGSAM",
+            "note": (
+                "Uwuntu wird spürbar langsam reagieren; "
+                "nur eingeschränkt empfohlen."
+            ),
+        }
+
+    return {
+        "level": "unsuitable",
+        "icon": "🔴",
+        "label": "UNGEEIGNET",
+        "note": (
+            "Für persistentes Uwuntu ungeeignet; sehr lange Boot- und "
+            "Reaktionszeiten sind zu erwarten."
+        ),
+    }
+
+
 def benchmark(args):
     disk = args.disk
     validate_disk(disk)
@@ -867,6 +922,7 @@ def benchmark(args):
             + random_write["seconds"]
             + random_read["seconds"]
         )
+        uwuntu_rating = classify_uwuntu_benchmark(random_write["iops"])
 
         write_text = f"{write_mbps:.1f}".replace(".", ",")
         read_text = f"{read_mbps:.1f}".replace(".", ",")
@@ -892,6 +948,8 @@ def benchmark(args):
             f"{random_write['mbps']:.2f}MB/s; "
             f"randread={random_read['iops']:.2f}IOPS/"
             f"{random_read['mbps']:.2f}MB/s; "
+            f"rating={uwuntu_rating['label']}/"
+            f"{uwuntu_rating['level']}; "
             f"write_s={write_seconds:.2f}; read_s={read_seconds:.2f}"
         )
 
@@ -918,6 +976,11 @@ def benchmark(args):
             message="USB-Benchmark abgeschlossen.",
             detail=(
                 f"{info['model']} · {disk}\n\n"
+                "UWUNTU-EIGNUNG\n"
+                f"{uwuntu_rating['icon']} {uwuntu_rating['label']}\n"
+                f"{uwuntu_rating['note']}\n"
+                f"Maßgeblich: 4K Random Write · "
+                f"{random_write_iops_text} IOPS\n\n"
                 "SEQUENZIELL · 512 MiB\n"
                 f"Schreiben: {write_text} MB/s\n"
                 f"Lesen: {read_text} MB/s\n"
@@ -931,6 +994,9 @@ def benchmark(args):
                 f"{random_read_mbps_text} MB/s · "
                 f"{random_read_latency_text} ms\n"
                 f"Je Random-Test: {BENCHMARK_RANDOM_SECONDS} s\n\n"
+                "Bewertung 4K Random Write:\n"
+                "≥300 IOPS sehr gut · ≥100 gut · ≥30 nutzbar · "
+                "≥10 langsam · <10 ungeeignet\n\n"
                 f"Gesamt: {total_time_text} s\n\n"
                 "Die ersten 512 MiB wurden für den Test überschrieben. "
                 "Der Stick ist dadurch nicht mehr bootfähig und muss "
@@ -938,6 +1004,9 @@ def benchmark(args):
                 "Uwuntu Image Manager wiederhergestellt werden.\n\n"
                 + finish_note
             ),
+            uwuntu_rating=uwuntu_rating["label"],
+            uwuntu_rating_level=uwuntu_rating["level"],
+            random_write_iops=random_write["iops"],
         )
 
     except SystemExit:
@@ -3184,7 +3253,7 @@ from gi.repository import Gtk, Gdk, GLib, Gio
 
 APP_ID = "com.uwuntu.ImageManager"
 APP_NAME = "Uwuntu Image Manager"
-VERSION = "1.24"
+VERSION = "1.25"
 
 HOME = Path.home()
 IMAGE_DIR = HOME / "Uwuntu-Images"
