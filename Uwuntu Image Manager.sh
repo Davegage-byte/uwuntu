@@ -2234,15 +2234,19 @@ def universal_backup(args):
     mount_dir = Path(tempfile.mkdtemp(prefix="uwusb-src-", dir="/mnt"))
 
     try:
+        # Die ersten 440 Byte enthalten den klassischen MBR-Bootstrap und
+        # sind auch bei GPT für BIOS-kompatible Medien relevant. Bei DOS/MBR
+        # werden zusätzlich Disk-Signatur/Reserved bis Byte 445 erhalten.
+        mbr_head_size = 446 if table["label"] == "dos" else 440
+        with open(disk, "rb", buffering=0) as handle:
+            mbr_head = handle.read(mbr_head_size)
+
+        mbr_path = temp_dir / "mbr_head.bin"
+        mbr_path.write_bytes(mbr_head)
+        members.append(mbr_path.name)
+        checksums[mbr_path.name] = hash_file(mbr_path)
+
         if table["label"] == "dos":
-            with open(disk, "rb", buffering=0) as handle:
-                mbr_head = handle.read(446)
-
-            mbr_path = temp_dir / "mbr_head.bin"
-            mbr_path.write_bytes(mbr_head)
-            members.append(mbr_path.name)
-            checksums[mbr_path.name] = hash_file(mbr_path)
-
             first_start_bytes = (
                 int(partitions[0]["source_start_sector"])
                 * int(table["sector_size"])
@@ -2602,9 +2606,6 @@ def create_universal_layout(disk, metadata):
 
 def restore_universal_boot_area(image, disk, metadata):
     table = metadata["partition_table"]
-    if table.get("label") != "dos":
-        return
-
     checksums = metadata["checksums"]
 
     if "mbr_head.bin" in checksums:
@@ -2613,11 +2614,15 @@ def restore_universal_boot_area(image, disk, metadata):
             "mbr_head.bin",
             checksums["mbr_head.bin"],
         )
+        write_len = 446 if table.get("label") == "dos" else 440
         with open(disk, "r+b", buffering=0) as handle:
             handle.seek(0)
-            handle.write(data[:446])
+            handle.write(data[:write_len])
             handle.flush()
             os.fsync(handle.fileno())
+
+    if table.get("label") != "dos":
+        return
 
     gap_bytes = int(table.get("mbr_gap_bytes") or 0)
     if gap_bytes > 0 and "mbr_gap.bin" in checksums:
@@ -2651,6 +2656,10 @@ def mkfs_fat_from_metadata(target, part):
     uuid = str(part.get("fs_uuid") or "").replace("-", "")
     if re.fullmatch(r"[0-9A-Fa-f]{8}", uuid):
         args += ["-i", uuid.upper()]
+
+    hidden = int(part.get("target_start_sector") or 0)
+    if hidden > 0:
+        args += ["-h", str(hidden)]
 
     args.append(target)
     run(args)
