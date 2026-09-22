@@ -1,0 +1,227 @@
+name: Test IM v1.26 Universal USB
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - codex/im-v126-universal-usb
+    paths:
+      - .github/workflows/test-im-v126-universal.yml
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Abhängigkeiten für Funktionstest
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dosfstools e2fsprogs partclone zstd util-linux
+
+      - name: Image Manager Full Path prüfen
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          BASE=28415c4474c549ea8bc66e874541bb4e71e7b72a
+          FILE="Uwuntu Image Manager.sh"
+          BACKUP="backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-22-09-48.sh"
+
+          bash -n "$FILE"
+          git diff --check "$BASE"..HEAD
+          cmp -s <(git show "$BASE:$FILE") "$BACKUP"
+
+          grep -q 'APP_VERSION="1.26"' "$FILE"
+          grep -q 'APP_VERSION = "1.26"' "$FILE"
+          grep -q 'VERSION = "1.26"' "$FILE"
+          grep -q 'UNIVERSAL_FORMAT_VERSION = "uwuntu-usb-v1"' "$FILE"
+          grep -q 'universal-backup' "$FILE"
+          grep -q 'universal-restore' "$FILE"
+
+          python3 - <<'PY'
+          import ast
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import tarfile
+          import tempfile
+          from pathlib import Path
+
+          script = Path("Uwuntu Image Manager.sh").read_text(encoding="utf-8")
+
+          root_marker = "cat > \"$ROOT_HELPER\" <<'PYROOT'\n"
+          root_code = script.split(root_marker, 1)[1].split("\nPYROOT\n", 1)[0]
+          compile(root_code, "<PYROOT>", "exec")
+
+          app_marker = "cat > \"$USER_APP_DIR/uwuntu_image_manager.py\" <<'PYAPP'\n"
+          app_code = script.split(app_marker, 1)[1].split("\nPYAPP\n", 1)[0]
+          compile(app_code, "<PYAPP>", "exec")
+
+          required_root = {
+              "universal_partition_table",
+              "fat_bits_from_device",
+              "fat_compact_size_bytes",
+              "universal_layout",
+              "universal_backup",
+              "create_universal_layout",
+              "universal_restore",
+              "merge_fat_boot_code",
+          }
+          root_tree = ast.parse(root_code)
+          root_functions = {
+              node.name for node in root_tree.body
+              if isinstance(node, ast.FunctionDef)
+          }
+          missing = sorted(required_root - root_functions)
+          assert not missing, missing
+
+          required_gui = {
+              "open_universal",
+              "open_universal_backup",
+              "open_universal_restore",
+          }
+          app_tree = ast.parse(app_code)
+          main_window = next(
+              node for node in app_tree.body
+              if isinstance(node, ast.ClassDef) and node.name == "MainWindow"
+          )
+          gui_methods = {
+              node.name for node in main_window.body
+              if isinstance(node, ast.FunctionDef)
+          }
+          missing_gui = sorted(required_gui - gui_methods)
+          assert not missing_gui, missing_gui
+
+          runner = os.environ.get("USER", "runner")
+          os.environ["SUDO_USER"] = runner
+          ns = {"__name__": "uwuntu_test"}
+          exec(compile(root_code, "<PYROOT>", "exec"), ns)
+
+          MIB = 1024 * 1024
+
+          compact = ns["fat_compact_size_bytes"](
+              16 * 1024**3,
+              300 * MIB,
+              32,
+          )
+          assert 512 * MIB <= compact < 16 * 1024**3, compact
+
+          parts = [
+              {
+                  "source_start_sector": 2048,
+                  "target_size_bytes": 512 * MIB,
+                  "backup_method": "files-fat",
+              },
+              {
+                  "source_start_sector": 10_000_000,
+                  "target_size_bytes": 256 * MIB,
+                  "backup_method": "partclone-ext4",
+              },
+          ]
+          minimum = ns["universal_layout"](parts, 512)
+          assert parts[0]["target_start_sector"] == 2048
+          assert parts[1]["target_start_sector"] % 2048 == 0
+          assert minimum < 2 * 1024**3, minimum
+
+          with tempfile.TemporaryDirectory() as tmp:
+              tmp = Path(tmp)
+              source = tmp / "source.fat"
+              target = tmp / "target.fat"
+              for path in (source, target):
+                  with path.open("wb") as handle:
+                      handle.truncate(700 * MIB)
+                  subprocess.run(
+                      ["mkfs.vfat", "-F", "32", "-n", "TEST", str(path)],
+                      check=True,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+
+              assert ns["fat_bits_from_device"](source) == 32
+
+              with source.open("r+b") as handle:
+                  vbr = bytearray(handle.read(512))
+                  vbr[100:108] = b"UWUNTU!!"
+                  handle.seek(0)
+                  handle.write(vbr)
+
+              with target.open("rb") as handle:
+                  target_before = handle.read(512)
+
+              with source.open("rb") as handle:
+                  source_vbr = handle.read(512)
+
+              ns["merge_fat_boot_code"](target, source_vbr, 32)
+
+              with target.open("rb") as handle:
+                  target_after = handle.read(512)
+
+              assert target_after[:90] == target_before[:90]
+              assert target_after[100:108] == b"UWUNTU!!"
+
+              srcdir = tmp / "srcdir"
+              dstdir = tmp / "dstdir"
+              srcdir.mkdir()
+              dstdir.mkdir()
+              (srcdir / "EFI").mkdir()
+              (srcdir / "EFI" / "BOOTX64.EFI").write_bytes(b"boot-test")
+              zst = tmp / "partition-1.files.tar.zst"
+
+              progress = ns["Progress"]("Test", 1, 1, 16, "LESEN")
+              stream_bytes = ns["stream_portable_tar_to_zstd"](
+                  srcdir, zst, 16, progress
+              )
+              assert stream_bytes > 0
+
+              metadata = {
+                  "format": "uwuntu-usb-v1",
+                  "name": "HP Diagnostics Test",
+                  "checksums": {
+                      "partition-1.files.tar.zst": hashlib.sha256(
+                          zst.read_bytes()
+                      ).hexdigest()
+                  },
+              }
+              meta = tmp / "metadata.json"
+              meta.write_text(json.dumps(metadata), encoding="utf-8")
+              outer = tmp / "test.uwusb"
+              with tarfile.open(outer, "w") as tf:
+                  tf.add(meta, arcname="metadata.json")
+                  tf.add(zst, arcname="partition-1.files.tar.zst")
+
+              progress = ns["Progress"](
+                  "Restore", 1, 1, stream_bytes, "SCHREIBEN"
+              )
+              ns["restore_tar_member"](
+                  outer,
+                  "partition-1.files.tar.zst",
+                  metadata["checksums"]["partition-1.files.tar.zst"],
+                  dstdir,
+                  progress,
+              )
+              assert (
+                  dstdir / "EFI" / "BOOTX64.EFI"
+              ).read_bytes() == b"boot-test"
+
+          print("IM v1.26 Universal-USB Full-Path-Tests OK")
+          PY
+
+          mapfile -t changed < <(git diff --name-only "$BASE"..HEAD | sort)
+          printf '%s\n' "\${changed[@]}"
+          printf '%s\n' \
+            ".github/workflows/test-im-v126-universal.yml" \
+            "Uwuntu Image Manager.sh" \
+            "backups/uwuntu-image-manager/Uwuntu Image Manager_backup-2026-09-22-09-48.sh" \
+            | sort > /tmp/expected
+          printf '%s\n' "\${changed[@]}" > /tmp/actual
+          diff -u /tmp/expected /tmp/actual
