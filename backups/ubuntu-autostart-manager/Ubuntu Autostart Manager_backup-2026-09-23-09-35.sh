@@ -49,7 +49,7 @@ RUNTIME_MANIFEST_PATH="$RUNTIME_MANIFEST_DIR/runtime-manifest.json"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026091402
+MANAGER_BUILD=2026091401
 AUTO_MODE=0
 
 # Die Laufzeitprogramme werden als eigenstaendige Repository-Module gepflegt.
@@ -1373,7 +1373,7 @@ install_hardware_check_app() {
     install_force_update_helper
 
     local hw_missing=()
-    for pkg in python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0 python3-pyatspi libinput-tools udev mokutil dmidecode wl-clipboard glmark2; do
+    for pkg in python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-4.0 python3-pyatspi libinput-tools udev mokutil dmidecode wl-clipboard; do
         dpkg -s "$pkg" >/dev/null 2>&1 || hw_missing+=("$pkg")
     done
     if [ "${#hw_missing[@]}" -gt 0 ]; then
@@ -1386,11 +1386,6 @@ install_hardware_check_app() {
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${hw_missing[@]}" || return 1
         fi
     fi
-
-    command -v glmark2 >/dev/null 2>&1 || {
-        echo "FEHLER: glmark2 fehlt trotz Paketinstallation."
-        return 1
-    }
 
     # Laufzeitcode liegt als Repository-Modul vor und wird zentral installiert.
     require_runtime_module "apps/hardware-check.sh" || return 1

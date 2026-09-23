@@ -1164,6 +1164,164 @@ def read_cpu_average_frequency_mhz():
     return sum(values) / len(values)
 
 
+def read_gpu_telemetry():
+    """Best-effort GPU-Auslastung, Temperatur und Takt unter Linux."""
+    result = {
+        "load": None,
+        "temp": None,
+        "clock_mhz": None,
+    }
+
+    def read_number(path, scale=1.0):
+        try:
+            value = float(Path(path).read_text().strip()) / scale
+        except Exception:
+            return None
+        return value
+
+    try:
+        cards = sorted(
+            Path("/sys/class/drm").glob("card[0-9]*"),
+            key=lambda path: path.name,
+        )
+    except Exception:
+        cards = []
+
+    for card in cards:
+        device = card / "device"
+        if not device.exists():
+            continue
+
+        load = None
+        for path in (
+            device / "gpu_busy_percent",
+            device / "busy_percent",
+        ):
+            value = read_number(path)
+            if value is not None and 0.0 <= value <= 100.0:
+                load = value
+                break
+
+        clock_mhz = None
+        for path in (
+            card / "gt_cur_freq_mhz",
+            device / "gt_cur_freq_mhz",
+            card / "gt" / "gt0" / "rps_cur_freq_mhz",
+            device / "gt" / "gt0" / "rps_cur_freq_mhz",
+        ):
+            value = read_number(path)
+            if value is not None and 10.0 <= value <= 10000.0:
+                clock_mhz = value
+                break
+
+        if clock_mhz is None:
+            try:
+                dpm = (device / "pp_dpm_sclk").read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+                match = re.search(
+                    r"([0-9]+(?:\.[0-9]+)?)\s*Mhz\s*\*",
+                    dpm,
+                    re.I,
+                )
+                if match:
+                    value = float(match.group(1))
+                    if 10.0 <= value <= 10000.0:
+                        clock_mhz = value
+            except Exception:
+                pass
+
+        temperatures = []
+        try:
+            for hwmon in (device / "hwmon").glob("hwmon*"):
+                for temp_file in hwmon.glob("temp*_input"):
+                    value = read_number(temp_file, 1000.0)
+                    if value is not None and -20.0 <= value <= 130.0:
+                        temperatures.append(value)
+        except Exception:
+            pass
+
+        temp = max(temperatures) if temperatures else None
+
+        if load is not None or temp is not None or clock_mhz is not None:
+            result["load"] = load
+            result["temp"] = temp
+            result["clock_mhz"] = clock_mhz
+            return result
+
+    # NVIDIA-Fallback, falls sysfs keine brauchbaren Werte bereitstellt.
+    if shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,temperature.gpu,clocks.gr",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+            line = (proc.stdout or "").splitlines()[0]
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) >= 3:
+                load = float(parts[0])
+                temp = float(parts[1])
+                clock_mhz = float(parts[2])
+                if 0.0 <= load <= 100.0:
+                    result["load"] = load
+                if -20.0 <= temp <= 130.0:
+                    result["temp"] = temp
+                if 10.0 <= clock_mhz <= 10000.0:
+                    result["clock_mhz"] = clock_mhz
+        except Exception:
+            pass
+
+    return result
+
+
+def build_gpu_benchmark_args(duration, mode):
+    """glmark2-Szenen für kurzen oder erweiterten GPU-Test."""
+    executable = shutil.which("glmark2")
+    if not executable:
+        return None
+
+    if mode == "short":
+        scenes = (
+            "build",
+            "texture",
+            "shading",
+            "bump",
+        )
+    else:
+        scenes = (
+            "build",
+            "texture",
+            "shading",
+            "bump",
+            "terrain",
+            "refract",
+        )
+
+    scene_duration = max(2.0, float(duration) / len(scenes))
+    args = [
+        executable,
+        "--off-screen",
+        "--size",
+        "640x360",
+    ]
+    for scene in scenes:
+        args.extend(
+            [
+                "--benchmark",
+                f"{scene}:duration={scene_duration:.1f}",
+            ]
+        )
+    return args
+
+
 def detect_primary_ssd_device_name():
     """Bevorzugtes internes Solid-State-Laufwerk."""
     candidates = []
@@ -2403,6 +2561,15 @@ class App(Gtk.Application):
         self.test_duration = 0.0
         self.test_started = 0.0
         self.test_cancelled = False
+        self.test_output_lines = []
+        self.test_reader_thread = None
+        self.test_sequence_active = False
+        self.test_sequence_mode = None
+        self.test_sequence = []
+        self.test_sequence_index = 0
+        self.test_sequence_results = []
+        self.test_sequence_total_duration = 0.0
+        self.test_sequence_completed_duration = 0.0
         self.benchmark_buttons = []
         self.touch_state_file = Path.home() / ".local/state/uwuntu/touch_tester_status.json"
         self.touch_script = Path.home() / ".local/bin/uwuntu-touch-tester.sh"
@@ -2506,14 +2673,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.98")
+        self.window.set_title("Hardware Check v4.5.99")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.98")
+        title_label = Gtk.Label(label="Hardware Check v4.5.99")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6200,6 +6367,7 @@ except Exception:
         body.set_margin_bottom(8)
         body.set_vexpand(True)
         chooser = Gtk.Grid()
+        chooser.set_row_spacing(6)
         chooser.set_column_spacing(6)
         chooser.set_column_homogeneous(True)
         chooser.set_hexpand(True)
@@ -6209,10 +6377,14 @@ except Exception:
             ("CPU ERW.", "cpu-long", 600.0),
             ("RAM", "ram-short", 30.0),
             ("RAM ERW.", "ram-long", 600.0),
+            ("GPU", "gpu-short", 20.0),
+            ("GPU ERW.", "gpu-long", 600.0),
+            ("ALLE", "all-short", 60.0),
+            ("ALLE ERW.", "all-long", 1800.0),
         ]
 
         self.benchmark_buttons = []
-        for column, (label, kind, duration) in enumerate(specs):
+        for index, (label, kind, duration) in enumerate(specs):
             b = Gtk.Button(label=label)
             b.add_css_class("benchmark-choice")
             b.set_hexpand(True)
@@ -6222,7 +6394,7 @@ except Exception:
                 child.set_single_line_mode(True)
             b.connect("clicked", self.start_test, kind, duration)
             self.benchmark_buttons.append(b)
-            chooser.attach(b, column, 0, 1, 1)
+            chooser.attach(b, index % 4, index // 4, 1, 1)
 
         body.append(chooser)
         self.benchmark_status = Gtk.Label(label="Bereit")
@@ -6273,6 +6445,28 @@ except Exception:
         self.ram_activity_green_thresholds = [1.0] * (40 * 8)
         self.ram_activity_progress = 0.0
         body.append(self.ram_activity)
+
+        self.gpu_activity = Gtk.DrawingArea()
+        self.gpu_activity.set_content_height(150)
+        self.gpu_activity.set_hexpand(True)
+        self.gpu_activity.set_vexpand(True)
+        self.gpu_activity.set_draw_func(self.draw_gpu_activity)
+        self.gpu_activity.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Visuelle Aktivitätsanzeige des GPU-Benchmarks"],
+        )
+        self.gpu_activity.set_visible(False)
+        self.gpu_visual_state = "idle"
+        self.gpu_activity_progress = 0.0
+        self.gpu_visual_load = None
+        self.gpu_visual_temp = None
+        self.gpu_visual_clock_mhz = None
+        self.gpu_visual_fps = None
+        self.gpu_peak_temp = None
+        self.gpu_renderer = None
+        self.gpu_frame_values = [0.0] * 24
+        body.append(self.gpu_activity)
+
         progress_row = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
             spacing=8
@@ -6713,6 +6907,255 @@ except Exception:
         if is_cpu:
             self.cpu_activity.queue_draw()
 
+    def _gpu_visual_color(self, temp_c):
+        if self.gpu_visual_state == "complete":
+            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+        if self.gpu_visual_state == "error":
+            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        if self.gpu_visual_state == "cancelled":
+            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
+        if temp_c is not None and temp_c >= 95.0:
+            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        if temp_c is not None and temp_c >= 85.0:
+            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
+        return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+
+    def draw_gpu_activity(self, area, cr, width, height):
+        """GPU-Telemetrie mit Render-Pipeline und Frame-Historie."""
+        background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
+        panel = (0x23 / 255.0, 0x23 / 255.0, 0x29 / 255.0)
+        track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
+        text = (0xF4 / 255.0, 0xF4 / 255.0, 0xF5 / 255.0)
+        muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
+        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+
+        cr.set_source_rgb(*background)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+
+        cr.set_source_rgba(track[0], track[1], track[2], 0.28)
+        cr.set_line_width(1.0)
+        step = 24.0
+        pos = step
+        while pos < width:
+            cr.move_to(pos, 0)
+            cr.line_to(pos, height)
+            pos += step
+        pos = step
+        while pos < height:
+            cr.move_to(0, pos)
+            cr.line_to(width, pos)
+            pos += step
+        cr.stroke()
+
+        temp_c = self.gpu_visual_temp
+        accent = self._gpu_visual_color(temp_c)
+        load = self.gpu_visual_load
+        clock_mhz = self.gpu_visual_clock_mhz
+        fps = self.gpu_visual_fps
+        complete = self.gpu_visual_state == "complete"
+        running = self.gpu_visual_state == "running"
+
+        if clock_mhz is None:
+            clock_text = "-- MHz"
+        elif clock_mhz >= 1000.0:
+            clock_text = f"{clock_mhz / 1000.0:.2f} GHz"
+        else:
+            clock_text = f"{clock_mhz:.0f} MHz"
+
+        metrics = (
+            ("GPU LOAD", "-- %" if load is None else f"{load:.0f} %"),
+            ("TEMP", "-- °C" if temp_c is None else f"{temp_c:.0f} °C"),
+            ("GPU TAKT", clock_text),
+            ("FPS", "--" if fps is None else f"{fps:.0f}"),
+        )
+
+        padding = 8.0
+        gap = 6.0
+        metric_columns = 4 if width >= 650 else 2
+        metric_rows = int(math.ceil(4 / metric_columns))
+        metric_h = 46.0
+        metric_w = max(
+            72.0,
+            (width - 2 * padding - gap * (metric_columns - 1))
+            / metric_columns,
+        )
+
+        for index, (label, value) in enumerate(metrics):
+            row = index // metric_columns
+            col = index % metric_columns
+            x = padding + col * (metric_w + gap)
+            y = padding + row * (metric_h + gap)
+            cr.set_source_rgb(*panel)
+            cr.rectangle(x, y, metric_w, metric_h)
+            cr.fill()
+
+            if complete:
+                color = green
+            elif index == 1:
+                color = accent
+            elif index == 3 and fps is not None:
+                color = green
+            else:
+                color = blue
+
+            cr.set_source_rgba(color[0], color[1], color[2], 0.65)
+            cr.rectangle(x + 8.0, y + 7.0, 18.0, 2.0)
+            cr.fill()
+            cr.set_source_rgb(*color)
+            cr.rectangle(x, y + metric_h - 3.0, metric_w, 3.0)
+            cr.fill()
+
+            cr.set_source_rgb(*muted)
+            cr.set_font_size(9.0)
+            cr.move_to(x + 8.0, y + 18.0)
+            cr.show_text(label)
+
+            cr.set_source_rgb(*(color if index in (1, 3) or complete else text))
+            cr.set_font_size(16.0)
+            cr.move_to(x + 8.0, y + 37.0)
+            cr.show_text(value)
+
+        metric_bottom = (
+            padding
+            + metric_rows * metric_h
+            + max(0, metric_rows - 1) * gap
+        )
+        title_y = metric_bottom + 17.0
+        cr.set_source_rgb(*muted)
+        cr.set_font_size(9.0)
+        cr.move_to(padding, title_y)
+        cr.show_text("RENDER PIPELINE / FRAME HISTORY")
+
+        state_text = {
+            "complete": "COMPLETE",
+            "error": "ERROR",
+            "cancelled": "STOPPED",
+        }.get(self.gpu_visual_state, "LIVE")
+        state_color = green if complete else accent if not running else blue
+        label_width = max(34.0, len(state_text) * 6.0)
+        cr.set_source_rgb(*state_color)
+        cr.arc(
+            max(padding + 4.0, width - padding - label_width - 9.0),
+            title_y - 3.0,
+            3.0,
+            0,
+            math.tau,
+        )
+        cr.fill()
+        cr.set_font_size(9.0)
+        cr.move_to(width - padding - label_width, title_y)
+        cr.show_text(state_text)
+
+        values = list(self.gpu_frame_values) or [0.0]
+        count = len(values)
+        bar_gap = 4.0
+        top = title_y + 8.0
+        bottom = height - padding - 8.0
+        bar_h = max(18.0, bottom - top)
+        bar_w = max(
+            4.0,
+            (width - 2 * padding - bar_gap * (count - 1)) / count,
+        )
+        scan_index = -1
+        if running and count:
+            scan_index = int(time.monotonic() * 7.0) % count
+
+        for index, raw in enumerate(values):
+            x = padding + index * (bar_w + bar_gap)
+            value = max(0.05, min(1.0, raw))
+            cr.set_source_rgba(track[0], track[1], track[2], 0.65)
+            cr.rectangle(x, top, bar_w, bar_h)
+            cr.fill()
+
+            active_color = green if complete else accent if temp_c is not None and temp_c >= 85.0 else blue
+            active_h = bar_h if complete else max(3.0, bar_h * value)
+            cr.set_source_rgba(
+                active_color[0],
+                active_color[1],
+                active_color[2],
+                0.95 if index == scan_index else 0.72,
+            )
+            cr.rectangle(x, top + bar_h - active_h, bar_w, active_h)
+            cr.fill()
+
+        progress = max(0.0, min(1.0, self.gpu_activity_progress))
+        cr.set_source_rgb(*(green if complete else accent))
+        cr.rectangle(
+            padding,
+            height - 4.0,
+            max(0.0, (width - 2 * padding) * progress),
+            3.0,
+        )
+        cr.fill()
+
+    def reset_gpu_activity_field(self):
+        self.gpu_activity_progress = 0.0
+        self.gpu_visual_load = None
+        self.gpu_visual_temp = None
+        self.gpu_visual_clock_mhz = None
+        self.gpu_visual_fps = None
+        self.gpu_peak_temp = None
+        self.gpu_renderer = None
+        self.gpu_frame_values = [
+            random.uniform(0.18, 0.48)
+            for _ in range(24)
+        ]
+
+    def step_gpu_activity_field(self):
+        target_base = (
+            0.78
+            if self.gpu_visual_load is None
+            else max(0.12, min(1.0, self.gpu_visual_load / 100.0))
+        )
+        self.gpu_frame_values = self.gpu_frame_values[1:] + [
+            max(
+                0.05,
+                min(1.0, target_base + random.uniform(-0.16, 0.16)),
+            )
+        ]
+
+    def update_gpu_activity(
+        self,
+        state=None,
+        load=None,
+        temp_c=None,
+        clock_mhz=None,
+        fps=None,
+        progress=None,
+    ):
+        if not hasattr(self, "gpu_activity"):
+            return
+        is_gpu = bool(self.test_kind and self.test_kind.startswith("gpu"))
+        self.gpu_activity.set_visible(is_gpu)
+
+        if state is not None:
+            self.gpu_visual_state = state
+            if is_gpu and state == "running":
+                self.reset_gpu_activity_field()
+            elif state == "complete":
+                self.gpu_frame_values = [1.0] * 24
+                self.gpu_activity_progress = 1.0
+
+        if load is not None:
+            self.gpu_visual_load = load
+        if temp_c is not None:
+            self.gpu_visual_temp = temp_c
+            if self.gpu_peak_temp is None or temp_c > self.gpu_peak_temp:
+                self.gpu_peak_temp = temp_c
+        if clock_mhz is not None:
+            self.gpu_visual_clock_mhz = clock_mhz
+        if fps is not None:
+            self.gpu_visual_fps = fps
+        if progress is not None:
+            self.gpu_activity_progress = max(0.0, min(1.0, progress))
+
+        if is_gpu and self.gpu_visual_state == "running":
+            self.step_gpu_activity_field()
+        if is_gpu:
+            self.gpu_activity.queue_draw()
+
     def reset_ram_activity_field(self):
         total = 40 * 8
         self.ram_activity_values = [random.uniform(0.02, 0.16) for _ in range(total)]
@@ -6810,6 +7253,13 @@ except Exception:
         self.test_duration = 0.0
         self.test_started = 0.0
         self.test_cancelled = False
+        self.test_sequence_active = False
+        self.test_sequence_mode = None
+        self.test_sequence = []
+        self.test_sequence_index = 0
+        self.test_sequence_results = []
+        self.test_sequence_total_duration = 0.0
+        self.test_sequence_completed_duration = 0.0
 
         if hasattr(self, "benchmark_status"):
             self.set_benchmark_status_temp_class(None)
@@ -6821,6 +7271,7 @@ except Exception:
             self.set_benchmark_controls(False)
             self.update_cpu_activity("idle")
             self.update_ram_activity("idle")
+            self.update_gpu_activity("idle")
 
     def set_benchmark_status_temp_class(self, temp_c):
         for cls in ("status-yellow", "status-red"):
@@ -6863,7 +7314,10 @@ except Exception:
         # Temperatur, FAN und CPU-Takt stehen vollständig in der Telemetrie-Anzeige.
         # Die Kopfzeile bleibt absichtlich kurz, damit sie niemals die
         # Fensterbreite des Hardware Checks vergrößert.
-        text = f"CPU Benchmark läuft · {cores} Threads / Kerne"
+        text = (
+            f"{self.sequence_step_prefix()}"
+            f"CPU Benchmark läuft · {cores} Threads / Kerne"
+        )
 
         self.benchmark_status.set_text(text)
         self.set_benchmark_status_temp_class(temp_c)
@@ -6872,6 +7326,174 @@ except Exception:
             fan_rpm=fan_rpm,
             clock_mhz=clock_mhz,
             progress=self.cpu_activity_progress,
+        )
+
+    def update_gpu_benchmark_status(self):
+        try:
+            telemetry = read_gpu_telemetry()
+        except Exception as exc:
+            telemetry = {
+                "load": None,
+                "temp": None,
+                "clock_mhz": None,
+            }
+            log(f"GPU-Telemetrie nicht lesbar: {exc}")
+
+        prefix = ""
+        if self.test_sequence_active:
+            prefix = (
+                f"{self.test_sequence_mode} · "
+                f"{self.test_sequence_index + 1}/"
+                f"{len(self.test_sequence)} · "
+            )
+
+        renderer = self.gpu_renderer
+        if renderer:
+            renderer_text = renderer[:52]
+            text = f"{prefix}GPU Test läuft · {renderer_text}"
+        else:
+            text = f"{prefix}GPU Test läuft · OpenGL"
+
+        self.benchmark_status.set_text(text)
+        self.set_benchmark_status_temp_class(None)
+        self.update_gpu_activity(
+            load=telemetry.get("load"),
+            temp_c=telemetry.get("temp"),
+            clock_mhz=telemetry.get("clock_mhz"),
+            progress=self.gpu_activity_progress,
+        )
+
+    def apply_gpu_output_line(self, line):
+        if not self.test_kind or not self.test_kind.startswith("gpu"):
+            return False
+
+        renderer = re.search(r"GL_RENDERER\s*:\s*(.+)$", line, re.I)
+        if renderer:
+            self.gpu_renderer = renderer.group(1).strip()
+
+        fps_match = re.search(r"FPS\s*:\s*([0-9]+(?:\.[0-9]+)?)", line, re.I)
+        if fps_match:
+            try:
+                self.gpu_visual_fps = float(fps_match.group(1))
+            except Exception:
+                pass
+
+        if hasattr(self, "gpu_activity"):
+            self.gpu_activity.queue_draw()
+        return False
+
+    def collect_test_output(self, proc, kind):
+        try:
+            if proc.stdout is None:
+                return
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip("\r\n")
+                if not line:
+                    continue
+                self.test_output_lines.append(line)
+                if kind.startswith("gpu"):
+                    GLib.idle_add(self.apply_gpu_output_line, line)
+        except Exception as exc:
+            log(f"Benchmark-Ausgabe konnte nicht gelesen werden: {exc}")
+
+    def sequence_step_prefix(self):
+        if not self.test_sequence_active:
+            return ""
+        return (
+            f"{self.test_sequence_mode} · "
+            f"{self.test_sequence_index + 1}/"
+            f"{len(self.test_sequence)} · "
+        )
+
+    def start_test_sequence(self, kind):
+        if self.test_proc is not None and self.test_proc.poll() is None:
+            return
+
+        extended = kind == "all-long"
+        self.test_sequence_active = True
+        self.test_sequence_mode = "ALLE ERW." if extended else "ALLE"
+        self.test_sequence = (
+            [
+                ("cpu-long", 600.0),
+                ("ram-long", 600.0),
+                ("gpu-long", 600.0),
+            ]
+            if extended
+            else [
+                ("cpu-short", 10.0),
+                ("ram-short", 30.0),
+                ("gpu-short", 20.0),
+            ]
+        )
+        self.test_sequence_index = 0
+        self.test_sequence_results = []
+        self.test_sequence_total_duration = sum(
+            duration for _step_kind, duration in self.test_sequence
+        )
+        self.test_sequence_completed_duration = 0.0
+        self.test_cancelled = False
+        self.set_benchmark_controls(True)
+        self.start_next_sequence_test()
+
+    def start_next_sequence_test(self):
+        if not self.test_sequence_active:
+            return False
+        if self.test_sequence_index >= len(self.test_sequence):
+            self.finish_test_sequence()
+            return False
+
+        kind, duration = self.test_sequence[self.test_sequence_index]
+        self.start_single_test(kind, duration)
+        return False
+
+    def finish_sequence_step(self, outcome):
+        if not self.test_sequence_active:
+            return
+
+        self.test_sequence_results.append(outcome)
+        self.test_sequence_completed_duration += self.test_duration
+        self.test_sequence_index += 1
+
+        if self.test_sequence_index < len(self.test_sequence):
+            GLib.timeout_add(350, self.start_next_sequence_test)
+        else:
+            self.finish_test_sequence()
+
+    def finish_test_sequence(self):
+        results = list(self.test_sequence_results)
+        sequence_name = self.test_sequence_mode or "ALLE"
+        all_ok = bool(results) and all(item.get("ok") for item in results)
+
+        parts = []
+        for item in results:
+            mark = "✓" if item.get("ok") else "✕"
+            summary = item.get("summary") or ""
+            parts.append(
+                f"{item.get('name', 'TEST')} {mark}"
+                + (f" {summary}" if summary else "")
+            )
+
+        self.test_sequence_active = False
+        self.test_sequence_mode = None
+        self.test_sequence = []
+        self.test_sequence_index = 0
+        self.test_sequence_total_duration = 0.0
+        self.test_sequence_completed_duration = 0.0
+        self.set_benchmark_controls(False)
+        self.benchmark_progress.set_fraction(1.0)
+        self.benchmark_status.set_text(
+            f"{sequence_name} abgeschlossen"
+            if all_ok
+            else f"{sequence_name} mit Auffälligkeiten abgeschlossen"
+        )
+        self.benchmark_result.set_text(" · ".join(parts))
+        self.set_benchmark_result_class("green" if all_ok else "red")
+        log(
+            f"{sequence_name} fertig: "
+            + " | ".join(
+                f"{item.get('name')}={'OK' if item.get('ok') else 'FEHLER'}"
+                for item in results
+            )
         )
 
     def set_benchmark_controls(self, running):
@@ -6888,6 +7510,17 @@ except Exception:
         self.stack.set_visible_child_name("benchmarks")
 
     def start_test(self, button, kind, duration):
+        if kind.startswith("all-"):
+            self.start_test_sequence(kind)
+            return
+
+        self.test_sequence_active = False
+        self.test_sequence_mode = None
+        self.test_sequence = []
+        self.test_sequence_results = []
+        self.start_single_test(kind, duration)
+
+    def start_single_test(self, kind, duration):
         if self.test_proc is not None and self.test_proc.poll() is None:
             return
 
@@ -6897,15 +7530,28 @@ except Exception:
         self.test_duration = float(duration)
         self.test_started = time.monotonic()
         self.test_cancelled = False
-        self.benchmark_progress.set_fraction(0.0)
-        self.benchmark_time.set_text(
-            f"00:00 / {format_test_clock(duration)}"
-        )
+        self.test_output_lines = []
+        if self.test_sequence_active:
+            base_fraction = (
+                self.test_sequence_completed_duration
+                / max(0.1, self.test_sequence_total_duration)
+            )
+            self.benchmark_progress.set_fraction(base_fraction)
+            self.benchmark_time.set_text(
+                f"{format_test_clock(self.test_sequence_completed_duration)} / "
+                f"{format_test_clock(self.test_sequence_total_duration)}"
+            )
+        else:
+            self.benchmark_progress.set_fraction(0.0)
+            self.benchmark_time.set_text(
+                f"00:00 / {format_test_clock(duration)}"
+            )
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class(None)
 
         if kind.startswith("cpu"):
             self.update_ram_activity("idle")
+            self.update_gpu_activity("idle")
             self.update_cpu_activity("running")
             cores = os.cpu_count() or 1
 
@@ -6921,19 +7567,19 @@ except Exception:
                 str(duration),
                 str(cores),
             ]
-        else:
+        elif kind.startswith("ram"):
             self.update_cpu_activity("idle")
+            self.update_gpu_activity("idle")
             self.update_ram_activity("running")
             self.set_benchmark_status_temp_class(None)
             mode = "short" if kind == "ram-short" else "long"
             if mode == "short":
-                self.benchmark_status.set_text(
-                    "RAM Test läuft · mehrere Bitmuster"
-                )
+                status = "RAM Test läuft · mehrere Bitmuster"
             else:
-                self.benchmark_status.set_text(
-                    "RAM Test (Erweitert) läuft · maximale RAM-Last"
-                )
+                status = "RAM Test (Erweitert) läuft · maximale RAM-Last"
+            self.benchmark_status.set_text(
+                self.sequence_step_prefix() + status
+            )
             args = [
                 sys.executable,
                 "-c",
@@ -6941,6 +7587,29 @@ except Exception:
                 str(duration),
                 mode,
             ]
+        else:
+            self.update_cpu_activity("idle")
+            self.update_ram_activity("idle")
+            self.update_gpu_activity("running")
+            self.set_benchmark_status_temp_class(None)
+            mode = "short" if kind == "gpu-short" else "long"
+            args = build_gpu_benchmark_args(duration, mode)
+            if args is None:
+                message = "glmark2 fehlt - GPU-Test nicht verfügbar"
+                self.benchmark_status.set_text("GPU Test nicht verfügbar")
+                self.benchmark_result.set_text(message)
+                self.set_benchmark_result_class("red")
+                self.update_gpu_activity("error")
+                self.set_benchmark_controls(False)
+                outcome = {
+                    "ok": False,
+                    "name": "GPU",
+                    "summary": "glmark2 fehlt",
+                }
+                if self.test_sequence_active:
+                    self.finish_sequence_step(outcome)
+                return
+            self.update_gpu_benchmark_status()
 
         log(
             f"Test gestartet: {kind}, Dauer={duration:.0f}s"
@@ -6951,6 +7620,7 @@ except Exception:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
                 start_new_session=True,
             )
         except Exception as exc:
@@ -6960,9 +7630,29 @@ except Exception:
             self.set_benchmark_result_class("red")
             if kind.startswith("cpu"):
                 self.update_cpu_activity("error")
-            else:
+            elif kind.startswith("ram"):
                 self.update_ram_activity("error")
+            else:
+                self.update_gpu_activity("error")
+            outcome = {
+                "ok": False,
+                "name": (
+                    "CPU" if kind.startswith("cpu")
+                    else "RAM" if kind.startswith("ram")
+                    else "GPU"
+                ),
+                "summary": "Startfehler",
+            }
+            if self.test_sequence_active:
+                self.finish_sequence_step(outcome)
             return
+
+        self.test_reader_thread = threading.Thread(
+            target=self.collect_test_output,
+            args=(self.test_proc, kind),
+            daemon=True,
+        )
+        self.test_reader_thread.start()
         self.set_benchmark_controls(True)
         GLib.timeout_add(200, self.poll_test)
 
@@ -6976,39 +7666,79 @@ except Exception:
         duration = max(0.1, self.test_duration)
         if proc.poll() is None:
             fraction = min(0.99, elapsed / duration)
-            self.benchmark_progress.set_fraction(fraction)
+
+            if self.test_sequence_active:
+                overall_elapsed = (
+                    self.test_sequence_completed_duration
+                    + min(elapsed, duration)
+                )
+                overall_fraction = min(
+                    0.99,
+                    overall_elapsed
+                    / max(0.1, self.test_sequence_total_duration),
+                )
+                self.benchmark_progress.set_fraction(overall_fraction)
+                self.benchmark_time.set_text(
+                    f"{format_test_clock(overall_elapsed)} / "
+                    f"{format_test_clock(self.test_sequence_total_duration)}"
+                )
+            else:
+                self.benchmark_progress.set_fraction(fraction)
+                self.benchmark_time.set_text(
+                    f"{format_test_clock(elapsed)} / "
+                    f"{format_test_clock(duration)}"
+                )
+
             if self.test_kind and self.test_kind.startswith("ram"):
                 self.ram_activity_progress = fraction
             elif self.test_kind and self.test_kind.startswith("cpu"):
                 self.cpu_activity_progress = fraction
-            self.benchmark_time.set_text(
-                f"{format_test_clock(elapsed)} / "
-                f"{format_test_clock(duration)}"
-            )
+            elif self.test_kind and self.test_kind.startswith("gpu"):
+                self.gpu_activity_progress = fraction
 
             self.update_ram_activity()
 
             if self.test_kind and self.test_kind.startswith("cpu"):
                 self.update_cpu_benchmark_status()
+            elif self.test_kind and self.test_kind.startswith("gpu"):
+                self.update_gpu_benchmark_status()
 
             return True
-        try:
-            output = proc.communicate(timeout=1)[0] or ""
-        except Exception:
-            output = ""
+
+        if self.test_reader_thread is not None:
+            self.test_reader_thread.join(timeout=1.0)
+        output = "\n".join(self.test_output_lines)
 
         self.test_proc = None
-        self.benchmark_progress.set_fraction(1.0)
-        self.benchmark_time.set_text(
-            f"{format_test_clock(elapsed)} / "
-            f"{format_test_clock(duration)}"
-        )
-        self.set_benchmark_controls(False)
+        if self.test_sequence_active:
+            overall_elapsed = min(
+                self.test_sequence_total_duration,
+                self.test_sequence_completed_duration + duration,
+            )
+            self.benchmark_progress.set_fraction(
+                overall_elapsed
+                / max(0.1, self.test_sequence_total_duration)
+            )
+            self.benchmark_time.set_text(
+                f"{format_test_clock(overall_elapsed)} / "
+                f"{format_test_clock(self.test_sequence_total_duration)}"
+            )
+        else:
+            self.benchmark_progress.set_fraction(1.0)
+            self.benchmark_time.set_text(
+                f"{format_test_clock(elapsed)} / "
+                f"{format_test_clock(duration)}"
+            )
+            self.set_benchmark_controls(False)
+
         self.update_ram_activity()
 
         if self.test_cancelled:
             return False
-        self.finish_test_result(output, proc.returncode)
+
+        outcome = self.finish_test_result(output, proc.returncode)
+        if self.test_sequence_active:
+            self.finish_sequence_step(outcome)
         return False
 
     def finish_test_result(self, output, returncode):
@@ -7026,7 +7756,10 @@ except Exception:
             (line for line in reversed(lines) if line.startswith("ERROR ")),
             None,
         )
-        if returncode != 0 or not result:
+        is_gpu = bool(
+            self.test_kind and self.test_kind.startswith("gpu")
+        )
+        if returncode != 0 or (not result and not is_gpu):
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("Test fehlgeschlagen")
             self.benchmark_result.set_text(
@@ -7037,14 +7770,25 @@ except Exception:
             self.set_benchmark_result_class("red")
             if self.test_kind and self.test_kind.startswith("cpu"):
                 self.update_cpu_activity("error")
-            else:
+            elif self.test_kind and self.test_kind.startswith("ram"):
                 self.update_ram_activity("error")
+            else:
+                self.update_gpu_activity("error")
             log(
                 f"Test fehlgeschlagen: {self.test_kind}; "
                 f"returncode={returncode}; output={output[-1000:]}"
             )
-            return
-        parts = result.split()
+            name = (
+                "CPU" if self.test_kind and self.test_kind.startswith("cpu")
+                else "RAM" if self.test_kind and self.test_kind.startswith("ram")
+                else "GPU"
+            )
+            return {
+                "ok": False,
+                "name": name,
+                "summary": error[6:] if error else "fehlgeschlagen",
+            }
+        parts = result.split() if result else []
 
         if len(parts) >= 5 and parts[1] == "CPU":
             total = int(parts[2])
@@ -7066,7 +7810,11 @@ except Exception:
                 f"CPU Benchmark fertig: "
                 f"{points} Punkte, {workers} Threads, {elapsed:.2f}s"
             )
-            return
+            return {
+                "ok": True,
+                "name": "CPU",
+                "summary": f"{points_text} P",
+            }
 
         if len(parts) >= 7 and parts[1] == "RAM":
             errors = int(parts[2])
@@ -7103,11 +7851,114 @@ except Exception:
                 f"target={target}, checked={checked}, "
                 f"elapsed={elapsed:.2f}s, passes={passes}"
             )
-            return
+            return {
+                "ok": errors == 0,
+                "name": "RAM",
+                "summary": (
+                    "0 Fehler"
+                    if errors == 0
+                    else f"{errors} Fehler"
+                ),
+            }
+
+        if self.test_kind and self.test_kind.startswith("gpu"):
+            renderer_match = re.search(
+                r"GL_RENDERER\s*:\s*(.+)$",
+                output,
+                re.I | re.M,
+            )
+            renderer = (
+                renderer_match.group(1).strip()
+                if renderer_match
+                else self.gpu_renderer
+            )
+            score_matches = re.findall(
+                r"glmark2 Score\s*:\s*([0-9]+)",
+                output,
+                re.I,
+            )
+            fps_matches = re.findall(
+                r"FPS\s*:\s*([0-9]+(?:\.[0-9]+)?)",
+                output,
+                re.I,
+            )
+            fps_values = [float(value) for value in fps_matches]
+            avg_fps = (
+                sum(fps_values) / len(fps_values)
+                if fps_values
+                else self.gpu_visual_fps
+            )
+            score = (
+                int(score_matches[-1])
+                if score_matches
+                else int(avg_fps or 0)
+            )
+
+            renderer_lower = (renderer or "").lower()
+            software = any(
+                token in renderer_lower
+                for token in (
+                    "llvmpipe",
+                    "softpipe",
+                    "swrast",
+                    "software rasterizer",
+                )
+            )
+
+            if renderer:
+                self.gpu_renderer = renderer
+            if avg_fps is not None:
+                self.gpu_visual_fps = avg_fps
+
+            temp_text = (
+                ""
+                if self.gpu_peak_temp is None
+                else f" · max. {self.gpu_peak_temp:.0f}°C"
+            )
+            renderer_text = renderer or "Renderer unbekannt"
+
+            if software:
+                self.benchmark_status.set_text(
+                    "GPU TEST: SOFTWARE-RENDERING ERKANNT"
+                )
+                self.benchmark_result.set_text(
+                    f"{renderer_text} · {avg_fps or 0:.0f} FPS"
+                )
+                self.set_benchmark_result_class("red")
+                self.update_gpu_activity("error")
+                ok = False
+                summary = "Software-Rendering"
+            else:
+                self.benchmark_status.set_text("GPU Test abgeschlossen")
+                self.benchmark_result.set_text(
+                    f"{score:,} Punkte · "
+                    f"{avg_fps or 0:.0f} FPS · "
+                    f"{renderer_text}{temp_text}"
+                ).replace(",", ".")
+                self.set_benchmark_result_class("green")
+                self.update_gpu_activity("complete")
+                ok = True
+                summary = f"{score:,} P".replace(",", ".")
+
+            log(
+                f"GPU Test fertig: score={score}, "
+                f"avg_fps={avg_fps}, renderer={renderer}, "
+                f"software={software}, peak_temp={self.gpu_peak_temp}"
+            )
+            return {
+                "ok": ok,
+                "name": "GPU",
+                "summary": summary,
+            }
 
         self.benchmark_status.set_text("Unbekanntes Testergebnis")
         self.benchmark_result.set_text(result)
         self.set_benchmark_result_class("red")
+        return {
+            "ok": False,
+            "name": "TEST",
+            "summary": "unbekanntes Ergebnis",
+        }
 
     def stop_test_process(self):
         proc = self.test_proc
@@ -7134,11 +7985,18 @@ except Exception:
                         pass
 
         self.test_proc = None
+        if self.test_reader_thread is not None:
+            self.test_reader_thread.join(timeout=0.5)
+        self.test_reader_thread = None
 
     def cancel_test(self, *_):
         if self.test_proc is None:
             return
         self.test_cancelled = True
+        self.test_sequence_active = False
+        self.test_sequence_mode = None
+        self.test_sequence = []
+        self.test_sequence_results = []
         self.stop_test_process()
         self.set_benchmark_controls(False)
 
@@ -7149,8 +8007,10 @@ except Exception:
         self.set_benchmark_result_class("orange")
         if self.test_kind and self.test_kind.startswith("cpu"):
             self.update_cpu_activity("cancelled")
-        else:
+        elif self.test_kind and self.test_kind.startswith("ram"):
             self.update_ram_activity("cancelled")
+        else:
+            self.update_gpu_activity("cancelled")
 
         log(f"Test abgebrochen: {self.test_kind}")
 
