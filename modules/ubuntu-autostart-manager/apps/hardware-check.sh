@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.92")
+        self.window.set_title("Hardware Check v4.5.93")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.92")
+        title_label = Gtk.Label(label="Hardware Check v4.5.93")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6210,7 +6210,7 @@ except Exception:
         chooser.set_hexpand(True)
 
         specs = [
-            ("Benchmark (B)", "cpu-short", 10.0),
+            ("BENCHMARK (B)", "cpu-short", 10.0),
             ("BENCHMARK (ERWEITERT)", "cpu-long", 600.0),
             ("RAM TEST (R)", "ram-short", 30.0),
             ("RAM TEST (ERWEITERT)", "ram-long", 600.0),
@@ -6380,7 +6380,7 @@ except Exception:
         return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
 
     def draw_cpu_activity(self, area, cr, width, height):
-        """Kompakte CPU-Anzeige: Kennwerte oben, aktive Threads darunter."""
+        """Technische CPU-Telemetrie mit responsiver Kernmatrix."""
         background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
         panel = (0x23 / 255.0, 0x23 / 255.0, 0x29 / 255.0)
         track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
@@ -6393,16 +6393,43 @@ except Exception:
         cr.rectangle(0, 0, width, height)
         cr.fill()
 
+        # Dezentes technisches Raster. Es skaliert mit der Zeichenfläche und
+        # bleibt bewusst im Hintergrund, damit die Werte gut lesbar bleiben.
+        cr.set_line_width(1.0)
+        cr.set_source_rgba(track[0], track[1], track[2], 0.28)
+        grid_step = 24.0
+        x = grid_step
+        while x < width:
+            cr.move_to(x, 0)
+            cr.line_to(x, height)
+            x += grid_step
+        y = grid_step
+        while y < height:
+            cr.move_to(0, y)
+            cr.line_to(width, y)
+            y += grid_step
+        cr.stroke()
+
         progress = max(0.0, min(1.0, self.cpu_activity_progress))
         cores = os.cpu_count() or 1
         temp_c = self.cpu_visual_temp
         fan_rpm = self.cpu_visual_fan_rpm
         accent = self._cpu_visual_color(temp_c)
+        running = self.cpu_visual_state == "running"
+        complete = self.cpu_visual_state == "complete"
 
         padding = 8.0
         gap = 6.0
-        metric_h = min(52.0, max(44.0, height * 0.34))
-        metric_w = max(80.0, (width - 2 * padding - 3 * gap) / 4.0)
+
+        # Die vier Kennwerte wechseln bei schmaler Fläche automatisch auf 2x2.
+        metric_columns = 4 if width >= 650 else 2
+        metric_rows = int(math.ceil(4 / metric_columns))
+        metric_h = 46.0
+        metric_w = max(
+            72.0,
+            (width - 2 * padding - gap * (metric_columns - 1))
+            / metric_columns,
+        )
         metrics = (
             ("THREADS", str(cores)),
             ("TEMP", "-- °C" if temp_c is None else f"{temp_c:.0f} °C"),
@@ -6411,84 +6438,213 @@ except Exception:
         )
 
         for index, (label, value) in enumerate(metrics):
-            x = padding + index * (metric_w + gap)
+            row = index // metric_columns
+            col = index % metric_columns
+            x = padding + col * (metric_w + gap)
+            y = padding + row * (metric_h + gap)
+
             cr.set_source_rgb(*panel)
-            cr.rectangle(x, padding, metric_w, metric_h)
+            cr.rectangle(x, y, metric_w, metric_h)
             cr.fill()
 
-            if self.cpu_visual_state == "complete":
+            if complete:
                 color = green
             elif index == 1:
                 color = accent
             else:
                 color = blue
 
+            # Kleine obere Telemetrie-Markierung und untere Statuskante.
+            cr.set_source_rgba(color[0], color[1], color[2], 0.65)
+            cr.rectangle(x + 8.0, y + 7.0, 18.0, 2.0)
+            cr.fill()
             cr.set_source_rgb(*color)
-            cr.rectangle(x, padding + metric_h - 4.0, metric_w, 4.0)
+            cr.rectangle(x, y + metric_h - 3.0, metric_w, 3.0)
             cr.fill()
 
             cr.set_source_rgb(*muted)
-            cr.set_font_size(10.0)
-            cr.move_to(x + 9.0, padding + 16.0)
+            cr.set_font_size(9.0)
+            cr.move_to(x + 8.0, y + 18.0)
             cr.show_text(label)
 
-            cr.set_source_rgb(*text if index != 1 else accent)
-            cr.set_font_size(17.0)
-            cr.move_to(x + 9.0, padding + 38.0)
+            cr.set_source_rgb(*(color if index == 1 or complete else text))
+            cr.set_font_size(16.0)
+            cr.move_to(x + 8.0, y + 37.0)
             cr.show_text(value)
 
-        values = list(self.cpu_thread_values)
-        if not values:
-            values = [0.0]
-        shown = min(24, len(values))
-        rows = 1 if shown <= 16 else 2
-        columns = int(math.ceil(shown / rows))
-        activity_top = padding + metric_h + 13.0
-        available_h = max(26.0, height - activity_top - padding)
-        row_h = available_h / rows
-        bar_gap = 5.0
-        bar_w = max(
-            5.0,
-            (width - 2 * padding - bar_gap * max(0, columns - 1)) / max(1, columns),
+        metric_bottom = (
+            padding
+            + metric_rows * metric_h
+            + max(0, metric_rows - 1) * gap
         )
+
+        values = list(self.cpu_thread_values) or [0.0]
+        shown = min(24, len(values))
+
+        # Kopfzeile der Lastmatrix mit wanderndem LIVE-Scan.
+        matrix_title_y = metric_bottom + 17.0
+        cr.set_source_rgb(*muted)
+        cr.set_font_size(9.0)
+        cr.move_to(padding, matrix_title_y)
+        cr.show_text("CORE LOAD MATRIX")
+
+        state_text = {
+            "complete": "COMPLETE",
+            "error": "ERROR",
+            "cancelled": "STOPPED",
+        }.get(self.cpu_visual_state, "LIVE")
+        state_color = green if complete else accent if not running else blue
+        label_width = max(34.0, len(state_text) * 6.0)
+        cr.set_source_rgb(*state_color)
+        cr.arc(
+            max(padding + 4.0, width - padding - label_width - 9.0),
+            matrix_title_y - 3.0,
+            3.0,
+            0,
+            math.tau,
+        )
+        cr.fill()
+        cr.set_font_size(9.0)
+        cr.move_to(width - padding - label_width, matrix_title_y)
+        cr.show_text(state_text)
+
+        activity_top = matrix_title_y + 8.0
+        bottom_rail_h = 12.0
+        available_h = max(
+            34.0,
+            height - activity_top - padding - bottom_rail_h,
+        )
+
+        min_bar_w = 22.0
+        columns = max(
+            4,
+            min(
+                shown,
+                int(
+                    max(1.0, width - 2 * padding + gap)
+                    / (min_bar_w + gap)
+                ),
+            ),
+        )
+        rows = int(math.ceil(shown / max(1, columns)))
+        row_h = available_h / max(1, rows)
+        bar_gap = gap
+        bar_w = max(
+            8.0,
+            (width - 2 * padding - bar_gap * max(0, columns - 1))
+            / max(1, columns),
+        )
+
+        scan_index = -1
+        if running and shown > 0:
+            scan_index = int(time.monotonic() * 5.0) % shown
 
         for index in range(shown):
             row = index // columns
             col = index % columns
             x = padding + col * (bar_w + bar_gap)
             y = activity_top + row * row_h
-            bar_h = max(12.0, row_h - 17.0)
+            bar_h = max(18.0, row_h - 15.0)
             value = max(0.06, min(1.0, values[index]))
 
-            cr.set_source_rgb(*track)
+            # Äußerer Slot-Rahmen.
+            cr.set_source_rgb(*panel)
             cr.rectangle(x, y, bar_w, bar_h)
             cr.fill()
+            cr.set_line_width(1.0)
+            if index == scan_index:
+                scan_color = accent if temp_c is not None else blue
+                cr.set_source_rgba(
+                    scan_color[0],
+                    scan_color[1],
+                    scan_color[2],
+                    0.85,
+                )
+            else:
+                cr.set_source_rgba(track[0], track[1], track[2], 0.90)
+            cr.rectangle(x + 0.5, y + 0.5, max(1.0, bar_w - 1.0), max(1.0, bar_h - 1.0))
+            cr.stroke()
 
-            if self.cpu_visual_state == "complete":
+            if complete:
                 active_color = green
                 value = 1.0
-            elif self.cpu_visual_state == "error":
-                active_color = accent
-            elif self.cpu_visual_state == "cancelled":
+            elif self.cpu_visual_state in ("error", "cancelled"):
                 active_color = accent
             else:
                 active_color = blue
 
-            active_h = max(3.0, bar_h * value)
-            cr.set_source_rgb(*active_color)
-            cr.rectangle(x, y + bar_h - active_h, bar_w, active_h)
-            cr.fill()
+            # Segmentierte Kernlast statt eines simplen Vollbalkens.
+            segment_gap = 2.0
+            segment_count = max(4, min(9, int(bar_h / 11.0)))
+            segment_h = max(
+                3.0,
+                (bar_h - 8.0 - segment_gap * (segment_count - 1))
+                / segment_count,
+            )
+            active_segments = int(math.ceil(value * segment_count))
+            for segment in range(segment_count):
+                seg_y = (
+                    y
+                    + bar_h
+                    - 4.0
+                    - (segment + 1) * segment_h
+                    - segment * segment_gap
+                )
+                if segment < active_segments:
+                    if (
+                        not complete
+                        and temp_c is not None
+                        and temp_c >= 88.0
+                        and segment >= segment_count - 2
+                    ):
+                        seg_color = accent
+                    else:
+                        seg_color = active_color
+                    alpha = 1.0 if segment < active_segments - 1 else 0.78
+                    cr.set_source_rgba(
+                        seg_color[0],
+                        seg_color[1],
+                        seg_color[2],
+                        alpha,
+                    )
+                else:
+                    cr.set_source_rgba(track[0], track[1], track[2], 0.55)
+                cr.rectangle(
+                    x + 4.0,
+                    seg_y,
+                    max(2.0, bar_w - 8.0),
+                    segment_h,
+                )
+                cr.fill()
 
-            if bar_w >= 18.0:
+            if bar_w >= 18.0 and row_h >= 36.0:
                 cr.set_source_rgb(*muted)
                 cr.set_font_size(8.0)
-                cr.move_to(x + 2.0, y + bar_h + 11.0)
-                cr.show_text(str(index + 1))
+                cr.move_to(x + 2.0, y + bar_h + 10.0)
+                cr.show_text(f"{index + 1:02d}")
 
-        # Temperatur bleibt als klare Farbinformation im gesamten CPU-Feld sichtbar.
-        cr.set_source_rgb(*accent)
-        cr.rectangle(padding, height - 3.0, max(0.0, (width - 2 * padding) * progress), 3.0)
-        cr.fill()
+        # Untere Telemetrie-Schiene: segmentierter Fortschritt und Temperaturfarbe.
+        rail_y = height - padding - 5.0
+        rail_segments = max(12, min(48, int(width / 22.0)))
+        rail_gap = 2.0
+        rail_w = (
+            width - 2 * padding - rail_gap * (rail_segments - 1)
+        ) / rail_segments
+        filled = int(math.ceil(progress * rail_segments))
+        rail_color = green if complete else accent
+        for segment in range(rail_segments):
+            x = padding + segment * (rail_w + rail_gap)
+            if segment < filled:
+                cr.set_source_rgba(
+                    rail_color[0],
+                    rail_color[1],
+                    rail_color[2],
+                    0.95,
+                )
+            else:
+                cr.set_source_rgba(track[0], track[1], track[2], 0.55)
+            cr.rectangle(x, rail_y, max(1.0, rail_w), 3.0)
+            cr.fill()
 
     def reset_cpu_activity_field(self):
         count = max(1, min(24, os.cpu_count() or 1))
