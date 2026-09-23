@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.95")
+        self.window.set_title("Hardware Check v4.5.96")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.95")
+        title_label = Gtk.Label(label="Hardware Check v4.5.96")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6252,6 +6252,7 @@ except Exception:
         self.cpu_activity_progress = 0.0
         self.cpu_visual_temp = None
         self.cpu_visual_fan_rpm = None
+        self.cpu_visual_clock_mhz = None
         self.cpu_thread_values = [0.0] * max(1, min(24, os.cpu_count() or 1))
         body.append(self.cpu_activity)
 
@@ -6416,6 +6417,7 @@ except Exception:
         cores = os.cpu_count() or 1
         temp_c = self.cpu_visual_temp
         fan_rpm = self.cpu_visual_fan_rpm
+        clock_mhz = self.cpu_visual_clock_mhz
         accent = self._cpu_visual_color(temp_c)
         running = self.cpu_visual_state == "running"
         complete = self.cpu_visual_state == "complete"
@@ -6432,11 +6434,18 @@ except Exception:
             (width - 2 * padding - gap * (metric_columns - 1))
             / metric_columns,
         )
+        if clock_mhz is None:
+            clock_text = "-- GHz"
+        elif clock_mhz >= 1000.0:
+            clock_text = f"{clock_mhz / 1000.0:.2f} GHz"
+        else:
+            clock_text = f"{clock_mhz:.0f} MHz"
+
         metrics = (
             ("THREADS", str(cores)),
             ("TEMP", "-- °C" if temp_c is None else f"{temp_c:.0f} °C"),
             ("FAN", "-- RPM" if fan_rpm is None else f"{int(round(fan_rpm))} RPM"),
-            ("FORTSCHRITT", f"{progress * 100:.0f} %"),
+            ("CPU TAKT", clock_text),
         )
 
         for index, (label, value) in enumerate(metrics):
@@ -6657,6 +6666,7 @@ except Exception:
         self.cpu_activity_progress = 0.0
         self.cpu_visual_temp = None
         self.cpu_visual_fan_rpm = None
+        self.cpu_visual_clock_mhz = None
 
     def step_cpu_activity_field(self):
         if not self.cpu_thread_values:
@@ -6671,6 +6681,7 @@ except Exception:
         state=None,
         temp_c=None,
         fan_rpm=None,
+        clock_mhz=None,
         progress=None,
     ):
         if not hasattr(self, "cpu_activity"):
@@ -6692,6 +6703,8 @@ except Exception:
             self.cpu_visual_temp = temp_c
         if fan_rpm is not None:
             self.cpu_visual_fan_rpm = fan_rpm
+        if clock_mhz is not None:
+            self.cpu_visual_clock_mhz = clock_mhz
         if progress is not None:
             self.cpu_activity_progress = max(0.0, min(1.0, progress))
 
@@ -6841,7 +6854,13 @@ except Exception:
         except Exception as exc:
             log(f"FAN-Drehzahl nicht lesbar: {exc}")
 
-        # Temperatur und FAN stehen vollständig in der Telemetrie-Anzeige.
+        try:
+            clock_mhz = read_cpu_average_frequency_mhz()
+        except Exception as exc:
+            clock_mhz = None
+            log(f"CPU-Takt nicht lesbar: {exc}")
+
+        # Temperatur, FAN und CPU-Takt stehen vollständig in der Telemetrie-Anzeige.
         # Die Kopfzeile bleibt absichtlich kurz, damit sie niemals die
         # Fensterbreite des Hardware Checks vergrößert.
         text = f"CPU Benchmark läuft · {cores} Threads / Kerne"
@@ -6851,6 +6870,7 @@ except Exception:
         self.update_cpu_activity(
             temp_c=temp_c,
             fan_rpm=fan_rpm,
+            clock_mhz=clock_mhz,
             progress=self.cpu_activity_progress,
         )
 
