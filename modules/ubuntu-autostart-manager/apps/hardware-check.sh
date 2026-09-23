@@ -156,21 +156,22 @@ button.benchmark-open {
 }
 
 button.benchmark-choice {
-    min-height: 34px;
+    min-height: 28px;
+    padding: 1px 6px;
     border-radius: 8px;
     font-size: 12px;
     font-weight: 800;
 }
 button.benchmark-choice.benchmark-passed,
 button.benchmark-choice.benchmark-passed:disabled {
-    background: #18351d;
+    background: #232329;
     color: #61d36b;
     border: 1px solid #61d36b;
     opacity: 1;
 }
 button.benchmark-choice.benchmark-failed,
 button.benchmark-choice.benchmark-failed:disabled {
-    background: #3a1b1b;
+    background: #232329;
     color: #ff4c4c;
     border: 1px solid #ff4c4c;
     opacity: 1;
@@ -182,7 +183,7 @@ button.benchmark-choice.benchmark-failed:disabled {
 }
 
 .benchmark-result {
-    font-size: 17px;
+    font-size: 13px;
     font-weight: 800;
 }
 .benchmark-result.status-green,
@@ -2882,14 +2883,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.102")
+        self.window.set_title("Hardware Check v4.5.103")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.102")
+        title_label = Gtk.Label(label="Hardware Check v4.5.103")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -8432,7 +8433,6 @@ except Exception:
                 self.benchmark_status.add_css_class("status-green")
                 self.benchmark_result.set_text(
                     f"{score:,} P · "
-                    f"{avg_fps or 0:.0f} FPS · "
                     f"{renderer_text}{load_text}{temp_text}"
                 ).replace(",", ".")
                 self.set_benchmark_result_class("green")
