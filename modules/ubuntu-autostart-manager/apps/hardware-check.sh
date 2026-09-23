@@ -1508,12 +1508,13 @@ def build_gpu_benchmark_args(duration, mode):
             "jellyfish",
         )
 
-    overhead_budget = 4.0 if mode == "short" else 12.0
-    usable_duration = max(
-        len(scenes) * 2.0,
-        float(duration) - overhead_budget,
+    # Die angegebene Testdauer ist die echte Renderdauer.
+    # Setup-/Abschlusszeit wird nicht mehr von den 20 bzw. 600 Sekunden
+    # abgezogen; der separate Watchdog schützt weiterhin vor Hängern.
+    scene_duration = max(
+        2.0,
+        float(duration) / len(scenes),
     )
-    scene_duration = usable_duration / len(scenes)
     args = [
         executable,
         "--off-screen",
@@ -2897,14 +2898,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.104")
+        self.window.set_title("Hardware Check v4.5.105")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.104")
+        title_label = Gtk.Label(label="Hardware Check v4.5.105")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
