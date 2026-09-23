@@ -156,7 +156,7 @@ button.benchmark-open {
 }
 
 button.benchmark-choice {
-    min-height: 44px;
+    min-height: 34px;
     border-radius: 8px;
     font-size: 12px;
     font-weight: 800;
@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.91")
+        self.window.set_title("Hardware Check v4.5.92")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.91")
+        title_label = Gtk.Label(label="Hardware Check v4.5.92")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6199,28 +6199,33 @@ except Exception:
         body.set_margin_end(10)
         body.set_margin_bottom(8)
         body.set_vexpand(True)
-        grid = Gtk.Grid()
-        grid.set_row_spacing(6)
-        grid.set_column_spacing(6)
-        grid.set_column_homogeneous(True)
+        chooser = Gtk.FlowBox()
+        chooser.set_orientation(Gtk.Orientation.HORIZONTAL)
+        chooser.set_selection_mode(Gtk.SelectionMode.NONE)
+        chooser.set_max_children_per_line(4)
+        chooser.set_min_children_per_line(1)
+        chooser.set_row_spacing(6)
+        chooser.set_column_spacing(6)
+        chooser.set_homogeneous(True)
+        chooser.set_hexpand(True)
 
         specs = [
-            ("Benchmark (B)", "cpu-short", 10.0, 0, 0),
-            ("BENCHMARK (ERWEITERT)", "cpu-long", 600.0, 1, 0),
-            ("RAM TEST (R)", "ram-short", 30.0, 0, 1),
-            ("RAM TEST (ERWEITERT)", "ram-long", 600.0, 1, 1),
+            ("Benchmark (B)", "cpu-short", 10.0),
+            ("BENCHMARK (ERWEITERT)", "cpu-long", 600.0),
+            ("RAM TEST (R)", "ram-short", 30.0),
+            ("RAM TEST (ERWEITERT)", "ram-long", 600.0),
         ]
 
         self.benchmark_buttons = []
-        for label, kind, duration, col, row in specs:
+        for label, kind, duration in specs:
             b = Gtk.Button(label=label)
             b.add_css_class("benchmark-choice")
             b.set_hexpand(True)
             b.connect("clicked", self.start_test, kind, duration)
             self.benchmark_buttons.append(b)
-            grid.attach(b, col, row, 1, 1)
+            chooser.insert(b, -1)
 
-        body.append(grid)
+        body.append(chooser)
         self.benchmark_status = Gtk.Label(label="Bereit")
         self.benchmark_status.set_xalign(0)
         self.benchmark_status.add_css_class("benchmark-status")
@@ -6251,6 +6256,7 @@ except Exception:
         self.ram_activity = Gtk.DrawingArea()
         self.ram_activity.set_content_height(112)
         self.ram_activity.set_hexpand(True)
+        self.ram_activity.set_vexpand(True)
         self.ram_activity.set_draw_func(self.draw_ram_activity)
         self.ram_activity.update_property(
             [Gtk.AccessibleProperty.LABEL],
