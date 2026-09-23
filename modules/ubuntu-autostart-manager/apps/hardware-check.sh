@@ -161,6 +161,20 @@ button.benchmark-choice {
     font-size: 12px;
     font-weight: 800;
 }
+button.benchmark-choice.benchmark-passed,
+button.benchmark-choice.benchmark-passed:disabled {
+    background: #18351d;
+    color: #61d36b;
+    border: 1px solid #61d36b;
+    opacity: 1;
+}
+button.benchmark-choice.benchmark-failed,
+button.benchmark-choice.benchmark-failed:disabled {
+    background: #3a1b1b;
+    color: #ff4c4c;
+    border: 1px solid #ff4c4c;
+    opacity: 1;
+}
 
 .benchmark-status {
     font-size: 12px;
@@ -2763,7 +2777,9 @@ class App(Gtk.Application):
         self.test_sequence_results = []
         self.test_sequence_total_duration = 0.0
         self.test_sequence_completed_duration = 0.0
+        self.test_sequence_finalize_pending = False
         self.benchmark_buttons = []
+        self.benchmark_button_by_kind = {}
         self.touch_state_file = Path.home() / ".local/state/uwuntu/touch_tester_status.json"
         self.touch_script = Path.home() / ".local/bin/uwuntu-touch-tester.sh"
         self.touch_status_cache = None
@@ -2866,14 +2882,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.101")
+        self.window.set_title("Hardware Check v4.5.102")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.101")
+        title_label = Gtk.Label(label="Hardware Check v4.5.102")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6577,6 +6593,7 @@ except Exception:
         ]
 
         self.benchmark_buttons = []
+        self.benchmark_button_by_kind = {}
         for index, (label, kind, duration) in enumerate(specs):
             b = Gtk.Button(label=label)
             b.add_css_class("benchmark-choice")
@@ -6587,6 +6604,7 @@ except Exception:
                 child.set_single_line_mode(True)
             b.connect("clicked", self.start_test, kind, duration)
             self.benchmark_buttons.append(b)
+            self.benchmark_button_by_kind[kind] = b
             chooser.attach(b, index % 4, index // 4, 1, 1)
 
         body.append(chooser)
@@ -7412,6 +7430,16 @@ except Exception:
             self.gpu_activity.queue_draw()
         return False
 
+    def force_gpu_visual_state(self, state):
+        """Finalzustand gegen verspätete LIVE-Redraws absichern."""
+        self.gpu_visual_state = state
+        if state == "complete":
+            self.gpu_frame_values = [1.0] * 24
+            self.gpu_activity_progress = 1.0
+        if hasattr(self, "gpu_activity"):
+            self.gpu_activity.queue_draw()
+        return False
+
     def update_gpu_activity(
         self,
         state=None,
@@ -7460,9 +7488,9 @@ except Exception:
         # Abschlusszustand sicher neu zeichnen. Sonst kann der letzte blaue
         # LIVE-Frame im DrawingArea sichtbar bleiben.
         if state in ("complete", "error", "cancelled"):
-            GLib.idle_add(self.redraw_gpu_activity)
-            GLib.timeout_add(80, self.redraw_gpu_activity)
-            GLib.timeout_add(220, self.redraw_gpu_activity)
+            GLib.idle_add(self.force_gpu_visual_state, state)
+            GLib.timeout_add(80, self.force_gpu_visual_state, state)
+            GLib.timeout_add(220, self.force_gpu_visual_state, state)
 
     def reset_ram_activity_field(self):
         total = 40 * 8
@@ -7569,6 +7597,7 @@ except Exception:
         self.test_sequence_results = []
         self.test_sequence_total_duration = 0.0
         self.test_sequence_completed_duration = 0.0
+        self.test_sequence_finalize_pending = False
 
         if hasattr(self, "benchmark_status"):
             self.set_benchmark_status_temp_class(None)
@@ -7719,11 +7748,27 @@ except Exception:
             f"{len(self.test_sequence)} · "
         )
 
+    def clear_benchmark_button_results(self):
+        for button in self.benchmark_buttons:
+            button.remove_css_class("benchmark-passed")
+            button.remove_css_class("benchmark-failed")
+
+    def set_benchmark_button_result(self, kind, ok):
+        button = self.benchmark_button_by_kind.get(kind)
+        if button is None:
+            return
+        button.remove_css_class("benchmark-passed")
+        button.remove_css_class("benchmark-failed")
+        button.add_css_class(
+            "benchmark-passed" if ok else "benchmark-failed"
+        )
+
     def start_test_sequence(self, kind):
         if self.test_proc is not None and self.test_proc.poll() is None:
             return
 
         extended = kind == "all-long"
+        self.clear_benchmark_button_results()
         self.test_sequence_active = True
         self.test_sequence_mode = "ALLE ERW." if extended else "ALLE"
         self.test_sequence = (
@@ -7745,6 +7790,7 @@ except Exception:
             duration for _step_kind, duration in self.test_sequence
         )
         self.test_sequence_completed_duration = 0.0
+        self.test_sequence_finalize_pending = False
         self.test_cancelled = False
         self.set_benchmark_controls(True)
         self.start_next_sequence_test()
@@ -7760,9 +7806,31 @@ except Exception:
         self.start_single_test(kind, duration)
         return False
 
-    def finish_sequence_step(self, outcome):
-        if not self.test_sequence_active:
-            return
+    def finish_sequence_step(self, outcome, step_kind=None, force=False):
+        """
+        Einen ALLE-Schritt robust abschließen.
+
+        force=True wird aus poll_test mit dem vor finish_test_result gemerkten
+        Sequenzzustand verwendet. Damit kann der letzte GPU-Schritt die
+        Gesamtauswertung nicht verlieren, selbst wenn während der
+        Ergebnisverarbeitung ein UI-Zustand umgeschaltet wurde.
+        """
+        if not self.test_sequence_active and not force:
+            return False
+
+        if not isinstance(outcome, dict):
+            outcome = {
+                "ok": False,
+                "name": "TEST",
+                "summary": "kein Ergebnis",
+            }
+
+        kind = step_kind or self.test_kind
+        if kind:
+            self.set_benchmark_button_result(
+                kind,
+                bool(outcome.get("ok")),
+            )
 
         self.test_sequence_results.append(outcome)
         self.test_sequence_completed_duration += self.test_duration
@@ -7770,13 +7838,40 @@ except Exception:
 
         if self.test_sequence_index < len(self.test_sequence):
             GLib.timeout_add(350, self.start_next_sequence_test)
-        else:
-            self.finish_test_sequence()
+        elif not self.test_sequence_finalize_pending:
+            # Finalisierung bewusst im nächsten GTK-Durchlauf. So konkurriert
+            # sie nicht mit letzten glmark2-/DrawingArea-Callbacks.
+            self.test_sequence_finalize_pending = True
+            GLib.idle_add(self.finish_test_sequence)
+        return False
 
     def finish_test_sequence(self):
-        results = list(self.test_sequence_results)
+        if not self.test_sequence_finalize_pending and not self.test_sequence_active:
+            return False
+
+        results = [
+            item
+            for item in self.test_sequence_results
+            if isinstance(item, dict)
+        ]
         sequence_name = self.test_sequence_mode or "ALLE"
-        all_ok = bool(results) and all(item.get("ok") for item in results)
+        expected_count = len(self.test_sequence) or 3
+
+        if len(results) < expected_count:
+            missing = expected_count - len(results)
+            for _ in range(missing):
+                results.append(
+                    {
+                        "ok": False,
+                        "name": "TEST",
+                        "summary": "Ergebnis fehlt",
+                    }
+                )
+
+        all_ok = bool(results) and all(
+            bool(item.get("ok"))
+            for item in results
+        )
 
         parts = []
         for item in results:
@@ -7787,7 +7882,15 @@ except Exception:
                 + (f" {summary}" if summary else "")
             )
 
+        overall_kind = (
+            "all-long"
+            if sequence_name == "ALLE ERW."
+            else "all-short"
+        )
+        self.set_benchmark_button_result(overall_kind, all_ok)
+
         self.test_sequence_active = False
+        self.test_sequence_finalize_pending = False
         self.test_sequence_mode = None
         self.test_sequence = []
         self.test_sequence_index = 0
@@ -7806,6 +7909,14 @@ except Exception:
         )
         self.benchmark_result.set_text(" · ".join(parts))
         self.set_benchmark_result_class("green" if all_ok else "red")
+
+        # Der letzte Test ist GPU. Dessen Visual bleibt sichtbar, erhält aber
+        # sicher den finalen COMPLETE/ERROR-Zustand statt LIVE.
+        if self.test_kind and self.test_kind.startswith("gpu"):
+            self.force_gpu_visual_state(
+                "complete" if all_ok else "error"
+            )
+
         log(
             f"{sequence_name} fertig: "
             + " | ".join(
@@ -7813,6 +7924,7 @@ except Exception:
                 for item in results
             )
         )
+        return False
 
     def set_benchmark_controls(self, running):
         for b in self.benchmark_buttons:
@@ -7836,6 +7948,11 @@ except Exception:
         self.test_sequence_mode = None
         self.test_sequence = []
         self.test_sequence_results = []
+        self.test_sequence_finalize_pending = False
+        button_for_kind = self.benchmark_button_by_kind.get(kind)
+        if button_for_kind is not None:
+            button_for_kind.remove_css_class("benchmark-passed")
+            button_for_kind.remove_css_class("benchmark-failed")
         self.start_single_test(kind, duration)
 
     def start_single_test(self, kind, duration):
@@ -7933,7 +8050,10 @@ except Exception:
                     "summary": "glmark2 fehlt",
                 }
                 if self.test_sequence_active:
-                    self.finish_sequence_step(outcome)
+                    self.finish_sequence_step(
+                        outcome,
+                        step_kind=kind,
+                    )
                 return
             self.update_gpu_benchmark_status()
 
@@ -7970,7 +8090,10 @@ except Exception:
                 "summary": "Startfehler",
             }
             if self.test_sequence_active:
-                self.finish_sequence_step(outcome)
+                self.finish_sequence_step(
+                    outcome,
+                    step_kind=kind,
+                )
             return
 
         self.test_reader_thread = threading.Thread(
@@ -8092,9 +8215,15 @@ except Exception:
         if self.test_cancelled:
             return False
 
+        sequence_was_active = self.test_sequence_active
+        completed_kind = self.test_kind
         outcome = self.finish_test_result(output, proc.returncode)
-        if self.test_sequence_active:
-            self.finish_sequence_step(outcome)
+        if sequence_was_active and not self.test_cancelled:
+            self.finish_sequence_step(
+                outcome,
+                step_kind=completed_kind,
+                force=True,
+            )
         return False
 
     def finish_test_result(self, output, returncode):
@@ -8365,6 +8494,7 @@ except Exception:
             return
         self.test_cancelled = True
         self.test_sequence_active = False
+        self.test_sequence_finalize_pending = False
         self.test_sequence_mode = None
         self.test_sequence = []
         self.test_sequence_results = []
