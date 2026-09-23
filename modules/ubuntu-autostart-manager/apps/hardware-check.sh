@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.89")
+        self.window.set_title("Hardware Check v4.5.90")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.89")
+        title_label = Gtk.Label(label="Hardware Check v4.5.90")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6765,6 +6765,7 @@ except Exception:
         tools.append(self.keyboard_progress)
         tools.append(reset)
         root.append(tools)
+
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_vexpand(True)
@@ -6774,12 +6775,19 @@ except Exception:
         board.set_margin_end(8)
         board.set_margin_bottom(8)
 
+        self.keyboard_key_geometry = []
+        self.keyboard_spacer_geometry = []
+        self.keyboard_spacing_boxes = [(board, 4)]
+        self.keyboard_board = board
+        self.keyboard_scale = None
+
         def add_key(parent, label, aliases, width, height=25):
             key = Gtk.Label(label=label)
             key.add_css_class("key")
             key.set_size_request(width, height)
             key_id = label + "|" + ",".join(aliases)
             self.key_widgets[key_id] = key
+            self.keyboard_key_geometry.append((key, width, height))
 
             for alias in aliases:
                 self.key_aliases[alias] = key_id
@@ -6788,12 +6796,20 @@ except Exception:
             return key
 
         rows = self.keyboard_layout()
+        row_base_widths = []
+        row_base_heights = []
 
         for row_index, row_spec in enumerate(rows):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+            self.keyboard_spacing_boxes.append((row, 3))
+
+            row_width = sum(width for _label, _aliases, width in row_spec)
+            row_width += max(0, len(row_spec) - 1) * 3
+            row_height = 25
 
             for label, aliases, width in row_spec:
                 add_key(row, label, aliases, width)
+
             # Pfeilblock rechts neben der untersten Tastenreihe:
             #
             #       ↑
@@ -6814,11 +6830,16 @@ except Exception:
                     orientation=Gtk.Orientation.HORIZONTAL,
                     spacing=2
                 )
+                self.keyboard_spacing_boxes.extend(
+                    ((arrows, 2), (upper, 2), (lower, 2))
+                )
 
                 blank_left = Gtk.Box()
                 blank_left.set_size_request(24, 22)
+                self.keyboard_spacer_geometry.append((blank_left, 24, 22))
                 blank_right = Gtk.Box()
                 blank_right.set_size_request(24, 22)
+                self.keyboard_spacer_geometry.append((blank_right, 24, 22))
                 upper.append(blank_left)
                 add_key(upper, "↑", ("Up",), 24, 22)
                 upper.append(blank_right)
@@ -6831,12 +6852,106 @@ except Exception:
                 arrows.append(lower)
                 row.append(arrows)
 
+                arrow_width = 24 * 3 + 2 * 2
+                arrow_height = 22 * 2 + 2
+                row_width += 3 + arrow_width
+                row_height = max(row_height, arrow_height)
+
+            row_base_widths.append(row_width)
+            row_base_heights.append(row_height)
             board.append(row)
 
+        self.keyboard_reference_width = (
+            max(row_base_widths, default=1) + 8 + 8
+        )
+        self.keyboard_reference_height = (
+            sum(row_base_heights)
+            + max(0, len(row_base_heights) - 1) * 4
+            + 8
+        )
+
         scroll.set_child(board)
-        root.append(scroll)
+
+        viewport = Gtk.Overlay()
+        viewport.set_vexpand(True)
+        viewport.set_child(scroll)
+
+        resize_probe = Gtk.DrawingArea()
+        resize_probe.set_hexpand(True)
+        resize_probe.set_vexpand(True)
+        resize_probe.set_can_target(False)
+        resize_probe.connect("resize", self.on_keyboard_viewport_resize)
+        viewport.add_overlay(resize_probe)
+
+        self.keyboard_resize_probe = resize_probe
+        root.append(viewport)
         self.update_keyboard()
         return root
+
+    def on_keyboard_viewport_resize(self, _area, width, height):
+        self.apply_keyboard_layout_scale(width, height)
+
+    def refresh_keyboard_layout_scale(self):
+        probe = getattr(self, "keyboard_resize_probe", None)
+        if probe is not None:
+            self.apply_keyboard_layout_scale(
+                probe.get_width(),
+                probe.get_height(),
+            )
+        return False
+
+    def apply_keyboard_layout_scale(self, width, height):
+        """Tastatur proportional auf den tatsächlich verfügbaren Platz skalieren."""
+        reference_width = max(
+            1,
+            int(getattr(self, "keyboard_reference_width", 1)),
+        )
+        reference_height = max(
+            1,
+            int(getattr(self, "keyboard_reference_height", 1)),
+        )
+        if width <= 1 or height <= 1:
+            return
+
+        # Ein kleiner Sicherheitsrand verhindert Scrollbalken durch Rundung.
+        scale = 0.985 * min(
+            float(width) / reference_width,
+            float(height) / reference_height,
+        )
+        scale = max(0.45, min(scale, 6.0))
+
+        old_scale = getattr(self, "keyboard_scale", None)
+        if old_scale is not None and abs(scale - old_scale) < 0.01:
+            return
+        self.keyboard_scale = scale
+
+        font_size = max(6.0, 10.0 * scale)
+        for key, base_width, base_height in self.keyboard_key_geometry:
+            key.set_size_request(
+                max(10, int(round(base_width * scale))),
+                max(10, int(round(base_height * scale))),
+            )
+            attrs = Pango.AttrList()
+            attrs.insert(
+                Pango.attr_size_new_absolute(
+                    int(round(font_size * Pango.SCALE))
+                )
+            )
+            key.set_attributes(attrs)
+
+        for spacer, base_width, base_height in self.keyboard_spacer_geometry:
+            spacer.set_size_request(
+                max(1, int(round(base_width * scale))),
+                max(1, int(round(base_height * scale))),
+            )
+
+        for box, base_spacing in self.keyboard_spacing_boxes:
+            box.set_spacing(max(1, int(round(base_spacing * scale))))
+
+        margin = max(2, int(round(8 * scale)))
+        self.keyboard_board.set_margin_start(margin)
+        self.keyboard_board.set_margin_end(margin)
+        self.keyboard_board.set_margin_bottom(margin)
 
     def keyboard_layout(self):
         K = lambda l, a=None, w=32: (l, tuple(a or (l,)), w)
@@ -7679,6 +7794,8 @@ except Exception:
         # Es wird unter keinen Umständen ein EVIOCGRAB ausgelöst.
         self.stack.set_visible_child_name("keyboard")
         self.window.set_default_size(860, 360)
+        GLib.idle_add(self.refresh_keyboard_layout_scale)
+        GLib.timeout_add(120, self.refresh_keyboard_layout_scale)
 
         # Einzelne Super-Taste sowie die normalen Desktop-Keybindings werden
         # unabhängig vom GTK-Thread deaktiviert. Dadurch bleibt K schnell.
