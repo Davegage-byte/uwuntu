@@ -171,6 +171,14 @@ button.benchmark-choice {
     font-size: 17px;
     font-weight: 800;
 }
+.benchmark-result.status-green,
+.benchmark-status.status-green {
+    color: #61d36b;
+}
+.benchmark-result.status-red,
+.benchmark-status.status-red {
+    color: #ff4c4c;
+}
 
 .usb-row {
     background: #1d1d22;
@@ -1164,6 +1172,40 @@ def read_cpu_average_frequency_mhz():
     return sum(values) / len(values)
 
 
+def short_gpu_renderer_name(renderer):
+    """Kompakter GPU-Name für Ergebnis- und Statuszeilen."""
+    raw = (renderer or "").strip()
+    if not raw:
+        return "GPU"
+
+    lower = raw.lower()
+    if "iris" in lower and "xe" in lower:
+        return "Intel Iris Xe"
+    if "(lnl)" in lower or "lunar lake" in lower:
+        return "Intel Graphics (LNL)"
+    if "intel" in lower and "arc" in lower:
+        match = re.search(r"(Arc[^()]*)", raw, re.I)
+        if match:
+            return ("Intel " + match.group(1).strip())[:32]
+        return "Intel Arc Graphics"
+    if "radeon" in lower:
+        match = re.search(r"(Radeon[^()]*)", raw, re.I)
+        if match:
+            return ("AMD " + match.group(1).strip())[:32]
+        return "AMD Radeon"
+    if "nvidia" in lower:
+        cleaned = re.sub(r"(?i)NVIDIA\s*(Corporation)?\s*", "", raw).strip()
+        cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned).strip()
+        return ("NVIDIA " + cleaned)[:32]
+
+    cleaned = re.sub(r"(?i)^Mesa\s+", "", raw)
+    cleaned = cleaned.replace("(R)", "").replace("(TM)", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > 32:
+        cleaned = cleaned[:29].rstrip() + "..."
+    return cleaned
+
+
 def read_gpu_telemetry():
     """Best-effort GPU-Temperatur und Takt unter Linux."""
     result = {
@@ -1328,19 +1370,26 @@ def read_gpu_telemetry():
     return result
 
 
-def read_gpu_process_engine_time_ns(pid):
+def read_gpu_process_usage_snapshot(pid):
     """
-    Summierte DRM-Engine-Zeit des Benchmark-Prozesses.
+    DRM-Usage-Snapshot eines Prozesses.
 
-    i915 und xe veröffentlichen pro DRM-Client drm-engine-*-Zähler in
-    /proc/<pid>/fdinfo. Aus deren Delta wird die tatsächliche Renderlast
-    unseres glmark2-Prozesses ohne root-Rechte berechnet.
+    i915 liefert drm-engine-<name> in ns. Xe liefert dagegen
+    drm-cycles-<name> plus drm-total-cycles-<name>. Doppelte File Descriptors
+    desselben DRM-Clients werden über drm-client-id/drm-pdev dedupliziert.
     """
     if not pid:
         return None
 
-    total = 0
+    snapshot = {
+        "engine_ns": {},
+        "cycles": {},
+        "total_cycles": {},
+        "capacity": {},
+    }
+    seen_clients = set()
     found = False
+
     try:
         fdinfo_dir = Path(f"/proc/{int(pid)}/fdinfo")
         for path in fdinfo_dir.glob("*"):
@@ -1352,23 +1401,73 @@ def read_gpu_process_engine_time_ns(pid):
             except Exception:
                 continue
 
-            if "drm-driver:" not in data:
+            driver_match = re.search(r"^drm-driver:\s*(\S+)\s*$", data, re.M)
+            if not driver_match:
                 continue
 
+            client_match = re.search(r"^drm-client-id:\s*(\S+)\s*$", data, re.M)
+            pdev_match = re.search(r"^drm-pdev:\s*(\S+)\s*$", data, re.M)
+            client_key = (
+                driver_match.group(1),
+                pdev_match.group(1) if pdev_match else "",
+                client_match.group(1) if client_match else path.name,
+            )
+            if client_key in seen_clients:
+                continue
+            seen_clients.add(client_key)
+
+            capacities = {}
             for match in re.finditer(
-                r"^drm-engine-(?!capacity-)[^:]+:\s*([0-9]+)\s+ns\s*$",
+                r"^drm-engine-capacity-([^:]+):\s*([0-9]+)\s*$",
                 data,
                 re.M,
             ):
-                try:
-                    total += int(match.group(1))
-                    found = True
-                except Exception:
-                    continue
+                capacities[match.group(1)] = max(1, int(match.group(2)))
+
+            for match in re.finditer(
+                r"^drm-engine-(?!capacity-)([^:]+):\s*([0-9]+)\s+ns\s*$",
+                data,
+                re.M,
+            ):
+                key = match.group(1)
+                snapshot["engine_ns"][key] = (
+                    snapshot["engine_ns"].get(key, 0) + int(match.group(2))
+                )
+                snapshot["capacity"][key] = max(
+                    snapshot["capacity"].get(key, 1),
+                    capacities.get(key, 1),
+                )
+                found = True
+
+            for match in re.finditer(
+                r"^drm-cycles-([^:]+):\s*([0-9]+)\s*$",
+                data,
+                re.M,
+            ):
+                key = match.group(1)
+                snapshot["cycles"][key] = (
+                    snapshot["cycles"].get(key, 0) + int(match.group(2))
+                )
+                snapshot["capacity"][key] = max(
+                    snapshot["capacity"].get(key, 1),
+                    capacities.get(key, 1),
+                )
+                found = True
+
+            for match in re.finditer(
+                r"^drm-total-cycles-([^:]+):\s*([0-9]+)\s*$",
+                data,
+                re.M,
+            ):
+                key = match.group(1)
+                snapshot["total_cycles"][key] = (
+                    snapshot["total_cycles"].get(key, 0) + int(match.group(2))
+                )
+                found = True
     except Exception:
         return None
 
-    return total if found else None
+    return snapshot if found else None
 
 def build_gpu_benchmark_args(duration, mode):
     """glmark2-Szenen für kurzen oder erweiterten GPU-Test."""
@@ -1393,7 +1492,12 @@ def build_gpu_benchmark_args(duration, mode):
             "jellyfish",
         )
 
-    scene_duration = max(2.0, float(duration) / len(scenes))
+    overhead_budget = 4.0 if mode == "short" else 12.0
+    usable_duration = max(
+        len(scenes) * 2.0,
+        float(duration) - overhead_budget,
+    )
+    scene_duration = usable_duration / len(scenes)
     args = [
         executable,
         "--off-screen",
@@ -2648,6 +2752,7 @@ class App(Gtk.Application):
         self.test_kind = None
         self.test_duration = 0.0
         self.test_started = 0.0
+        self.test_hard_deadline = 0.0
         self.test_cancelled = False
         self.test_output_lines = []
         self.test_reader_thread = None
@@ -2761,14 +2866,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.100")
+        self.window.set_title("Hardware Check v4.5.101")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.100")
+        title_label = Gtk.Label(label="Hardware Check v4.5.101")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6554,8 +6659,8 @@ except Exception:
         self.gpu_peak_temp = None
         self.gpu_peak_load = None
         self.gpu_renderer = None
-        self.gpu_engine_prev_ns = None
-        self.gpu_engine_prev_ts_ns = None
+        self.gpu_usage_prev_snapshot = None
+        self.gpu_usage_prev_ts_ns = None
         self.gpu_frame_values = [0.0] * 24
         body.append(self.gpu_activity)
 
@@ -6578,7 +6683,10 @@ except Exception:
         body.append(progress_row)
         self.benchmark_result = Gtk.Label(label="")
         self.benchmark_result.set_xalign(0)
-        self.benchmark_result.set_wrap(True)
+        self.benchmark_result.set_hexpand(True)
+        self.benchmark_result.set_wrap(False)
+        self.benchmark_result.set_ellipsize(Pango.EllipsizeMode.END)
+        self.benchmark_result.set_single_line_mode(True)
         self.benchmark_result.add_css_class("benchmark-result")
         body.append(self.benchmark_result)
 
@@ -7197,8 +7305,8 @@ except Exception:
         self.gpu_peak_temp = None
         self.gpu_peak_load = None
         self.gpu_renderer = None
-        self.gpu_engine_prev_ns = None
-        self.gpu_engine_prev_ts_ns = None
+        self.gpu_usage_prev_snapshot = None
+        self.gpu_usage_prev_ts_ns = None
         self.gpu_frame_values = [
             random.uniform(0.18, 0.48)
             for _ in range(24)
@@ -7218,33 +7326,83 @@ except Exception:
         ]
 
     def sample_gpu_process_load(self):
-        """Renderlast des laufenden glmark2-Prozesses in Prozent."""
+        """
+        Renderlast des laufenden glmark2-Prozesses.
+
+        i915: busy-ns pro Engine gegen reale Sample-Zeit.
+        xe: busy-cycles gegen total-cycles direkt in der GPU-Zeitdomäne.
+        Angezeigt wird die am stärksten ausgelastete Engine.
+        """
         proc = self.test_proc
         if proc is None or proc.poll() is not None:
             return None
 
         now_ns = time.monotonic_ns()
-        engine_ns = read_gpu_process_engine_time_ns(proc.pid)
-        if engine_ns is None:
+        current = read_gpu_process_usage_snapshot(proc.pid)
+        if current is None:
             return None
 
-        previous_engine = self.gpu_engine_prev_ns
-        previous_ts = self.gpu_engine_prev_ts_ns
-        self.gpu_engine_prev_ns = engine_ns
-        self.gpu_engine_prev_ts_ns = now_ns
+        previous = self.gpu_usage_prev_snapshot
+        previous_ts = self.gpu_usage_prev_ts_ns
+        self.gpu_usage_prev_snapshot = current
+        self.gpu_usage_prev_ts_ns = now_ns
 
-        if previous_engine is None or previous_ts is None:
+        if previous is None or previous_ts is None:
             return None
 
-        delta_engine = engine_ns - previous_engine
+        loads = []
+
+        # Xe: busy cycles / total cycles; capacity berücksichtigt Engine-Gruppen.
+        for key, busy_now in current["cycles"].items():
+            if key not in previous["cycles"]:
+                continue
+            total_now = current["total_cycles"].get(key)
+            total_prev = previous["total_cycles"].get(key)
+            if total_now is None or total_prev is None:
+                continue
+
+            delta_busy = busy_now - previous["cycles"][key]
+            delta_total = total_now - total_prev
+            if delta_busy < 0 or delta_total <= 0:
+                continue
+
+            capacity = max(1, current["capacity"].get(key, 1))
+            loads.append(
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        (delta_busy / delta_total) * 100.0 / capacity,
+                    ),
+                )
+            )
+
+        # i915: busy-Zeit in ns gegen reale Sample-Zeit.
         delta_time = now_ns - previous_ts
-        if delta_engine < 0 or delta_time <= 0:
+        if delta_time > 0:
+            for key, busy_now in current["engine_ns"].items():
+                if key not in previous["engine_ns"]:
+                    continue
+
+                delta_busy = busy_now - previous["engine_ns"][key]
+                if delta_busy < 0:
+                    continue
+
+                capacity = max(1, current["capacity"].get(key, 1))
+                loads.append(
+                    max(
+                        0.0,
+                        min(
+                            100.0,
+                            (delta_busy / delta_time) * 100.0 / capacity,
+                        ),
+                    )
+                )
+
+        if not loads:
             return None
 
-        load = max(
-            0.0,
-            min(100.0, (delta_engine / delta_time) * 100.0),
-        )
+        load = max(loads)
         if self.gpu_peak_load is None or load > self.gpu_peak_load:
             self.gpu_peak_load = load
         return load
@@ -7402,6 +7560,7 @@ except Exception:
         self.test_kind = None
         self.test_duration = 0.0
         self.test_started = 0.0
+        self.test_hard_deadline = 0.0
         self.test_cancelled = False
         self.test_sequence_active = False
         self.test_sequence_mode = None
@@ -7424,7 +7583,7 @@ except Exception:
             self.update_gpu_activity("idle")
 
     def set_benchmark_status_temp_class(self, temp_c):
-        for cls in ("status-yellow", "status-red"):
+        for cls in ("status-green", "status-yellow", "status-red"):
             self.benchmark_status.remove_css_class(cls)
 
         if temp_c is None:
@@ -7503,7 +7662,7 @@ except Exception:
 
         renderer = self.gpu_renderer
         if renderer:
-            renderer_text = renderer[:52]
+            renderer_text = short_gpu_renderer_name(renderer)
             text = f"{prefix}GPU Test läuft · {renderer_text}"
         else:
             text = f"{prefix}GPU Test läuft · OpenGL"
@@ -7636,10 +7795,14 @@ except Exception:
         self.test_sequence_completed_duration = 0.0
         self.set_benchmark_controls(False)
         self.benchmark_progress.set_fraction(1.0)
+        self.set_benchmark_status_temp_class(None)
         self.benchmark_status.set_text(
             f"{sequence_name} abgeschlossen"
             if all_ok
             else f"{sequence_name} mit Auffälligkeiten abgeschlossen"
+        )
+        self.benchmark_status.add_css_class(
+            "status-green" if all_ok else "status-red"
         )
         self.benchmark_result.set_text(" · ".join(parts))
         self.set_benchmark_result_class("green" if all_ok else "red")
@@ -7684,6 +7847,14 @@ except Exception:
         self.test_kind = kind
         self.test_duration = float(duration)
         self.test_started = time.monotonic()
+        grace = (
+            12.0
+            if kind == "gpu-short"
+            else 45.0
+            if kind == "gpu-long"
+            else 8.0
+        )
+        self.test_hard_deadline = self.test_started + float(duration) + grace
         self.test_cancelled = False
         self.test_output_lines = []
         if self.test_sequence_active:
@@ -7819,6 +7990,36 @@ except Exception:
 
         elapsed = max(0.0, time.monotonic() - self.test_started)
         duration = max(0.1, self.test_duration)
+
+        # Kein Einzeltest darf eine ALLE-Sequenz dauerhaft blockieren.
+        # glmark2 erhält Setup-Reserve, danach greift ein harter Watchdog.
+        if (
+            proc.poll() is None
+            and self.test_hard_deadline > 0.0
+            and time.monotonic() > self.test_hard_deadline
+        ):
+            log(
+                f"Benchmark-Watchdog: {self.test_kind} "
+                f"nach {elapsed:.1f}s beendet"
+            )
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
         if proc.poll() is None:
             fraction = min(0.99, elapsed / duration)
 
@@ -7917,6 +8118,7 @@ except Exception:
         if returncode != 0 or (not result and not is_gpu):
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("Test fehlgeschlagen")
+            self.benchmark_status.add_css_class("status-red")
             self.benchmark_result.set_text(
                 error[6:] if error else (
                     lines[-1] if lines else "Keine Ergebnisdaten"
@@ -7954,6 +8156,7 @@ except Exception:
             points_text = f"{points:,}".replace(",", ".")
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("CPU Benchmark abgeschlossen")
+            self.benchmark_status.add_css_class("status-green")
             self.benchmark_result.set_text(
                 f"{points_text} Punkte · "
                 f"{workers} Threads · "
@@ -7981,7 +8184,9 @@ except Exception:
             checked_gib = checked / (1024 ** 3)
             throughput = checked_gib / max(0.001, elapsed)
             if errors == 0:
+                self.set_benchmark_status_temp_class(None)
                 self.benchmark_status.set_text("RAM Test abgeschlossen")
+                self.benchmark_status.add_css_class("status-green")
                 self.benchmark_result.set_text(
                     f"0 Fehler · "
                     f"{target_gib:.1f} GB RAM · "
@@ -8077,12 +8282,14 @@ except Exception:
                 if self.gpu_peak_load is None
                 else f" · max. {self.gpu_peak_load:.0f}% GPU"
             )
-            renderer_text = renderer or "Renderer unbekannt"
+            renderer_text = short_gpu_renderer_name(renderer)
 
             if software:
+                self.set_benchmark_status_temp_class(None)
                 self.benchmark_status.set_text(
                     "GPU TEST: SOFTWARE-RENDERING ERKANNT"
                 )
+                self.benchmark_status.add_css_class("status-red")
                 self.benchmark_result.set_text(
                     f"{renderer_text} · {avg_fps or 0:.0f} FPS"
                 )
@@ -8091,9 +8298,11 @@ except Exception:
                 ok = False
                 summary = "Software-Rendering"
             else:
+                self.set_benchmark_status_temp_class(None)
                 self.benchmark_status.set_text("GPU Test abgeschlossen")
+                self.benchmark_status.add_css_class("status-green")
                 self.benchmark_result.set_text(
-                    f"{score:,} Punkte · "
+                    f"{score:,} P · "
                     f"{avg_fps or 0:.0f} FPS · "
                     f"{renderer_text}{load_text}{temp_text}"
                 ).replace(",", ".")
