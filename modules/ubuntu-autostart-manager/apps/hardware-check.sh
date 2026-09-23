@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.93")
+        self.window.set_title("Hardware Check v4.5.94")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.93")
+        title_label = Gtk.Label(label="Hardware Check v4.5.94")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6208,6 +6208,7 @@ except Exception:
         chooser.set_column_spacing(6)
         chooser.set_homogeneous(True)
         chooser.set_hexpand(True)
+        self.benchmark_chooser = chooser
 
         specs = [
             ("BENCHMARK (B)", "cpu-short", 10.0),
@@ -6861,9 +6862,27 @@ except Exception:
         if hasattr(self, "cancel_test_button"):
             self.cancel_test_button.set_sensitive(running)
 
+    def refresh_benchmark_layout(self):
+        """FlowBox nach dem Seitenwechsel mit der echten Fensterbreite neu anordnen."""
+        if self.stack.get_visible_child_name() != "benchmarks":
+            return False
+        chooser = getattr(self, "benchmark_chooser", None)
+        if chooser is not None:
+            chooser.queue_allocate()
+        return False
+
     def show_benchmarks(self, *_):
-        self.stack.set_visible_child_name("benchmarks")
+        # Defaultgröße vor dem Seitenwechsel setzen. Die FlowBox wurde zuvor
+        # teilweise noch mit der Breite der Übersichtsseite berechnet (3+1).
         self.window.set_default_size(980, 520)
+        self.stack.set_visible_child_name("benchmarks")
+
+        # Nach der ersten GTK-Allokation noch einmal mit der tatsächlich
+        # verfügbaren Breite rechnen. Dadurch stehen die vier Buttons sofort
+        # in einer Reihe, sofern der Platz dafür vorhanden ist.
+        GLib.idle_add(self.refresh_benchmark_layout)
+        GLib.timeout_add(60, self.refresh_benchmark_layout)
+
     def start_test(self, button, kind, duration):
         if self.test_proc is not None and self.test_proc.poll() is None:
             return
