@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.90")
+        self.window.set_title("Hardware Check v4.5.91")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.90")
+        title_label = Gtk.Label(label="Hardware Check v4.5.91")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6198,6 +6198,7 @@ except Exception:
         body.set_margin_start(10)
         body.set_margin_end(10)
         body.set_margin_bottom(8)
+        body.set_vexpand(True)
         grid = Gtk.Grid()
         grid.set_row_spacing(6)
         grid.set_column_spacing(6)
@@ -6229,6 +6230,23 @@ except Exception:
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_progress.set_show_text(False)
         body.append(self.benchmark_progress)
+
+        self.cpu_activity = Gtk.DrawingArea()
+        self.cpu_activity.set_content_height(150)
+        self.cpu_activity.set_hexpand(True)
+        self.cpu_activity.set_vexpand(True)
+        self.cpu_activity.set_draw_func(self.draw_cpu_activity)
+        self.cpu_activity.update_property(
+            [Gtk.AccessibleProperty.LABEL],
+            ["Visuelle Aktivitätsanzeige des CPU-Benchmarks"],
+        )
+        self.cpu_activity.set_visible(False)
+        self.cpu_visual_state = "idle"
+        self.cpu_activity_progress = 0.0
+        self.cpu_visual_temp = None
+        self.cpu_visual_fan_rpm = None
+        self.cpu_thread_values = [0.0] * max(1, min(24, os.cpu_count() or 1))
+        body.append(self.cpu_activity)
 
         self.ram_activity = Gtk.DrawingArea()
         self.ram_activity.set_content_height(112)
@@ -6338,6 +6356,186 @@ except Exception:
             cr.rectangle(x, y, tile_width, tile_height)
             cr.fill()
 
+    def _cpu_visual_color(self, temp_c):
+        if self.cpu_visual_state == "complete":
+            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+        if self.cpu_visual_state == "error":
+            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        if self.cpu_visual_state == "cancelled":
+            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
+        if temp_c is None:
+            return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+        if temp_c >= 95.0:
+            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        if temp_c >= 88.0:
+            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
+        if temp_c >= 72.0:
+            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+        return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+
+    def draw_cpu_activity(self, area, cr, width, height):
+        """Kompakte CPU-Anzeige: Kennwerte oben, aktive Threads darunter."""
+        background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
+        panel = (0x23 / 255.0, 0x23 / 255.0, 0x29 / 255.0)
+        track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
+        text = (0xF4 / 255.0, 0xF4 / 255.0, 0xF5 / 255.0)
+        muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
+        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+
+        cr.set_source_rgb(*background)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+
+        progress = max(0.0, min(1.0, self.cpu_activity_progress))
+        cores = os.cpu_count() or 1
+        temp_c = self.cpu_visual_temp
+        fan_rpm = self.cpu_visual_fan_rpm
+        accent = self._cpu_visual_color(temp_c)
+
+        padding = 8.0
+        gap = 6.0
+        metric_h = min(52.0, max(44.0, height * 0.34))
+        metric_w = max(80.0, (width - 2 * padding - 3 * gap) / 4.0)
+        metrics = (
+            ("THREADS", str(cores)),
+            ("TEMP", "-- °C" if temp_c is None else f"{temp_c:.0f} °C"),
+            ("FAN", "-- RPM" if fan_rpm is None else f"{int(round(fan_rpm))} RPM"),
+            ("FORTSCHRITT", f"{progress * 100:.0f} %"),
+        )
+
+        for index, (label, value) in enumerate(metrics):
+            x = padding + index * (metric_w + gap)
+            cr.set_source_rgb(*panel)
+            cr.rectangle(x, padding, metric_w, metric_h)
+            cr.fill()
+
+            if self.cpu_visual_state == "complete":
+                color = green
+            elif index == 1:
+                color = accent
+            else:
+                color = blue
+
+            cr.set_source_rgb(*color)
+            cr.rectangle(x, padding + metric_h - 4.0, metric_w, 4.0)
+            cr.fill()
+
+            cr.set_source_rgb(*muted)
+            cr.set_font_size(10.0)
+            cr.move_to(x + 9.0, padding + 16.0)
+            cr.show_text(label)
+
+            cr.set_source_rgb(*text if index != 1 else accent)
+            cr.set_font_size(17.0)
+            cr.move_to(x + 9.0, padding + 38.0)
+            cr.show_text(value)
+
+        values = list(self.cpu_thread_values)
+        if not values:
+            values = [0.0]
+        shown = min(24, len(values))
+        rows = 1 if shown <= 16 else 2
+        columns = int(math.ceil(shown / rows))
+        activity_top = padding + metric_h + 13.0
+        available_h = max(26.0, height - activity_top - padding)
+        row_h = available_h / rows
+        bar_gap = 5.0
+        bar_w = max(
+            5.0,
+            (width - 2 * padding - bar_gap * max(0, columns - 1)) / max(1, columns),
+        )
+
+        for index in range(shown):
+            row = index // columns
+            col = index % columns
+            x = padding + col * (bar_w + bar_gap)
+            y = activity_top + row * row_h
+            bar_h = max(12.0, row_h - 17.0)
+            value = max(0.06, min(1.0, values[index]))
+
+            cr.set_source_rgb(*track)
+            cr.rectangle(x, y, bar_w, bar_h)
+            cr.fill()
+
+            if self.cpu_visual_state == "complete":
+                active_color = green
+                value = 1.0
+            elif self.cpu_visual_state == "error":
+                active_color = accent
+            elif self.cpu_visual_state == "cancelled":
+                active_color = accent
+            else:
+                active_color = blue
+
+            active_h = max(3.0, bar_h * value)
+            cr.set_source_rgb(*active_color)
+            cr.rectangle(x, y + bar_h - active_h, bar_w, active_h)
+            cr.fill()
+
+            if bar_w >= 18.0:
+                cr.set_source_rgb(*muted)
+                cr.set_font_size(8.0)
+                cr.move_to(x + 2.0, y + bar_h + 11.0)
+                cr.show_text(str(index + 1))
+
+        # Temperatur bleibt als klare Farbinformation im gesamten CPU-Feld sichtbar.
+        cr.set_source_rgb(*accent)
+        cr.rectangle(padding, height - 3.0, max(0.0, (width - 2 * padding) * progress), 3.0)
+        cr.fill()
+
+    def reset_cpu_activity_field(self):
+        count = max(1, min(24, os.cpu_count() or 1))
+        self.cpu_thread_values = [
+            random.uniform(0.35, 0.72)
+            for _ in range(count)
+        ]
+        self.cpu_activity_progress = 0.0
+        self.cpu_visual_temp = None
+        self.cpu_visual_fan_rpm = None
+
+    def step_cpu_activity_field(self):
+        if not self.cpu_thread_values:
+            self.reset_cpu_activity_field()
+        for index, current in enumerate(self.cpu_thread_values):
+            target = random.uniform(0.62, 1.0)
+            blend = 0.34 if target > current else 0.18
+            self.cpu_thread_values[index] += (target - current) * blend
+
+    def update_cpu_activity(
+        self,
+        state=None,
+        temp_c=None,
+        fan_rpm=None,
+        progress=None,
+    ):
+        if not hasattr(self, "cpu_activity"):
+            return
+        is_cpu = bool(self.test_kind and self.test_kind.startswith("cpu"))
+        self.cpu_activity.set_visible(is_cpu)
+
+        if state is not None:
+            self.cpu_visual_state = state
+            if is_cpu and state == "running":
+                self.reset_cpu_activity_field()
+            elif state == "complete":
+                self.cpu_thread_values = [1.0] * max(
+                    1, min(24, os.cpu_count() or 1)
+                )
+                self.cpu_activity_progress = 1.0
+
+        if temp_c is not None:
+            self.cpu_visual_temp = temp_c
+        if fan_rpm is not None:
+            self.cpu_visual_fan_rpm = fan_rpm
+        if progress is not None:
+            self.cpu_activity_progress = max(0.0, min(1.0, progress))
+
+        if is_cpu and self.cpu_visual_state == "running":
+            self.step_cpu_activity_field()
+        if is_cpu:
+            self.cpu_activity.queue_draw()
+
     def reset_ram_activity_field(self):
         total = 40 * 8
         self.ram_activity_values = [random.uniform(0.02, 0.16) for _ in range(total)]
@@ -6444,6 +6642,7 @@ except Exception:
             self.benchmark_result.set_text("")
             self.set_benchmark_result_class(None)
             self.set_benchmark_controls(False)
+            self.update_cpu_activity("idle")
             self.update_ram_activity("idle")
 
     def set_benchmark_status_temp_class(self, temp_c):
@@ -6460,7 +6659,7 @@ except Exception:
     def update_cpu_benchmark_status(self):
         cores = os.cpu_count() or 1
 
-        # Die Temperatur ist nur Zusatzinformation.
+        # Temperatur und FAN sind Zusatzinformationen.
         # Sensorfehler dürfen die CPU-Lastmessung niemals blockieren.
         try:
             temp_c = read_cpu_temperature()
@@ -6468,12 +6667,30 @@ except Exception:
             temp_c = None
             log(f"CPU-Temperatur nicht lesbar: {exc}")
 
+        fan_rpm = None
+        try:
+            fan_key, fan_rpm, _fan_percent = read_fan_status(
+                self.fan_sensor_key
+            )
+            if fan_key is not None:
+                self.fan_sensor_key = fan_key
+        except Exception as exc:
+            log(f"FAN-Drehzahl nicht lesbar: {exc}")
+
         text = f"CPU Benchmark läuft · {cores} Threads / Kerne"
 
         if temp_c is not None:
             text += f" · {temp_c:.0f}°C"
+        if fan_rpm is not None:
+            text += f" · FAN {int(round(fan_rpm))} RPM"
+
         self.benchmark_status.set_text(text)
         self.set_benchmark_status_temp_class(temp_c)
+        self.update_cpu_activity(
+            temp_c=temp_c,
+            fan_rpm=fan_rpm,
+            progress=self.cpu_activity_progress,
+        )
 
     def set_benchmark_controls(self, running):
         for b in self.benchmark_buttons:
@@ -6484,7 +6701,7 @@ except Exception:
 
     def show_benchmarks(self, *_):
         self.stack.set_visible_child_name("benchmarks")
-        self.window.set_default_size(860, 360)
+        self.window.set_default_size(980, 520)
     def start_test(self, button, kind, duration):
         if self.test_proc is not None and self.test_proc.poll() is None:
             return
@@ -6501,9 +6718,10 @@ except Exception:
         )
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class(None)
-        self.update_ram_activity("running")
 
         if kind.startswith("cpu"):
+            self.update_ram_activity("idle")
+            self.update_cpu_activity("running")
             cores = os.cpu_count() or 1
 
             log(
@@ -6519,6 +6737,8 @@ except Exception:
                 str(cores),
             ]
         else:
+            self.update_cpu_activity("idle")
+            self.update_ram_activity("running")
             self.set_benchmark_status_temp_class(None)
             mode = "short" if kind == "ram-short" else "long"
             if mode == "short":
@@ -6553,7 +6773,10 @@ except Exception:
             self.benchmark_status.set_text("Test konnte nicht gestartet werden")
             self.benchmark_result.set_text(str(exc))
             self.set_benchmark_result_class("red")
-            self.update_ram_activity("error")
+            if kind.startswith("cpu"):
+                self.update_cpu_activity("error")
+            else:
+                self.update_ram_activity("error")
             return
         self.set_benchmark_controls(True)
         GLib.timeout_add(200, self.poll_test)
@@ -6571,6 +6794,8 @@ except Exception:
             self.benchmark_progress.set_fraction(fraction)
             if self.test_kind and self.test_kind.startswith("ram"):
                 self.ram_activity_progress = fraction
+            elif self.test_kind and self.test_kind.startswith("cpu"):
+                self.cpu_activity_progress = fraction
             self.benchmark_time.set_text(
                 f"{format_test_clock(elapsed)} / "
                 f"{format_test_clock(duration)}"
@@ -6625,7 +6850,10 @@ except Exception:
                 )
             )
             self.set_benchmark_result_class("red")
-            self.update_ram_activity("error")
+            if self.test_kind and self.test_kind.startswith("cpu"):
+                self.update_cpu_activity("error")
+            else:
+                self.update_ram_activity("error")
             log(
                 f"Test fehlgeschlagen: {self.test_kind}; "
                 f"returncode={returncode}; output={output[-1000:]}"
@@ -6648,6 +6876,7 @@ except Exception:
                 f"{elapsed:.1f}s"
             )
             self.set_benchmark_result_class("green")
+            self.update_cpu_activity("complete")
             log(
                 f"CPU Benchmark fertig: "
                 f"{points} Punkte, {workers} Threads, {elapsed:.2f}s"
@@ -6733,7 +6962,10 @@ except Exception:
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class("orange")
-        self.update_ram_activity("cancelled")
+        if self.test_kind and self.test_kind.startswith("cpu"):
+            self.update_cpu_activity("cancelled")
+        else:
+            self.update_ram_activity("cancelled")
 
         log(f"Test abgebrochen: {self.test_kind}")
 
