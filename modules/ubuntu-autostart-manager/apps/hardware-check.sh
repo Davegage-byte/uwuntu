@@ -2907,14 +2907,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.109")
+        self.window.set_title("Hardware Check v4.5.110")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.109")
+        title_label = Gtk.Label(label="Hardware Check v4.5.110")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4481,7 +4481,7 @@ class App(Gtk.Application):
                     if (
                         token.startswith("keycode:")
                         or token in {
-                            "escape", "benchmark", "keyboard", "ram",
+                            "escape", "benchmark", "all", "keyboard", "ram",
                             "info", "update", "warranty",
                             "hotkeys", "touch", "display",
                             "audio-left", "audio-both", "audio-right", "audio-auto",
