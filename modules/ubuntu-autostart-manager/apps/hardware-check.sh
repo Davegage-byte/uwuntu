@@ -163,6 +163,13 @@ button.benchmark-compact {
     font-size: 12px;
     font-weight: 800;
 }
+button.benchmark-choice.benchmark-running,
+button.benchmark-choice.benchmark-running:disabled {
+    background: #232329;
+    color: #5aa2ff;
+    border: 1px solid #5aa2ff;
+    opacity: 1;
+}
 button.benchmark-choice.benchmark-passed,
 button.benchmark-choice.benchmark-passed:disabled {
     background: #232329;
@@ -2898,14 +2905,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.105")
+        self.window.set_title("Hardware Check v4.5.106")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.105")
+        title_label = Gtk.Label(label="Hardware Check v4.5.106")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -7789,13 +7796,27 @@ except Exception:
 
     def clear_benchmark_button_results(self):
         for button in self.benchmark_buttons:
+            button.remove_css_class("benchmark-running")
             button.remove_css_class("benchmark-passed")
             button.remove_css_class("benchmark-failed")
+
+    def set_benchmark_button_running(self, kind):
+        for button in self.benchmark_buttons:
+            button.remove_css_class("benchmark-running")
+
+        button = self.benchmark_button_by_kind.get(kind)
+        if button is None:
+            return
+
+        button.remove_css_class("benchmark-passed")
+        button.remove_css_class("benchmark-failed")
+        button.add_css_class("benchmark-running")
 
     def set_benchmark_button_result(self, kind, ok):
         button = self.benchmark_button_by_kind.get(kind)
         if button is None:
             return
+        button.remove_css_class("benchmark-running")
         button.remove_css_class("benchmark-passed")
         button.remove_css_class("benchmark-failed")
         button.add_css_class(
@@ -7842,6 +7863,7 @@ except Exception:
             return False
 
         kind, duration = self.test_sequence[self.test_sequence_index]
+        self.set_benchmark_button_running(kind)
         self.start_single_test(kind, duration)
         return False
 
@@ -7920,10 +7942,10 @@ except Exception:
         for item in results:
             mark = "✓" if item.get("ok") else "✕"
             summary = item.get("summary") or ""
-            parts.append(
-                f"{item.get('name', 'TEST')} {mark}"
-                + (f" {summary}" if summary else "")
-            )
+            text = item.get("name", "TEST")
+            if summary:
+                text += f" {summary}"
+            parts.append(f"{text} {mark}")
 
         overall_kind = (
             "all-long"
@@ -8005,8 +8027,10 @@ except Exception:
         self.test_sequence_finalize_pending = False
         button_for_kind = self.benchmark_button_by_kind.get(kind)
         if button_for_kind is not None:
+            button_for_kind.remove_css_class("benchmark-running")
             button_for_kind.remove_css_class("benchmark-passed")
             button_for_kind.remove_css_class("benchmark-failed")
+        self.set_benchmark_button_running(kind)
         self.start_single_test(kind, duration)
 
     def start_single_test(self, kind, duration):
@@ -8313,6 +8337,11 @@ except Exception:
                     force=True,
                 )
             elif not sequence_was_active:
+                running_button = self.benchmark_button_by_kind.get(
+                    completed_kind
+                )
+                if running_button is not None:
+                    running_button.remove_css_class("benchmark-running")
                 self.set_benchmark_controls(False)
 
         return False
