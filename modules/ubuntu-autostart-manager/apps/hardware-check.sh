@@ -2215,6 +2215,7 @@ def run_global_arrow_monitor(parent_pid):
     key_map = {
         1: "escape",        # KEY_ESC
         48: "benchmark",    # KEY_B
+        30: "all",          # KEY_A
         37: "keyboard",     # KEY_K
         19: "ram",          # KEY_R
         23: "info",         # KEY_I
@@ -2821,6 +2822,7 @@ class App(Gtk.Application):
         self.last_global_hotkey_at = {
             "escape": 0.0,
             "benchmark": 0.0,
+            "all": 0.0,
             "keyboard": 0.0,
             "ram": 0.0,
             "info": 0.0,
@@ -2975,14 +2977,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.107")
+        self.window.set_title("Hardware Check v4.5.108")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.107")
+        title_label = Gtk.Label(label="Hardware Check v4.5.108")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5761,9 +5763,10 @@ class App(Gtk.Application):
             ("↑", "Audio Test: beide Lautsprecher testen"),
             ("→", "Audio Test: rechten Lautsprecher testen"),
             ("↓", "Audio Test: kompletten Auto-Test starten"),
-            ("B", "Benchmark-Seite öffnen / CPU-Benchmark starten"),
+            ("B", "Benchmark-Seite öffnen / CPU-Kurztest starten"),
             ("K", "Keyboard-Test global öffnen"),
-            ("R", "RAM-Test auf der Benchmark-Seite starten"),
+            ("R", "RAM-Kurztest auf der Benchmark-Seite starten"),
+            ("A", "ALLE Kurztests auf der Benchmark-Seite starten"),
             ("I", "Systeminformationen anzeigen"),
             ("U", "Uwuntu-Update suchen und installieren"),
             ("G", "Garantieprüfung Dell / Lenovo"),
@@ -5798,7 +5801,7 @@ class App(Gtk.Application):
 
         note = Gtk.Label(
             label=(
-                "Hinweis: Im KEYBOARD TEST sind F1, B, K, R, I, U, G, T, D,\n"
+                "Hinweis: Im KEYBOARD TEST sind F1, A, B, K, R, I, U, G, T, D,\n"
                 "SUPER und alle Pfeiltasten normale Prüftasten. ESC zählt ebenfalls\n"
                 "als Prüftaste; erst ESC x3 beendet den Tastatur-Test. SUPER allein,\n"
                 "SUPER+Pfeile und ALT+SPACE lösen während des Tests keine\n"
@@ -6457,8 +6460,13 @@ except Exception:
             return False
 
         if action == "ram" and visible == "benchmarks":
-            self.start_test(None, "ram-short", 30.0)
-            log("Globaler Hotkey R: RAM Test gestartet")
+            self.start_test(None, "ram-short", 10.0)
+            log("Globaler Hotkey R: RAM Kurztest gestartet")
+            return False
+
+        if action == "all" and visible == "benchmarks":
+            self.start_test(None, "all-short", 30.0)
+            log("Globaler Hotkey A: ALLE Kurztests gestartet")
             return False
 
         return False
@@ -6876,13 +6884,13 @@ except Exception:
         chooser.set_hexpand(True)
 
         specs = [
-            ("CPU", "cpu-short", 10.0),
+            ("CPU (B)", "cpu-short", 10.0),
             ("CPU ERW.", "cpu-long", 600.0),
-            ("RAM", "ram-short", 30.0),
+            ("RAM (R)", "ram-short", 10.0),
             ("RAM ERW.", "ram-long", 600.0),
-            ("GPU", "gpu-short", 20.0),
+            ("GPU", "gpu-short", 10.0),
             ("GPU ERW.", "gpu-long", 600.0),
-            ("ALLE", "all-short", 60.0),
+            ("ALLE (A)", "all-short", 30.0),
             ("ALLE ERW.", "all-long", 1800.0),
         ]
 
@@ -8107,8 +8115,8 @@ except Exception:
             if extended
             else [
                 ("cpu-short", 10.0),
-                ("ram-short", 30.0),
-                ("gpu-short", 20.0),
+                ("ram-short", 10.0),
+                ("gpu-short", 10.0),
             ]
         )
         self.test_sequence_index = 0
@@ -8233,7 +8241,7 @@ except Exception:
         total_duration = (
             1800.0
             if sequence_name == "ALLE ERW."
-            else 60.0
+            else 30.0
         )
         self.benchmark_time.set_text(
             f"{format_test_clock(total_duration)} / "
@@ -10236,8 +10244,9 @@ except Exception:
                 self.handle_global_hotkey(action)
                 return True
 
-        # B/K/R/I/U/G/F1 auch über GTK behandeln, wenn Hardware Check den Fokus hat.
-        # B = Benchmark, K = Tastatur-Test. Innerhalb des Tastatur-Tests
+        # A/B/K/R/I/U/G/F1 auch über GTK behandeln, wenn Hardware Check den Fokus hat.
+        # B = CPU/Benchmark, R = RAM, A = ALLE, K = Tastatur-Test.
+        # Innerhalb des Tastatur-Tests
         # bleiben beide selbstverständlich normale Prüftasten.
         # Der Hotkey-Handler entprellt das parallele /dev/input-Ereignis.
         lower_name = name.lower()
@@ -10249,6 +10258,9 @@ except Exception:
             return True
         if lower_name == "r" and visible == "benchmarks":
             self.handle_global_hotkey("ram")
+            return True
+        if lower_name == "a" and visible == "benchmarks":
+            self.handle_global_hotkey("all")
             return True
         if lower_name == "i" and visible != "keyboard":
             self.handle_global_hotkey("info")
