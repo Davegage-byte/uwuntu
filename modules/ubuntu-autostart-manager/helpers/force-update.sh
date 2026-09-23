@@ -145,6 +145,10 @@ PY
             exit 0
         fi
     else
+        if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+            startup_skip "GitHub-Antwort nicht eindeutig · starte lokalen Stand"
+        fi
+
         printf '%s  GitHub-Ref konnte nicht ausgewertet werden · RAW-main-Fallback\n' \
             "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
     fi
