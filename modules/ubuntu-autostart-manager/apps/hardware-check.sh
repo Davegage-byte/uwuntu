@@ -2506,14 +2506,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.96")
+        self.window.set_title("Hardware Check v4.5.97")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.96")
+        title_label = Gtk.Label(label="Hardware Check v4.5.97")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6206,9 +6206,9 @@ except Exception:
 
         specs = [
             ("BENCHMARK (B)", "cpu-short", 10.0),
-            ("BENCHMARK (ERWEITERT)", "cpu-long", 600.0),
+            ("BENCHMARK (ERW.)", "cpu-long", 600.0),
             ("RAM TEST (R)", "ram-short", 30.0),
-            ("RAM TEST (ERWEITERT)", "ram-long", 600.0),
+            ("RAM TEST (ERW.)", "ram-long", 600.0),
         ]
 
         self.benchmark_buttons = []
