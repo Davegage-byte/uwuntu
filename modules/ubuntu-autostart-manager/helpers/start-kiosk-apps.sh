@@ -12,6 +12,253 @@ echo
 echo "============================================================"
 echo "4-Felder-Kiosk Start: $(date)"
 echo "============================================================"
+
+FORCE_UPDATE_SCRIPT="$HOME/.local/bin/uwuntu-force-update.sh"
+KIOSK_SELF="$HOME/.local/bin/start-kiosk-apps.sh"
+
+startup_network_may_reach_github() {
+    # Bei eindeutig fehlender/limitierter Konnektivität nicht erst Curl-
+    # Timeouts abwarten. "unknown" wird trotzdem kurz probiert, weil die
+    # NetworkManager-Konnektivitätsprüfung deaktiviert sein kann.
+    if ! command -v nmcli >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local connectivity
+    connectivity="$(
+        nmcli -t -f CONNECTIVITY general 2>/dev/null \
+            | head -n 1 \
+            | tr '[:upper:]' '[:lower:]'
+    )"
+
+    case "$connectivity" in
+        none|portal|limited)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+run_startup_update_preflight() {
+    if [ "${UWUNTU_SKIP_STARTUP_UPDATE:-0}" = "1" ]; then
+        unset UWUNTU_SKIP_STARTUP_UPDATE
+        echo "Update-Preflight nach erfolgreichem Update einmal übersprungen."
+        return 0
+    fi
+
+    if [ ! -x "$FORCE_UPDATE_SCRIPT" ]; then
+        echo "Hinweis: Update-Helfer fehlt; starte lokalen Stand ohne Preflight."
+        return 0
+    fi
+
+    if ! startup_network_may_reach_github; then
+        echo "Kein voll nutzbares Netzwerk gemeldet; starte ohne Update-Wartezeit."
+        return 0
+    fi
+
+    echo "Prüfe vor dem App-Start kurz auf Uwuntu-Updates ..."
+
+    python3 - "$FORCE_UPDATE_SCRIPT" <<'PY'
+import subprocess
+import sys
+import threading
+
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gdk, GLib, Gtk
+
+helper = sys.argv[1]
+
+CSS = b"""
+window {
+    background: #17171c;
+    color: #f4f4f5;
+}
+.update-box {
+    background: #232329;
+    border: 1px solid #34343c;
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+.update-title {
+    color: #f4f4f5;
+    font-size: 17px;
+    font-weight: 800;
+}
+.update-status {
+    color: #f5a623;
+    font-size: 12px;
+    font-weight: 700;
+}
+.update-status.status-orange { color: #f5a623; }
+.update-status.status-blue   { color: #5aa2ff; }
+.update-status.status-green  { color: #61d36b; }
+.update-status.status-red    { color: #ff4c4c; }
+"""
+
+
+class StartupUpdate(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="com.david.UwuntuStartupUpdate")
+        self.window = None
+        self.status_label = None
+        self.result_code = 0
+
+    def do_activate(self):
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display,
+                provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+        self.window = Gtk.ApplicationWindow(application=self)
+        self.window.set_title("Uwuntu Update")
+        self.window.set_default_size(560, 145)
+        self.window.set_resizable(False)
+        try:
+            self.window.set_deletable(False)
+        except Exception:
+            pass
+
+        outer = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+        )
+        outer.set_margin_top(16)
+        outer.set_margin_bottom(16)
+        outer.set_margin_start(18)
+        outer.set_margin_end(18)
+        outer.add_css_class("update-box")
+
+        title = Gtk.Label(label="UWUNTU UPDATE")
+        title.set_xalign(0)
+        title.add_css_class("update-title")
+        outer.append(title)
+
+        self.status_label = Gtk.Label(
+            label="Prüfe GitHub vor dem Programmstart …"
+        )
+        self.status_label.set_xalign(0)
+        self.status_label.set_wrap(True)
+        self.status_label.add_css_class("update-status")
+        self.status_label.add_css_class("status-orange")
+        outer.append(self.status_label)
+
+        self.window.set_child(outer)
+        self.window.present()
+
+        threading.Thread(
+            target=self.worker,
+            name="uwuntu-startup-update",
+            daemon=True,
+        ).start()
+
+    def set_status(self, text):
+        if self.status_label is None:
+            return False
+
+        self.status_label.set_text(text)
+        for css_class in (
+            "status-orange",
+            "status-blue",
+            "status-green",
+            "status-red",
+        ):
+            self.status_label.remove_css_class(css_class)
+
+        normalized = (text or "").strip()
+        if normalized.startswith("FEHLER:"):
+            color = "red"
+        elif (
+            normalized.startswith("Update gefunden")
+            or normalized.startswith("Installiere")
+            or normalized.startswith("Update erfolgreich")
+        ):
+            color = "blue"
+        elif (
+            normalized == "Bereits aktuell"
+            or "starte lokalen Stand" in normalized
+        ):
+            color = "green"
+        else:
+            color = "orange"
+
+        self.status_label.add_css_class("status-" + color)
+        return False
+
+    def finish(self):
+        if self.window is not None:
+            try:
+                self.window.close()
+            except Exception:
+                pass
+        self.quit()
+        return False
+
+    def worker(self):
+        try:
+            proc = subprocess.Popen(
+                [helper, "--startup-check"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    line = raw.strip()
+                    if not line.startswith("STATUS|"):
+                        continue
+                    status = line.split("|", 1)[1].strip()
+                    GLib.idle_add(self.set_status, status)
+
+            self.result_code = proc.wait()
+        except Exception as exc:
+            self.result_code = 99
+            GLib.idle_add(self.set_status, f"FEHLER: {exc}")
+
+        if self.result_code == 0:
+            delay_ms = 250
+        elif self.result_code == 10:
+            delay_ms = 550
+        else:
+            delay_ms = 1200
+
+        GLib.timeout_add(delay_ms, self.finish)
+
+
+app = StartupUpdate()
+app.run([])
+raise SystemExit(app.result_code)
+PY
+    return $?
+}
+
+run_startup_update_preflight
+STARTUP_UPDATE_RC=$?
+
+if [ "$STARTUP_UPDATE_RC" -eq 10 ]; then
+    echo "Update wurde vor dem App-Start installiert; starte den neuen Kiosk-Stand."
+
+    if [ -x "$KIOSK_SELF" ]; then
+        export UWUNTU_SKIP_STARTUP_UPDATE=1
+        exec "$KIOSK_SELF"
+    fi
+
+    echo "WARNUNG: Neuer Kiosk-Launcher fehlt nach Update; fahre lokal fort."
+elif [ "$STARTUP_UPDATE_RC" -ne 0 ]; then
+    echo "WARNUNG: Startup-Updateprüfung fehlgeschlagen (Code $STARTUP_UPDATE_RC)."
+    echo "Der vorhandene lokale Uwuntu-Stand wird trotzdem gestartet."
+fi
+
 # ------------------------------------------------------------
 # Bildschirmhelligkeit auf Maximum
 # ------------------------------------------------------------
