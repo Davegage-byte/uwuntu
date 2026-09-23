@@ -155,7 +155,8 @@ button.benchmark-open {
     font-weight: 800;
 }
 
-button.benchmark-choice {
+button.benchmark-choice,
+button.benchmark-compact {
     min-height: 28px;
     padding: 1px 6px;
     border-radius: 8px;
@@ -186,12 +187,12 @@ button.benchmark-choice.benchmark-failed:disabled {
     font-size: 13px;
     font-weight: 800;
 }
-.benchmark-result.status-green,
-.benchmark-status.status-green {
+label.benchmark-result.status-green,
+label.benchmark-status.status-green {
     color: #61d36b;
 }
-.benchmark-result.status-red,
-.benchmark-status.status-red {
+label.benchmark-result.status-red,
+label.benchmark-status.status-red {
     color: #ff4c4c;
 }
 
@@ -2695,6 +2696,19 @@ def format_test_clock(seconds):
         return f"{hours:d}:{minutes:02d}:{sec:02d}"
     return f"{minutes:02d}:{sec:02d}"
 
+
+def format_benchmark_points(value):
+    """Ganzzahl mit deutschem Tausenderpunkt, unabhängig von Locale."""
+    number = int(value)
+    sign = "-" if number < 0 else ""
+    digits = str(abs(number))
+    groups = []
+    while digits:
+        groups.append(digits[-3:])
+        digits = digits[:-3]
+    return sign + ".".join(reversed(groups))
+
+
 class App(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
@@ -2883,14 +2897,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.103")
+        self.window.set_title("Hardware Check v4.5.104")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.103")
+        title_label = Gtk.Label(label="Hardware Check v4.5.104")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2952,6 +2966,7 @@ class App(Gtk.Application):
         refresh=False,
         version=None,
         back_label="← ÜBERSICHT",
+        compact_back=False,
     ):
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         row.set_margin_start(10)
@@ -2962,6 +2977,8 @@ class App(Gtk.Application):
         if back:
             b = Gtk.Button(label=back_label)
             b.add_css_class("secondary")
+            if compact_back:
+                b.add_css_class("benchmark-compact")
             b.connect("clicked", self.show_overview)
             row.append(b)
         title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -6568,6 +6585,7 @@ except Exception:
                 "BENCHMARKS",
                 back=True,
                 back_label="← ÜBERSICHT (ESC)",
+                compact_back=True,
             )
         )
 
@@ -6693,7 +6711,7 @@ except Exception:
         self.benchmark_time.set_hexpand(True)
         self.benchmark_time.add_css_class("muted")
         self.cancel_test_button = Gtk.Button(label="ABBRECHEN")
-        self.cancel_test_button.add_css_class("tiny-button")
+        self.cancel_test_button.add_css_class("benchmark-compact")
         self.cancel_test_button.set_sensitive(False)
         self.cancel_test_button.connect("clicked", self.cancel_test)
 
@@ -6717,6 +6735,25 @@ except Exception:
             self.benchmark_result.remove_css_class(cls)
         if color:
             self.benchmark_result.add_css_class("status-" + color)
+
+    def set_benchmark_result_text(self, text, color=None):
+        """
+        Ergebnistext setzen und Erfolgs-/Fehlerfarbe zusätzlich über Pango
+        erzwingen. So bleibt die Farbe unabhängig von GTK-Theme-Prioritäten.
+        """
+        palette = {
+            "green": "#61d36b",
+            "orange": "#f5a623",
+            "red": "#ff4c4c",
+        }
+        self.set_benchmark_result_class(color)
+        if color in palette:
+            escaped = GLib.markup_escape_text(str(text))
+            self.benchmark_result.set_markup(
+                f'<span foreground="{palette[color]}">{escaped}</span>'
+            )
+        else:
+            self.benchmark_result.set_text(str(text))
 
     def draw_ram_activity(self, area, cr, width, height):
         """Zeichnet die organische RAM-Aktivität mit Uwuntu-Farbpalette."""
@@ -7844,6 +7881,10 @@ except Exception:
             # sie nicht mit letzten glmark2-/DrawingArea-Callbacks.
             self.test_sequence_finalize_pending = True
             GLib.idle_add(self.finish_test_sequence)
+            # Zweiter unabhängiger Abschlussweg. Falls ein fremder GTK-Idle-
+            # Callback den ersten Durchlauf stört, finalisiert spätestens
+            # dieser Timeout dieselbe idempotente Sequenz.
+            GLib.timeout_add(300, self.finish_test_sequence)
         return False
 
     def finish_test_sequence(self):
@@ -7899,6 +7940,15 @@ except Exception:
         self.test_sequence_completed_duration = 0.0
         self.set_benchmark_controls(False)
         self.benchmark_progress.set_fraction(1.0)
+        total_duration = (
+            1800.0
+            if sequence_name == "ALLE ERW."
+            else 60.0
+        )
+        self.benchmark_time.set_text(
+            f"{format_test_clock(total_duration)} / "
+            f"{format_test_clock(total_duration)}"
+        )
         self.set_benchmark_status_temp_class(None)
         self.benchmark_status.set_text(
             f"{sequence_name} abgeschlossen"
@@ -7908,8 +7958,10 @@ except Exception:
         self.benchmark_status.add_css_class(
             "status-green" if all_ok else "status-red"
         )
-        self.benchmark_result.set_text(" · ".join(parts))
-        self.set_benchmark_result_class("green" if all_ok else "red")
+        self.set_benchmark_result_text(
+            " · ".join(parts),
+            "green" if all_ok else "red",
+        )
 
         # Der letzte Test ist GPU. Dessen Visual bleibt sichtbar, erhält aber
         # sicher den finalen COMPLETE/ERROR-Zustand statt LIVE.
@@ -8190,7 +8242,10 @@ except Exception:
         output = "\n".join(self.test_output_lines)
 
         self.test_proc = None
-        if self.test_sequence_active:
+        sequence_was_active = self.test_sequence_active
+        completed_kind = self.test_kind
+
+        if sequence_was_active:
             overall_elapsed = min(
                 self.test_sequence_total_duration,
                 self.test_sequence_completed_duration + duration,
@@ -8204,9 +8259,12 @@ except Exception:
                 f"{format_test_clock(self.test_sequence_total_duration)}"
             )
         else:
+            # Nach Abschluss immer die Sollzeit zeigen. Ein glmark2-Lauf darf
+            # früher fertig werden, soll aber optisch nicht bei 00:16/00:20
+            # "hängen" bleiben.
             self.benchmark_progress.set_fraction(1.0)
             self.benchmark_time.set_text(
-                f"{format_test_clock(elapsed)} / "
+                f"{format_test_clock(duration)} / "
                 f"{format_test_clock(duration)}"
             )
             self.set_benchmark_controls(False)
@@ -8216,15 +8274,46 @@ except Exception:
         if self.test_cancelled:
             return False
 
-        sequence_was_active = self.test_sequence_active
-        completed_kind = self.test_kind
-        outcome = self.finish_test_result(output, proc.returncode)
-        if sequence_was_active and not self.test_cancelled:
-            self.finish_sequence_step(
-                outcome,
-                step_kind=completed_kind,
-                force=True,
+        outcome = None
+        try:
+            outcome = self.finish_test_result(output, proc.returncode)
+        except Exception as exc:
+            log(
+                f"Ergebnisdarstellung fehlgeschlagen: "
+                f"{completed_kind}: {exc}"
             )
+            outcome = {
+                "ok": False,
+                "name": (
+                    "CPU" if completed_kind and completed_kind.startswith("cpu")
+                    else "RAM" if completed_kind and completed_kind.startswith("ram")
+                    else "GPU"
+                ),
+                "summary": "Auswertung fehlgeschlagen",
+            }
+            self.set_benchmark_status_temp_class(None)
+            self.benchmark_status.set_text("Auswertung fehlgeschlagen")
+            self.benchmark_status.add_css_class("status-red")
+            self.set_benchmark_result_text(str(exc), "red")
+        finally:
+            # Diese Finalisierung muss auch dann passieren, wenn die letzte
+            # UI-Aktualisierung des GPU-Ergebnisses eine Ausnahme wirft.
+            if completed_kind and completed_kind.startswith("gpu"):
+                self.force_gpu_visual_state(
+                    "complete"
+                    if outcome and outcome.get("ok")
+                    else "error"
+                )
+
+            if sequence_was_active and not self.test_cancelled:
+                self.finish_sequence_step(
+                    outcome,
+                    step_kind=completed_kind,
+                    force=True,
+                )
+            elif not sequence_was_active:
+                self.set_benchmark_controls(False)
+
         return False
 
     def finish_test_result(self, output, returncode):
@@ -8249,12 +8338,12 @@ except Exception:
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("Test fehlgeschlagen")
             self.benchmark_status.add_css_class("status-red")
-            self.benchmark_result.set_text(
+            self.set_benchmark_result_text(
                 error[6:] if error else (
                     lines[-1] if lines else "Keine Ergebnisdaten"
-                )
+                ),
+                "red",
             )
-            self.set_benchmark_result_class("red")
             if self.test_kind and self.test_kind.startswith("cpu"):
                 self.update_cpu_activity("error")
             elif self.test_kind and self.test_kind.startswith("ram"):
@@ -8283,16 +8372,16 @@ except Exception:
             workers = int(parts[4])
 
             points = int((total / max(0.001, elapsed)) / 1000.0)
-            points_text = f"{points:,}".replace(",", ".")
+            points_text = format_benchmark_points(points)
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("CPU Benchmark abgeschlossen")
             self.benchmark_status.add_css_class("status-green")
-            self.benchmark_result.set_text(
+            self.set_benchmark_result_text(
                 f"{points_text} Punkte · "
                 f"{workers} Threads · "
-                f"{elapsed:.1f}s"
+                f"{elapsed:.1f}s",
+                "green",
             )
-            self.set_benchmark_result_class("green")
             self.update_cpu_activity("complete")
             log(
                 f"CPU Benchmark fertig: "
@@ -8317,24 +8406,24 @@ except Exception:
                 self.set_benchmark_status_temp_class(None)
                 self.benchmark_status.set_text("RAM Test abgeschlossen")
                 self.benchmark_status.add_css_class("status-green")
-                self.benchmark_result.set_text(
+                self.set_benchmark_result_text(
                     f"0 Fehler · "
                     f"{target_gib:.1f} GB RAM · "
                     f"{checked_gib:.1f} GB geprüft · "
-                    f"{throughput:.1f} GB/s"
+                    f"{throughput:.1f} GB/s",
+                    "green",
                 )
-                self.set_benchmark_result_class("green")
                 self.update_ram_activity("complete")
             else:
                 self.benchmark_status.set_text(
                     "RAM FEHLER ERKANNT"
                 )
-                self.benchmark_result.set_text(
+                self.set_benchmark_result_text(
                     f"{errors} fehlerhafte Blöcke · "
                     f"{target_gib:.1f} GB RAM · "
-                    f"{passes} Prüfmuster"
+                    f"{passes} Prüfmuster",
+                    "red",
                 )
-                self.set_benchmark_result_class("red")
                 self.update_ram_activity("error")
             log(
                 f"RAM Test fertig: errors={errors}, "
@@ -8420,10 +8509,10 @@ except Exception:
                     "GPU TEST: SOFTWARE-RENDERING ERKANNT"
                 )
                 self.benchmark_status.add_css_class("status-red")
-                self.benchmark_result.set_text(
-                    f"{renderer_text} · {avg_fps or 0:.0f} FPS"
+                self.set_benchmark_result_text(
+                    f"{renderer_text} · {avg_fps or 0:.0f} FPS",
+                    "red",
                 )
-                self.set_benchmark_result_class("red")
                 self.update_gpu_activity("error")
                 ok = False
                 summary = "Software-Rendering"
@@ -8431,14 +8520,15 @@ except Exception:
                 self.set_benchmark_status_temp_class(None)
                 self.benchmark_status.set_text("GPU Test abgeschlossen")
                 self.benchmark_status.add_css_class("status-green")
-                self.benchmark_result.set_text(
-                    f"{score:,} P · "
-                    f"{renderer_text}{load_text}{temp_text}"
-                ).replace(",", ".")
-                self.set_benchmark_result_class("green")
+                score_text = format_benchmark_points(score)
+                self.set_benchmark_result_text(
+                    f"{score_text} P · "
+                    f"{renderer_text}{load_text}{temp_text}",
+                    "green",
+                )
                 self.update_gpu_activity("complete")
                 ok = True
-                summary = f"{score:,} P".replace(",", ".")
+                summary = f"{format_benchmark_points(score)} P"
 
             log(
                 f"GPU Test fertig: score={score}, "
