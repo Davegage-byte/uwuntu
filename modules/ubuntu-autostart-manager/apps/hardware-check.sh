@@ -138,22 +138,6 @@ button.refresh-button {
     font-size: 11px;
     font-weight: 800;
 }
-button.clipboard-monitor {
-    min-height: 22px;
-    padding: 1px 7px;
-    border-radius: 7px;
-    font-size: 11px;
-    font-weight: 800;
-    background: #232329;
-}
-button.clipboard-monitor.clipboard-monitor-off {
-    color: #f5a623;
-    border: 1px solid #f5a623;
-}
-button.clipboard-monitor.clipboard-monitor-on {
-    color: #61d36b;
-    border: 1px solid #61d36b;
-}
 
 
 button.tiny-button {
@@ -2713,52 +2697,6 @@ def warranty_support_target(serial):
     return None
 
 
-def scanned_warranty_support_target(raw_text):
-    """Scannerwert aus der Zwischenablage als Dell/Lenovo-SN erkennen.
-
-    Absichtlich eng gefasst: aktuelle Dell-Service-Tags bestehen aus genau
-    sieben alphanumerischen Zeichen, aktuelle Lenovo-PC-Seriennummern aus
-    genau acht. Andere Zwischenablageninhalte bleiben vollständig unberührt.
-    """
-    if raw_text is None:
-        return None
-
-    serial = str(raw_text).strip().upper()
-    if not serial:
-        return None
-
-    # Übliche Scanner-/Etikettpräfixe tolerieren, ohne beliebigen Text
-    # herauszufischen. Danach muss der komplette Rest exakt zur SN passen.
-    serial = re.sub(
-        r"^(?:S/N|SN|SERIAL(?: NUMBER)?|SERVICE[- ]?TAG|SVC[- ]?TAG|ST)"
-        r"\s*[:#-]?\s*",
-        "",
-        serial,
-        flags=re.IGNORECASE,
-    )
-    serial = serial.strip()
-
-    if re.fullmatch(r"[A-Z0-9]{7}", serial):
-        return (
-            "Dell",
-            serial,
-            "https://www.dell.com/support/product-details/de-de/servicetag/"
-            + serial
-            + "/overview",
-        )
-
-    if re.fullmatch(r"[A-Z0-9]{8}", serial):
-        return (
-            "Lenovo",
-            serial,
-            "https://pcsupport.lenovo.com/de/de/products/"
-            + serial
-            + "/warranty",
-        )
-
-    return None
-
-
 def format_test_clock(seconds):
     seconds = max(0, int(seconds))
     minutes, sec = divmod(seconds, 60)
@@ -2849,14 +2787,6 @@ class App(Gtk.Application):
         self.update_proc = None
         self.serial_clipboard = None
         self.serial_clipboard_text = None
-        self.clipboard_monitor_enabled = False
-        self.clipboard_monitor = None
-        self.clipboard_monitor_handler = None
-        self.clipboard_monitor_read_pending = False
-        self.clipboard_monitor_last_serial = None
-        self.clipboard_monitor_last_opened_at = 0.0
-        self.clipboard_monitor_ignore_text = None
-        self.clipboard_monitor_button = None
         self.test_proc = None
         self.test_kind = None
         self.test_duration = 0.0
@@ -2977,14 +2907,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.108")
+        self.window.set_title("Hardware Check v4.5.109")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.108")
+        title_label = Gtk.Label(label="Hardware Check v4.5.109")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2993,23 +2923,6 @@ class App(Gtk.Application):
         self.header_refresh_button.set_focusable(False)
         self.header_refresh_button.connect("clicked", self.reset_all)
         self.header_bar.pack_end(self.header_refresh_button)
-
-        self.clipboard_monitor_button = Gtk.Button(
-            label="GARANTIE-SCAN AUS"
-        )
-        self.clipboard_monitor_button.add_css_class("clipboard-monitor")
-        self.clipboard_monitor_button.add_css_class(
-            "clipboard-monitor-off"
-        )
-        self.clipboard_monitor_button.set_focusable(False)
-        self.clipboard_monitor_button.set_tooltip_text(
-            "Dell-/Lenovo-Seriennummern aus der Zwischenablage öffnen"
-        )
-        self.clipboard_monitor_button.connect(
-            "clicked",
-            self.toggle_clipboard_monitor,
-        )
-        self.header_bar.pack_end(self.clipboard_monitor_button)
 
         self.window.set_titlebar(self.header_bar)
 
@@ -4701,177 +4614,6 @@ class App(Gtk.Application):
         if previous == "false":
             GLib.timeout_add(500, self.restore_center_new_windows, previous)
 
-    def update_clipboard_monitor_button(self):
-        button = self.clipboard_monitor_button
-        if button is None:
-            return
-
-        if self.clipboard_monitor_enabled:
-            button.set_label("GARANTIE-SCAN AN")
-            button.remove_css_class("clipboard-monitor-off")
-            button.add_css_class("clipboard-monitor-on")
-        else:
-            button.set_label("GARANTIE-SCAN AUS")
-            button.remove_css_class("clipboard-monitor-on")
-            button.add_css_class("clipboard-monitor-off")
-
-    def toggle_clipboard_monitor(self, *_):
-        if self.clipboard_monitor_enabled:
-            self.stop_clipboard_monitor()
-        else:
-            self.start_clipboard_monitor()
-        return False
-
-    def start_clipboard_monitor(self):
-        if self.clipboard_monitor_enabled:
-            return True
-
-        try:
-            display = Gdk.Display.get_default()
-            if display is None:
-                raise RuntimeError("Kein GDK-Display verfügbar")
-
-            clipboard = display.get_clipboard()
-            if clipboard is None:
-                raise RuntimeError("Keine GDK-Zwischenablage verfügbar")
-
-            handler = clipboard.connect(
-                "changed",
-                self.on_clipboard_monitor_changed,
-            )
-        except Exception as exc:
-            log(f"Garantie-Scan konnte nicht aktiviert werden: {exc}")
-            self.clipboard_monitor_enabled = False
-            self.update_clipboard_monitor_button()
-            return False
-
-        self.clipboard_monitor = clipboard
-        self.clipboard_monitor_handler = handler
-        self.clipboard_monitor_enabled = True
-        self.clipboard_monitor_read_pending = False
-        self.clipboard_monitor_last_serial = None
-        self.clipboard_monitor_last_opened_at = 0.0
-        self.clipboard_monitor_ignore_text = None
-        self.update_clipboard_monitor_button()
-        log("Garantie-Scan aus Zwischenablage aktiviert")
-        return True
-
-    def stop_clipboard_monitor(self):
-        clipboard = self.clipboard_monitor
-        handler = self.clipboard_monitor_handler
-        if clipboard is not None and handler is not None:
-            try:
-                clipboard.disconnect(handler)
-            except Exception:
-                pass
-
-        self.clipboard_monitor_enabled = False
-        self.clipboard_monitor = None
-        self.clipboard_monitor_handler = None
-        self.clipboard_monitor_read_pending = False
-        self.clipboard_monitor_ignore_text = None
-        self.update_clipboard_monitor_button()
-        log("Garantie-Scan aus Zwischenablage deaktiviert")
-        return True
-
-    def on_clipboard_monitor_changed(self, clipboard):
-        if (
-            not self.clipboard_monitor_enabled
-            or self.clipboard_monitor_read_pending
-        ):
-            return
-
-        self.clipboard_monitor_read_pending = True
-        try:
-            clipboard.read_text_async(
-                None,
-                self.on_clipboard_monitor_text_read,
-                None,
-            )
-        except Exception as exc:
-            self.clipboard_monitor_read_pending = False
-            log(f"Garantie-Scan: Zwischenablage konnte nicht gelesen werden: {exc}")
-
-    def on_clipboard_monitor_text_read(
-        self,
-        clipboard,
-        result,
-        _user_data=None,
-    ):
-        self.clipboard_monitor_read_pending = False
-        if not self.clipboard_monitor_enabled:
-            return
-
-        try:
-            text = clipboard.read_text_finish(result)
-        except Exception as exc:
-            log(f"Garantie-Scan: Zwischenablage-Lesen fehlgeschlagen: {exc}")
-            return
-
-        target = scanned_warranty_support_target(text)
-        if target is None:
-            # Nicht erkannte Inhalte werden weder verändert noch gelöscht.
-            return
-
-        vendor, serial, url = target
-        serial_upper = serial.upper()
-
-        # Die vorhandene G-Funktion kopiert selbst die lokale Geräte-SN.
-        # Dieses eigene Clipboard-Ereignis darf keinen zweiten Browser-Tab
-        # auslösen, da open_warranty_support() die Seite bereits öffnet.
-        ignored = (self.clipboard_monitor_ignore_text or "").upper()
-        if ignored and serial_upper == ignored:
-            self.clipboard_monitor_ignore_text = None
-            log(
-                "Garantie-Scan: eigenes Seriennummer-Clipboard-Ereignis "
-                f"ignoriert ({serial})"
-            )
-            return
-
-        now = time.monotonic()
-        if (
-            serial_upper == (self.clipboard_monitor_last_serial or "")
-            and now - self.clipboard_monitor_last_opened_at < 1.5
-        ):
-            return
-
-        self.clipboard_monitor_last_serial = serial_upper
-        self.clipboard_monitor_last_opened_at = now
-        self.open_scanned_warranty_support(vendor, serial, url)
-
-    def open_scanned_warranty_support(self, vendor, serial, url):
-        opener = shutil.which("xdg-open")
-        cmd = [opener, url] if opener else None
-
-        if cmd is None:
-            gio = shutil.which("gio")
-            if gio:
-                cmd = [gio, "open", url]
-
-        if cmd is None:
-            log(
-                f"Garantie-Scan: kein URL-Öffner für {vendor} "
-                f"Seriennummer {serial}"
-            )
-            return False
-
-        try:
-            subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            log(
-                f"Garantie-Scan: {vendor}-Garantie/Support geöffnet: "
-                f"Seriennummer {serial}"
-            )
-        except Exception as exc:
-            log(f"Garantie-Scan: Browserstart fehlgeschlagen: {exc}")
-
-        return False
-
     def copy_serial_to_clipboard(self, serial):
         """Erkannte Seriennummer für anschließendes Strg+V kopieren.
 
@@ -4885,9 +4627,6 @@ class App(Gtk.Application):
         serial = str(serial).strip()
         if not serial:
             return False
-
-        if self.clipboard_monitor_enabled:
-            self.clipboard_monitor_ignore_text = serial.upper()
 
         session_type = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
 
@@ -4962,12 +4701,6 @@ class App(Gtk.Application):
                     return True
             except Exception as exc:
                 log(f"xclip fehlgeschlagen: {exc}")
-
-        if (
-            self.clipboard_monitor_ignore_text
-            and self.clipboard_monitor_ignore_text == serial.upper()
-        ):
-            self.clipboard_monitor_ignore_text = None
 
         log("Seriennummer konnte nicht in die Zwischenablage kopiert werden")
         return False
