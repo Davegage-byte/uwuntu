@@ -1165,11 +1165,13 @@ def read_cpu_average_frequency_mhz():
 
 
 def read_gpu_telemetry():
-    """Best-effort GPU-Auslastung, Temperatur und Takt unter Linux."""
+    """Best-effort GPU-Temperatur und Takt unter Linux."""
     result = {
         "load": None,
         "temp": None,
+        "temp_source": None,
         "clock_mhz": None,
+        "driver": None,
     }
 
     def read_number(path, scale=1.0):
@@ -1192,6 +1194,11 @@ def read_gpu_telemetry():
         if not device.exists():
             continue
 
+        try:
+            driver = (device / "driver").resolve().name.lower()
+        except Exception:
+            driver = None
+
         load = None
         for path in (
             device / "gpu_busy_percent",
@@ -1203,12 +1210,26 @@ def read_gpu_telemetry():
                 break
 
         clock_mhz = None
-        for path in (
+        frequency_paths = [
             card / "gt_cur_freq_mhz",
             device / "gt_cur_freq_mhz",
             card / "gt" / "gt0" / "rps_cur_freq_mhz",
             device / "gt" / "gt0" / "rps_cur_freq_mhz",
+            card / "gt" / "gt0" / "rps_act_freq_mhz",
+            device / "gt" / "gt0" / "rps_act_freq_mhz",
+        ]
+
+        # Xe / Lunar Lake: neue Frequenz-API unter tile#/gt#/freq0.
+        for pattern in (
+            "tile*/gt*/freq0/act_freq",
+            "tile*/gt*/freq0/cur_freq",
         ):
+            try:
+                frequency_paths.extend(sorted(device.glob(pattern)))
+            except Exception:
+                pass
+
+        for path in frequency_paths:
             value = read_number(path)
             if value is not None and 10.0 <= value <= 10000.0:
                 clock_mhz = value
@@ -1247,11 +1268,18 @@ def read_gpu_telemetry():
         if load is not None or temp is not None or clock_mhz is not None:
             result["load"] = load
             result["temp"] = temp
+            result["temp_source"] = "gpu" if temp is not None else None
             result["clock_mhz"] = clock_mhz
-            return result
+            result["driver"] = driver
+            break
 
-    # NVIDIA-Fallback, falls sysfs keine brauchbaren Werte bereitstellt.
-    if shutil.which("nvidia-smi"):
+    # NVIDIA-Fallback.
+    if (
+        result["load"] is None
+        and result["temp"] is None
+        and result["clock_mhz"] is None
+        and shutil.which("nvidia-smi")
+    ):
         try:
             proc = subprocess.run(
                 [
@@ -1264,23 +1292,83 @@ def read_gpu_telemetry():
                 timeout=1.5,
                 check=False,
             )
-            line = (proc.stdout or "").splitlines()[0]
-            parts = [part.strip() for part in line.split(",")]
-            if len(parts) >= 3:
-                load = float(parts[0])
-                temp = float(parts[1])
-                clock_mhz = float(parts[2])
-                if 0.0 <= load <= 100.0:
-                    result["load"] = load
-                if -20.0 <= temp <= 130.0:
-                    result["temp"] = temp
-                if 10.0 <= clock_mhz <= 10000.0:
-                    result["clock_mhz"] = clock_mhz
+            lines = (proc.stdout or "").splitlines()
+            if lines:
+                parts = [part.strip() for part in lines[0].split(",")]
+                if len(parts) >= 3:
+                    load = float(parts[0])
+                    temp = float(parts[1])
+                    clock_mhz = float(parts[2])
+                    if 0.0 <= load <= 100.0:
+                        result["load"] = load
+                    if -20.0 <= temp <= 130.0:
+                        result["temp"] = temp
+                        result["temp_source"] = "gpu"
+                    if 10.0 <= clock_mhz <= 10000.0:
+                        result["clock_mhz"] = clock_mhz
+                    result["driver"] = "nvidia"
         except Exception:
             pass
 
+    # Intel-iGPUs haben nicht auf jedem Kernel einen eigenen GPU-Temperaturwert.
+    # Dann wird die gemeinsame Package-Temperatur ausdrücklich als PKG TEMP
+    # gekennzeichnet, statt einen GPU-Sensor vorzutäuschen.
+    if (
+        result["temp"] is None
+        and result["driver"] in {"i915", "xe"}
+    ):
+        try:
+            package_temp = read_cpu_temperature()
+        except Exception:
+            package_temp = None
+        if package_temp is not None:
+            result["temp"] = package_temp
+            result["temp_source"] = "package"
+
     return result
 
+
+def read_gpu_process_engine_time_ns(pid):
+    """
+    Summierte DRM-Engine-Zeit des Benchmark-Prozesses.
+
+    i915 und xe veröffentlichen pro DRM-Client drm-engine-*-Zähler in
+    /proc/<pid>/fdinfo. Aus deren Delta wird die tatsächliche Renderlast
+    unseres glmark2-Prozesses ohne root-Rechte berechnet.
+    """
+    if not pid:
+        return None
+
+    total = 0
+    found = False
+    try:
+        fdinfo_dir = Path(f"/proc/{int(pid)}/fdinfo")
+        for path in fdinfo_dir.glob("*"):
+            try:
+                data = path.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                )
+            except Exception:
+                continue
+
+            if "drm-driver:" not in data:
+                continue
+
+            for match in re.finditer(
+                r"^drm-engine-(?!capacity-)[^:]+:\s*([0-9]+)\s+ns\s*$",
+                data,
+                re.M,
+            ):
+                try:
+                    total += int(match.group(1))
+                    found = True
+                except Exception:
+                    continue
+    except Exception:
+        return None
+
+    return total if found else None
 
 def build_gpu_benchmark_args(duration, mode):
     """glmark2-Szenen für kurzen oder erweiterten GPU-Test."""
@@ -1290,19 +1378,19 @@ def build_gpu_benchmark_args(duration, mode):
 
     if mode == "short":
         scenes = (
-            "build",
-            "texture",
-            "shading",
+            "terrain",
+            "shadow",
+            "refract",
             "bump",
         )
     else:
         scenes = (
-            "build",
-            "texture",
-            "shading",
-            "bump",
             "terrain",
+            "shadow",
             "refract",
+            "bump",
+            "shading",
+            "jellyfish",
         )
 
     scene_duration = max(2.0, float(duration) / len(scenes))
@@ -1310,7 +1398,7 @@ def build_gpu_benchmark_args(duration, mode):
         executable,
         "--off-screen",
         "--size",
-        "640x360",
+        "1920x1080",
     ]
     for scene in scenes:
         args.extend(
@@ -2673,14 +2761,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.99")
+        self.window.set_title("Hardware Check v4.5.100")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.99")
+        title_label = Gtk.Label(label="Hardware Check v4.5.100")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6460,10 +6548,14 @@ except Exception:
         self.gpu_activity_progress = 0.0
         self.gpu_visual_load = None
         self.gpu_visual_temp = None
+        self.gpu_visual_temp_source = None
         self.gpu_visual_clock_mhz = None
         self.gpu_visual_fps = None
         self.gpu_peak_temp = None
+        self.gpu_peak_load = None
         self.gpu_renderer = None
+        self.gpu_engine_prev_ns = None
+        self.gpu_engine_prev_ts_ns = None
         self.gpu_frame_values = [0.0] * 24
         body.append(self.gpu_activity)
 
@@ -6964,9 +7056,14 @@ except Exception:
         else:
             clock_text = f"{clock_mhz:.0f} MHz"
 
+        temp_label = (
+            "PKG TEMP"
+            if self.gpu_visual_temp_source == "package"
+            else "TEMP"
+        )
         metrics = (
             ("GPU LOAD", "-- %" if load is None else f"{load:.0f} %"),
-            ("TEMP", "-- °C" if temp_c is None else f"{temp_c:.0f} °C"),
+            (temp_label, "-- °C" if temp_c is None else f"{temp_c:.0f} °C"),
             ("GPU TAKT", clock_text),
             ("FPS", "--" if fps is None else f"{fps:.0f}"),
         )
@@ -7094,10 +7191,14 @@ except Exception:
         self.gpu_activity_progress = 0.0
         self.gpu_visual_load = None
         self.gpu_visual_temp = None
+        self.gpu_visual_temp_source = None
         self.gpu_visual_clock_mhz = None
         self.gpu_visual_fps = None
         self.gpu_peak_temp = None
+        self.gpu_peak_load = None
         self.gpu_renderer = None
+        self.gpu_engine_prev_ns = None
+        self.gpu_engine_prev_ts_ns = None
         self.gpu_frame_values = [
             random.uniform(0.18, 0.48)
             for _ in range(24)
@@ -7116,11 +7217,49 @@ except Exception:
             )
         ]
 
+    def sample_gpu_process_load(self):
+        """Renderlast des laufenden glmark2-Prozesses in Prozent."""
+        proc = self.test_proc
+        if proc is None or proc.poll() is not None:
+            return None
+
+        now_ns = time.monotonic_ns()
+        engine_ns = read_gpu_process_engine_time_ns(proc.pid)
+        if engine_ns is None:
+            return None
+
+        previous_engine = self.gpu_engine_prev_ns
+        previous_ts = self.gpu_engine_prev_ts_ns
+        self.gpu_engine_prev_ns = engine_ns
+        self.gpu_engine_prev_ts_ns = now_ns
+
+        if previous_engine is None or previous_ts is None:
+            return None
+
+        delta_engine = engine_ns - previous_engine
+        delta_time = now_ns - previous_ts
+        if delta_engine < 0 or delta_time <= 0:
+            return None
+
+        load = max(
+            0.0,
+            min(100.0, (delta_engine / delta_time) * 100.0),
+        )
+        if self.gpu_peak_load is None or load > self.gpu_peak_load:
+            self.gpu_peak_load = load
+        return load
+
+    def redraw_gpu_activity(self):
+        if hasattr(self, "gpu_activity"):
+            self.gpu_activity.queue_draw()
+        return False
+
     def update_gpu_activity(
         self,
         state=None,
         load=None,
         temp_c=None,
+        temp_source=None,
         clock_mhz=None,
         fps=None,
         progress=None,
@@ -7140,8 +7279,12 @@ except Exception:
 
         if load is not None:
             self.gpu_visual_load = load
+            if self.gpu_peak_load is None or load > self.gpu_peak_load:
+                self.gpu_peak_load = load
         if temp_c is not None:
             self.gpu_visual_temp = temp_c
+            if temp_source is not None:
+                self.gpu_visual_temp_source = temp_source
             if self.gpu_peak_temp is None or temp_c > self.gpu_peak_temp:
                 self.gpu_peak_temp = temp_c
         if clock_mhz is not None:
@@ -7155,6 +7298,13 @@ except Exception:
             self.step_gpu_activity_field()
         if is_gpu:
             self.gpu_activity.queue_draw()
+
+        # Abschlusszustand sicher neu zeichnen. Sonst kann der letzte blaue
+        # LIVE-Frame im DrawingArea sichtbar bleiben.
+        if state in ("complete", "error", "cancelled"):
+            GLib.idle_add(self.redraw_gpu_activity)
+            GLib.timeout_add(80, self.redraw_gpu_activity)
+            GLib.timeout_add(220, self.redraw_gpu_activity)
 
     def reset_ram_activity_field(self):
         total = 40 * 8
@@ -7339,6 +7489,10 @@ except Exception:
             }
             log(f"GPU-Telemetrie nicht lesbar: {exc}")
 
+        process_load = self.sample_gpu_process_load()
+        if process_load is not None:
+            telemetry["load"] = process_load
+
         prefix = ""
         if self.test_sequence_active:
             prefix = (
@@ -7359,6 +7513,7 @@ except Exception:
         self.update_gpu_activity(
             load=telemetry.get("load"),
             temp_c=telemetry.get("temp"),
+            temp_source=telemetry.get("temp_source"),
             clock_mhz=telemetry.get("clock_mhz"),
             progress=self.gpu_activity_progress,
         )
@@ -7910,10 +8065,17 @@ except Exception:
             if avg_fps is not None:
                 self.gpu_visual_fps = avg_fps
 
-            temp_text = (
+            if self.gpu_peak_temp is None:
+                temp_text = ""
+            elif self.gpu_visual_temp_source == "package":
+                temp_text = f" · max. {self.gpu_peak_temp:.0f}°C PKG"
+            else:
+                temp_text = f" · max. {self.gpu_peak_temp:.0f}°C"
+
+            load_text = (
                 ""
-                if self.gpu_peak_temp is None
-                else f" · max. {self.gpu_peak_temp:.0f}°C"
+                if self.gpu_peak_load is None
+                else f" · max. {self.gpu_peak_load:.0f}% GPU"
             )
             renderer_text = renderer or "Renderer unbekannt"
 
@@ -7933,7 +8095,7 @@ except Exception:
                 self.benchmark_result.set_text(
                     f"{score:,} Punkte · "
                     f"{avg_fps or 0:.0f} FPS · "
-                    f"{renderer_text}{temp_text}"
+                    f"{renderer_text}{load_text}{temp_text}"
                 ).replace(",", ".")
                 self.set_benchmark_result_class("green")
                 self.update_gpu_activity("complete")
