@@ -161,46 +161,63 @@ else
         "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
 fi
 
-if ! curl \
-    --fail \
-    --location \
-    --silent \
-    --show-error \
-    --retry "$DOWNLOAD_RETRY" \
-    --retry-delay 1 \
-    --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
-    --max-time "$DOWNLOAD_MAX_TIME" \
-    --header 'Cache-Control: no-cache, no-store, max-age=0' \
-    --header 'Pragma: no-cache' \
-    --output "$MANIFEST_TMP" \
-    "${MANIFEST_DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
-then
-    if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+download_runtime_manifest() {
+    curl \
+        --fail \
+        --location \
+        --silent \
+        --show-error \
+        --retry "$DOWNLOAD_RETRY" \
+        --retry-delay 1 \
+        --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
+        --max-time "$DOWNLOAD_MAX_TIME" \
+        --header 'Cache-Control: no-cache, no-store, max-age=0' \
+        --header 'Pragma: no-cache' \
+        --output "$MANIFEST_TMP" \
+        "${MANIFEST_DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
+}
+
+download_manager() {
+    curl \
+        --fail \
+        --location \
+        --silent \
+        --show-error \
+        --retry "$DOWNLOAD_RETRY" \
+        --retry-delay 1 \
+        --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
+        --max-time "$DOWNLOAD_MAX_TIME" \
+        --header 'Cache-Control: no-cache, no-store, max-age=0' \
+        --header 'Pragma: no-cache' \
+        --output "$TMP" \
+        "${DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
+}
+
+if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+    # Wenn main sich geändert hat, Manager und Manifest parallel laden.
+    # So addieren sich schlechte WLAN-Timeouts beim Boot nicht.
+    download_runtime_manifest &
+    manifest_pid=$!
+    download_manager &
+    manager_pid=$!
+
+    manifest_rc=0
+    manager_rc=0
+    wait "$manifest_pid" || manifest_rc=$?
+    wait "$manager_pid" || manager_rc=$?
+
+    if [ "$manifest_rc" -ne 0 ] || [ "$manager_rc" -ne 0 ]; then
         startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
     fi
-    fail "Runtime-Manifest konnte nicht von GitHub geladen werden." 25
-fi
-
-if ! curl \
-    --fail \
-    --location \
-    --silent \
-    --show-error \
-    --retry "$DOWNLOAD_RETRY" \
-    --retry-delay 1 \
-    --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
-    --max-time "$DOWNLOAD_MAX_TIME" \
-    --header 'Cache-Control: no-cache, no-store, max-age=0' \
-    --header 'Pragma: no-cache' \
-    --output "$TMP" \
-    "${DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
-then
-    if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-        startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
+else
+    if ! download_runtime_manifest; then
+        fail "Runtime-Manifest konnte nicht von GitHub geladen werden." 25
     fi
-    fail "GitHub ist nicht erreichbar oder der Download ist fehlgeschlagen." 20
-fi
 
+    if ! download_manager; then
+        fail "GitHub ist nicht erreichbar oder der Download ist fehlgeschlagen." 20
+    fi
+fi
 [ -s "$TMP" ] || fail "GitHub hat eine leere Datei geliefert." 21
 head -n 1 "$TMP" | grep -q '^#!/usr/bin/env bash' \
     || fail "Die heruntergeladene Datei ist kein gültiger Uwuntu-Manager." 22
