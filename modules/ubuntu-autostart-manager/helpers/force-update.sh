@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -u
 
+STARTUP_CHECK_MODE=0
+if [ "${1:-}" = "--startup-check" ]; then
+    STARTUP_CHECK_MODE=1
+fi
+
+if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+    REF_RETRY=0
+    REF_CONNECT_TIMEOUT=2
+    REF_MAX_TIME=3
+    DOWNLOAD_RETRY=0
+    DOWNLOAD_CONNECT_TIMEOUT=2
+    DOWNLOAD_MAX_TIME=4
+else
+    REF_RETRY=1
+    REF_CONNECT_TIMEOUT=6
+    REF_MAX_TIME=15
+    DOWNLOAD_RETRY=2
+    DOWNLOAD_CONNECT_TIMEOUT=8
+    DOWNLOAD_MAX_TIME=45
+fi
+
 RAW_URL="https://raw.githubusercontent.com/Davegage-byte/uwuntu/refs/heads/main/Ubuntu%20Autostart%20Manager.sh"
 REF_API_URL="https://api.github.com/repos/Davegage-byte/uwuntu/git/ref/heads/main"
 RAW_COMMIT_BASE="https://raw.githubusercontent.com/Davegage-byte/uwuntu"
@@ -12,6 +33,7 @@ LOG="$HOME/uwuntu_force_update.log"
 KIOSK="$HOME/.local/bin/start-kiosk-apps.sh"
 CLOSE_APPS="$HOME/.local/bin/close-diagnostic-apps.sh"
 LOCAL_MANIFEST="$HOME/.local/share/uwuntu/runtime-manifest.json"
+LOCAL_SOURCE_REF="$HOME/.local/share/uwuntu/source-ref"
 STATUS_PIPE_ACTIVE=1
 
 status() {
@@ -30,6 +52,17 @@ fail() {
     exit "${2:-1}"
 }
 
+startup_skip() {
+    status "$1"
+    exit 0
+}
+
+remember_source_ref() {
+    [ -n "${latest_sha:-}" ] || return 0
+    mkdir -p "$(dirname "$LOCAL_SOURCE_REF")" 2>/dev/null || true
+    printf '%s\n' "$latest_sha" > "$LOCAL_SOURCE_REF" 2>/dev/null || true
+}
+
 # Neue Installationen verwenden immer den festen Pfad. Für eine ältere
 # Installation lesen wir die bisherige Pfaddatei nur noch als Fallback.
 TARGET="$DEFAULT_TARGET"
@@ -44,7 +77,11 @@ fi
 printf '%s\n' "$TARGET" > "$PATH_FILE" 2>/dev/null || true
 command -v curl >/dev/null 2>&1 || fail "curl ist nicht installiert." 13
 
-status "Suche frisch auf GitHub nach Update …"
+if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+    status "Prüfe GitHub vor dem Programmstart …"
+else
+    status "Suche frisch auf GitHub nach Update …"
+fi
 
 TMP="$(mktemp /tmp/uwuntu-manager-update.XXXXXX.sh)" || fail "Temporäre Datei konnte nicht erstellt werden." 14
 REF_TMP="$(mktemp /tmp/uwuntu-manager-ref.XXXXXX.json)" || fail "Temporäre GitHub-Ref-Datei konnte nicht erstellt werden." 15
@@ -68,10 +105,10 @@ if curl \
     --location \
     --silent \
     --show-error \
-    --retry 1 \
+    --retry "$REF_RETRY" \
     --retry-delay 1 \
-    --connect-timeout 6 \
-    --max-time 15 \
+    --connect-timeout "$REF_CONNECT_TIMEOUT" \
+    --max-time "$REF_MAX_TIME" \
     --header 'Accept: application/vnd.github+json' \
     --header 'Cache-Control: no-cache, no-store, max-age=0' \
     --header 'Pragma: no-cache' \
@@ -99,49 +136,88 @@ PY
         MANIFEST_DOWNLOAD_URL="${RAW_COMMIT_BASE}/${latest_sha}/${RAW_MANIFEST_PATH}"
         printf '%s  GitHub main Commit: %s\n' \
             "$(date '+%Y-%m-%d %H:%M:%S')" "$latest_sha" >> "$LOG" 2>/dev/null || true
+
+        if [ "$STARTUP_CHECK_MODE" -eq 1 ] \
+            && [ -f "$LOCAL_SOURCE_REF" ] \
+            && [ "$(cat "$LOCAL_SOURCE_REF" 2>/dev/null || true)" = "$latest_sha" ]
+        then
+            status "Bereits aktuell"
+            exit 0
+        fi
     else
+        if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+            startup_skip "GitHub-Antwort nicht eindeutig · starte lokalen Stand"
+        fi
+
         printf '%s  GitHub-Ref konnte nicht ausgewertet werden · RAW-main-Fallback\n' \
             "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
     fi
 else
+    if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+        startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
+    fi
+
     printf '%s  GitHub-Ref-API nicht verfügbar · RAW-main-Fallback\n' \
         "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
 fi
 
-if ! curl \
-    --fail \
-    --location \
-    --silent \
-    --show-error \
-    --retry 2 \
-    --retry-delay 1 \
-    --connect-timeout 8 \
-    --max-time 45 \
-    --header 'Cache-Control: no-cache, no-store, max-age=0' \
-    --header 'Pragma: no-cache' \
-    --output "$MANIFEST_TMP" \
-    "${MANIFEST_DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
-then
-    fail "Runtime-Manifest konnte nicht von GitHub geladen werden." 25
-fi
+download_runtime_manifest() {
+    curl \
+        --fail \
+        --location \
+        --silent \
+        --show-error \
+        --retry "$DOWNLOAD_RETRY" \
+        --retry-delay 1 \
+        --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
+        --max-time "$DOWNLOAD_MAX_TIME" \
+        --header 'Cache-Control: no-cache, no-store, max-age=0' \
+        --header 'Pragma: no-cache' \
+        --output "$MANIFEST_TMP" \
+        "${MANIFEST_DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
+}
 
-if ! curl \
-    --fail \
-    --location \
-    --silent \
-    --show-error \
-    --retry 2 \
-    --retry-delay 1 \
-    --connect-timeout 8 \
-    --max-time 45 \
-    --header 'Cache-Control: no-cache, no-store, max-age=0' \
-    --header 'Pragma: no-cache' \
-    --output "$TMP" \
-    "${DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
-then
-    fail "GitHub ist nicht erreichbar oder der Download ist fehlgeschlagen." 20
-fi
+download_manager() {
+    curl \
+        --fail \
+        --location \
+        --silent \
+        --show-error \
+        --retry "$DOWNLOAD_RETRY" \
+        --retry-delay 1 \
+        --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
+        --max-time "$DOWNLOAD_MAX_TIME" \
+        --header 'Cache-Control: no-cache, no-store, max-age=0' \
+        --header 'Pragma: no-cache' \
+        --output "$TMP" \
+        "${DOWNLOAD_URL}?uwuntu_cache_bust=${CACHE_BUST}"
+}
 
+if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+    # Wenn main sich geändert hat, Manager und Manifest parallel laden.
+    # So addieren sich schlechte WLAN-Timeouts beim Boot nicht.
+    download_runtime_manifest &
+    manifest_pid=$!
+    download_manager &
+    manager_pid=$!
+
+    manifest_rc=0
+    manager_rc=0
+    wait "$manifest_pid" || manifest_rc=$?
+    wait "$manager_pid" || manager_rc=$?
+
+    if [ "$manifest_rc" -ne 0 ] || [ "$manager_rc" -ne 0 ]; then
+        startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
+    fi
+else
+    if ! download_runtime_manifest; then
+        fail "Runtime-Manifest konnte nicht von GitHub geladen werden." 25
+    fi
+
+    if ! download_manager; then
+        fail "GitHub ist nicht erreichbar oder der Download ist fehlgeschlagen." 20
+    fi
+fi
 [ -s "$TMP" ] || fail "GitHub hat eine leere Datei geliefert." 21
 head -n 1 "$TMP" | grep -q '^#!/usr/bin/env bash' \
     || fail "Die heruntergeladene Datei ist kein gültiger Uwuntu-Manager." 22
@@ -235,6 +311,7 @@ else
 fi
 
 if [ "$manager_update_needed" -eq 0 ] && [ "$runtime_update_needed" -eq 0 ]; then
+    remember_source_ref
     status "Bereits aktuell"
     exit 0
 fi
@@ -269,6 +346,16 @@ if ! UWUNTU_SOURCE_REF="${latest_sha:-main}" "$TARGET" --apply-update >> "$LOG" 
 fi
 
 [ "$manager_update_needed" -eq 0 ] || rm -f "$BACKUP" 2>/dev/null || true
+remember_source_ref
+
+if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+    # Beim Boot laufen noch keine Diagnoseprogramme. Der Kiosk-Launcher
+    # führt sich nach Code 10 genau einmal aus dem frisch installierten
+    # Stand neu aus und startet erst danach die eigentlichen Apps.
+    status "Update erfolgreich · neuer Stand startet …"
+    exit 10
+fi
+
 status "Update erfolgreich · Anwendungen werden neu gestartet …"
 
 # Status noch kurz sichtbar lassen.
