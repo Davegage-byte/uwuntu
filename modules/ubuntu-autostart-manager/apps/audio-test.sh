@@ -67,7 +67,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_26.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_27.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -148,7 +148,7 @@ import cairo
 from gi.repository import Gtk, GLib, Gdk, Gio
 
 
-VERSION = "v1.26"
+VERSION = "v1.27"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
@@ -1837,7 +1837,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def export_compact_state(self, force=False):
         now = time.monotonic()
-        if not force and now - self.last_compact_export_at < 0.08:
+        if not force and now - self.last_compact_export_at < 0.016:
             return
         self.last_compact_export_at = now
 

@@ -3123,7 +3123,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.128"
+            else "Hardware Check v4.5.129"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3136,7 +3136,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.128"
+                else "Hardware Check v4.5.129"
             )
         )
         title_label.add_css_class("title")
@@ -3271,13 +3271,15 @@ class App(Gtk.Application):
         content.set_margin_start(8)
         content.set_margin_end(8)
         content.set_margin_bottom(4)
+        # Beide Übersichtsseiten teilen sich die verfügbare Breite exakt 50/50.
+        # Dadurch liegt die optische Trennung unabhängig vom Inhalt mittig.
+        content.set_homogeneous(True)
         # =====================================================
         # LINKE SPALTE
         # Security -> Webcam/Mic -> Eingabegeräte
         # =====================================================
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        left.set_size_request(285, -1)
-        left.set_hexpand(False)
+        left.set_hexpand(True)
 
         # TPM und Secure Boot bleiben in EINER Karte, bekommen aber – genau
         # wie HDMI und Touchpad – jeweils eine eigene dunkle Status-Kapsel.
@@ -3564,12 +3566,6 @@ class App(Gtk.Application):
             self.sensor_rows[key] = (dot, name, state)
 
         right.append(sensors)
-
-        benchmark_btn = Gtk.Button(label="Benchmark (B)")
-        benchmark_btn.add_css_class("benchmark-open")
-        benchmark_btn.set_hexpand(True)
-        benchmark_btn.connect("clicked", self.show_benchmarks)
-        right.append(benchmark_btn)
 
         content.append(left)
         content.append(right)

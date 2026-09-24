@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.31"
+VERSION = "2.32"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1335,6 +1335,7 @@ class CompactAudioPanel:
             "right": "orange",
             "auto": "orange",
         }
+        self.mic_state = None
 
         self.root = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -1384,7 +1385,7 @@ class CompactAudioPanel:
         # Der normale Tiling-Slot startet die Engine parallel. NC wartet
         # zunächst kurz darauf und startet sie nur selbst, falls der Slot
         # nicht läuft (z. B. bei einzeln geöffnetem Network Check).
-        GLib.timeout_add(100, self.poll_state)
+        GLib.timeout_add(16, self.poll_state)
 
     def ensure_engine(self):
         try:
@@ -1439,6 +1440,10 @@ class CompactAudioPanel:
         button = self.buttons.get(action)
         if button is None:
             return
+        if state not in {"orange", "blue", "green", "red"}:
+            state = "orange"
+        if self.button_states.get(action) == state:
+            return
         for css_class in (
             "audio-orange",
             "audio-blue",
@@ -1446,8 +1451,6 @@ class CompactAudioPanel:
             "audio-red",
         ):
             button.remove_css_class(css_class)
-        if state not in {"orange", "blue", "green", "red"}:
-            state = "orange"
         button.add_css_class("audio-" + state)
         self.button_states[action] = state
 
@@ -1464,10 +1467,13 @@ class CompactAudioPanel:
             data = None
 
         if not isinstance(data, dict):
-            self.mic.set_text("🎤 START")
-            self.mic.remove_css_class("good")
-            self.mic.remove_css_class("bad")
-            self.mic.add_css_class("warn")
+            if self.mic_state != "warn":
+                self.mic_state = "warn"
+                self.mic.set_text("🎤 START")
+                self.mic.remove_css_class("good")
+                self.mic.remove_css_class("bad")
+                self.mic.remove_css_class("warn")
+                self.mic.add_css_class("warn")
             self.waveform = []
             self.wave_color = "orange"
             if time.monotonic() - self.created_at >= 1.5:
@@ -1476,11 +1482,14 @@ class CompactAudioPanel:
             return True
 
         mic_running = bool(data.get("mic_running"))
-        self.mic.set_text("🎤 OK" if mic_running else "🎤 FEHLT")
-        self.mic.remove_css_class("good")
-        self.mic.remove_css_class("bad")
-        self.mic.remove_css_class("warn")
-        self.mic.add_css_class("good" if mic_running else "bad")
+        mic_state = "good" if mic_running else "bad"
+        if self.mic_state != mic_state:
+            self.mic_state = mic_state
+            self.mic.set_text("🎤 OK" if mic_running else "🎤 FEHLT")
+            self.mic.remove_css_class("good")
+            self.mic.remove_css_class("bad")
+            self.mic.remove_css_class("warn")
+            self.mic.add_css_class(mic_state)
 
         states = data.get("buttons") or {}
         for action in self.buttons:
@@ -1603,14 +1612,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.31 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.32 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.31 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.32 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
