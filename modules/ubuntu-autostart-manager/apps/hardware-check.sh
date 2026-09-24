@@ -3114,14 +3114,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.123")
+        self.window.set_title("Hardware Check v4.5.124")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.123")
+        title_label = Gtk.Label(label="Hardware Check v4.5.124")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -5655,9 +5655,11 @@ class App(Gtk.Application):
         window.set_default_size(560, 470)
         window.set_resizable(False)
 
-        # Bewusst NICHT transient an Hardware Check binden:
-        # Mutter kann das Fenster dadurch über present_centered() wieder in
-        # der Bildschirmmitte platzieren, statt relativ zum HC-Fenster.
+        # Als nicht-modales Dialogfenster an Hardware Check binden. Dadurch
+        # hält Mutter/Wayland die Shortcut-Hilfe zuverlässig über dem
+        # Hardware-Check-Fenster, ohne die restliche Bedienung zu sperren.
+        if self.window is not None:
+            window.set_transient_for(self.window)
         window.set_modal(False)
 
         window.connect("close-request", self.close_hotkeys_window)
@@ -5955,6 +5957,9 @@ class App(Gtk.Application):
         window.set_title("Uwuntu Update")
         window.set_default_size(560, 145)
         window.set_resizable(False)
+        if self.window is not None:
+            window.set_transient_for(self.window)
+        window.set_modal(False)
         window.connect("close-request", self.close_update_window)
 
         key_controller = Gtk.EventControllerKey.new()
