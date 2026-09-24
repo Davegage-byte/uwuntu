@@ -67,7 +67,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_28.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_29.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -148,7 +148,7 @@ import cairo
 from gi.repository import Gtk, GLib, Gdk, Gio
 
 
-VERSION = "v1.28"
+VERSION = "v1.29"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
@@ -1388,6 +1388,10 @@ class MainWindow(Gtk.ApplicationWindow):
             "left": 0,
             "right": 0,
         }
+        # Quick-Play für bereits erfolgreiche Links/Rechts-Tests läuft ohne
+        # erneuten Mess-Scan. Die Waveform soll während des Tons trotzdem blau
+        # bleiben. Ein Zeitfenster funktioniert auch bei überlappenden Klicks.
+        self.quick_wave_until = 0.0
 
         css = Gtk.CssProvider()
         css.load_from_data(b"""
@@ -1634,6 +1638,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.quick_visual_generation[action] += 1
                 generation = self.quick_visual_generation[action]
 
+                # Quick-Play setzt keinen speaker_scan_active-Status. Daher
+                # die Waveform separat bis kurz hinter das Tonende auf Blau
+                # halten. max() lässt schnell überlappende Links/Rechts-Klicks
+                # die blaue Anzeige korrekt verlängern.
+                self.quick_wave_until = max(
+                    self.quick_wave_until,
+                    time.monotonic() + 0.80,
+                )
                 self.set_button_state(action, "blue")
                 self.speaker_tester.quick_play(action)
 
@@ -1718,7 +1730,10 @@ class MainWindow(Gtk.ApplicationWindow):
     def waveform_color(self):
         if not self.analyzer.running:
             return "red"
-        if self.speaker_scan_active:
+        if (
+            self.speaker_scan_active
+            or time.monotonic() < self.quick_wave_until
+        ):
             return "blue"
         if self.all_speakers_passed:
             return "green"
@@ -1758,6 +1773,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # ----------------------------------------------------
         if event == "auto_start":
             self.quick_play_enabled = False
+            self.quick_wave_until = 0.0
             self.speaker_scan_active = False
             self.all_speakers_passed = False
             self.reset_side_buttons()
