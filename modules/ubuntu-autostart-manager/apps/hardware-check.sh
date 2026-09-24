@@ -2796,6 +2796,11 @@ class App(Gtk.Application):
         self.usb_group_to_slot = {}
         self.usb_tested = set()
         self.usb_connected = set()
+        # Gelernte Beziehung: ein logisch als USB-A sichtbarer Root-Pfad kann
+        # bei einem USB-C-Hotplug als xHCI-Begleitpfad desselben C-Ports
+        # auftauchen. Die A-Zuordnung bleibt dabei erhalten; sie wird nur
+        # solange unterdrückt, wie der zugehörige C-Port wirklich aktiv ist.
+        self.usb_a_c_companions = {}
         self.usb_last_group_present = {}
         self.usb_last_devices = {}
         self.usb_fallback = {}
@@ -2975,14 +2980,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.116")
+        self.window.set_title("Hardware Check v4.5.117")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.116")
+        title_label = Gtk.Label(label="Hardware Check v4.5.117")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6427,14 +6432,67 @@ except Exception:
             for group in self.usb_discovery["groups"]
         }
 
-    def sync_usb_connected(self, group_states, mark_tested=True):
-        connected = set()
+    def usb_active_c_slots(self, group_states, typec_partner_present=None):
+        """Aktuell aktive USB-C-Slots aus Root-Pfaden und UCSI ableiten."""
+        active = set()
 
         for raw_key, present in group_states.items():
             if not present:
                 continue
             slot_idx = self.usb_group_to_slot.get(raw_key)
             if slot_idx is None:
+                continue
+            if not (0 <= slot_idx < len(self.usb_slots)):
+                continue
+            if self.usb_slots[slot_idx].get("type") == "USB-C":
+                active.add(slot_idx)
+
+        if typec_partner_present:
+            discovery = self.usb_discovery or {}
+            c_map = discovery.get("c_map", {})
+            for typec_idx, port in enumerate(discovery.get("typec", [])):
+                if not typec_partner_present.get(port["name"], False):
+                    continue
+
+                for slot_idx, slot in enumerate(self.usb_slots):
+                    if slot.get("type") != "USB-C":
+                        continue
+                    if any(
+                        c_map.get(key) == typec_idx
+                        for key in slot.get("groups", set())
+                    ):
+                        active.add(slot_idx)
+                        break
+
+        return active
+
+    def usb_a_companion_suppressed(self, raw_key, active_c_slots):
+        c_slot_idx = self.usb_a_c_companions.get(raw_key)
+        return (
+            c_slot_idx is not None
+            and c_slot_idx in active_c_slots
+        )
+
+    def sync_usb_connected(
+        self,
+        group_states,
+        mark_tested=True,
+        active_c_slots=None,
+    ):
+        connected = set()
+        active_c_slots = set(active_c_slots or ())
+
+        for raw_key, present in group_states.items():
+            if not present:
+                continue
+            slot_idx = self.usb_group_to_slot.get(raw_key)
+            if slot_idx is None:
+                continue
+
+            if self.usb_a_companion_suppressed(
+                raw_key,
+                active_c_slots,
+            ):
                 continue
 
             connected.add(slot_idx)
@@ -6634,8 +6692,13 @@ except Exception:
         return slot_idx
 
     def attach_active_a_companion_to_c(self, raw_key, c_slot_idx):
-        """Gleichzeitig aktivierten A-Kandidaten als C-Begleitpfad umhängen."""
-        discovery = self.usb_discovery or {}
+        """A-Pfad als temporären Begleitpfad eines USB-C-Ports merken.
+
+        Wichtig: Der Pfad bleibt Eigentum seines USB-A-Slots. Nur solange
+        der zugehörige USB-C-Port aktiv ist, wird sein A-Status unterdrückt.
+        So funktioniert derselbe Root-Pfad beim späteren echten USB-A-Hotplug
+        wieder als USB-A.
+        """
         a_slot_idx = self.usb_group_to_slot.get(raw_key)
         if a_slot_idx is None or a_slot_idx == c_slot_idx:
             return False
@@ -6651,32 +6714,23 @@ except Exception:
         if raw_key not in a_slot.get("groups", set()):
             return False
 
-        local_a_idx = discovery.get("a_map", {}).pop(raw_key, None)
-        if local_a_idx is not None:
-            a_slot["local_idx"] = int(local_a_idx)
+        previous = self.usb_a_c_companions.get(raw_key)
+        self.usb_a_c_companions[raw_key] = c_slot_idx
 
-        c_local_idx = c_slot.get("local_idx")
-        if c_local_idx is None:
-            for key in c_slot.get("groups", set()):
-                if key in discovery.get("c_map", {}):
-                    c_local_idx = discovery["c_map"][key]
-                    break
-        if c_local_idx is None:
-            return False
-
-        a_slot["groups"].discard(raw_key)
-        c_slot["groups"].add(raw_key)
-        self.usb_group_to_slot[raw_key] = c_slot_idx
-        discovery["c_map"][raw_key] = int(c_local_idx)
-
-        self.usb_tested.discard(a_slot_idx)
+        # Der gleichzeitig aufgegangene A-Pfad ist in diesem Moment kein
+        # getesteter A-Port, sondern nur der Begleitpfad des C-Steckvorgangs.
         self.usb_connected.discard(a_slot_idx)
+        self.usb_tested.discard(a_slot_idx)
 
-        log(
-            f"USB-C Companion korrigiert: {raw_key} von USB-A Slot "
-            f"{a_slot_idx + 1} nach USB-C Slot {c_slot_idx + 1}"
-        )
-        return True
+        if previous != c_slot_idx:
+            log(
+                f"USB-C Companion gelernt: {raw_key} bleibt USB-A Slot "
+                f"{a_slot_idx + 1}, wird bei aktivem USB-C Slot "
+                f"{c_slot_idx + 1} nur unterdrückt"
+            )
+            return True
+
+        return False
 
     def promote_usb_a_reserve(self, raw_key, group_states, current_devices):
         """Einen beim Hotplug bestätigten Reservepfad als echten USB-A übernehmen."""
@@ -6976,6 +7030,11 @@ except Exception:
                 ):
                     changed = True
 
+        active_c_slots = self.usb_active_c_slots(
+            current_groups,
+            current_typec_partner_present,
+        )
+
         for raw_key, present in current_groups.items():
             before = self.usb_last_group_present.get(raw_key, False)
             slot_idx = self.usb_group_to_slot.get(raw_key)
@@ -6983,10 +7042,21 @@ except Exception:
             if present == before:
                 continue
 
+            suppressed_a_companion = self.usb_a_companion_suppressed(
+                raw_key,
+                active_c_slots,
+            )
+
             if present:
-                if slot_idx is not None:
+                if slot_idx is not None and not suppressed_a_companion:
                     self.usb_tested.add(slot_idx)
                     log(f"USB-Port {slot_idx + 1} verbunden")
+                elif suppressed_a_companion:
+                    log(
+                        f"USB-A Begleitpfad unterdrückt: {raw_key} | "
+                        f"USB-C Slot "
+                        f"{self.usb_a_c_companions.get(raw_key, -1) + 1}"
+                    )
                 else:
                     log(f"Nicht zugeordneter USB-Pfad verbunden: {raw_key}")
             else:
@@ -6994,7 +7064,11 @@ except Exception:
                     log(f"USB-Port {slot_idx + 1}: Pfad entfernt")
             changed = True
 
-        self.sync_usb_connected(current_groups, mark_tested=True)
+        self.sync_usb_connected(
+            current_groups,
+            mark_tested=True,
+            active_c_slots=active_c_slots,
+        )
         if self.usb_connected != old_connected:
             changed = True
         self.usb_last_group_present = dict(current_groups)
