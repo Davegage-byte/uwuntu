@@ -182,8 +182,9 @@ class StartupUpdate(Gtk.Application):
         ):
             color = "blue"
         elif (
-            normalized == "Bereits aktuell"
+            normalized.startswith("Bereits aktuell")
             or "starte lokalen Stand" in normalized
+            or "starte lokalen Teststand" in normalized
         ):
             color = "green"
         else:

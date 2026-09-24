@@ -3123,7 +3123,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.127"
+            else "Hardware Check v4.5.128"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3136,7 +3136,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.127"
+                else "Hardware Check v4.5.128"
             )
         )
         title_label.add_css_class("title")
@@ -5910,10 +5910,10 @@ class App(Gtk.Application):
             color = "red"
         elif normalized.startswith("Suche") or normalized.startswith("Prüfe"):
             color = "orange"
-        elif normalized in {
-            "Bereits aktuell",
-            "GitHub-Version ist älter · kein Update",
-        }:
+        elif (
+            normalized.startswith("Bereits aktuell")
+            or normalized == "GitHub-Version ist älter · kein Update"
+        ):
             color = "green"
         elif normalized.startswith("Update erfolgreich"):
             color = "green"
@@ -5939,10 +5939,10 @@ class App(Gtk.Application):
         self.update_proc = None
 
         if returncode == 0:
-            if last_status in {
-                "Bereits aktuell",
-                "GitHub-Version ist älter · kein Update",
-            }:
+            if (
+                last_status.startswith("Bereits aktuell")
+                or last_status == "GitHub-Version ist älter · kein Update"
+            ):
                 GLib.timeout_add(2500, self.auto_close_update_window)
             return False
 
