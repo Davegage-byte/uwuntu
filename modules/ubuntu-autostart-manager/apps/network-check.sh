@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.36"
+VERSION = "2.37"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -801,15 +801,16 @@ def wipe_format_battery_power(power_w, state):
 def wipe_battery_info():
     rc, out, _ = wipe_run(["upower", "-e"])
     if rc != 0:
-        return None, None, None, None
+        return None, None, None, None, None
     bat = next((line.strip() for line in out.splitlines() if "BAT" in line), None)
     if not bat:
-        return None, None, None, None
+        return None, None, None, None, None
     rc, info, _ = wipe_run(["upower", "-i", bat])
     if rc != 0:
-        return None, None, None, None
+        return None, None, None, None, None
 
     health = None
+    percentage = None
     state = None
     time_to_empty = None
     time_to_full = None
@@ -822,6 +823,13 @@ def wipe_battery_info():
                 health = float(m.group(1).replace(",", "."))
             except Exception:
                 health = None
+
+        m = re.match(r"\s*percentage:\s*([0-9.,]+)%", line, re.I)
+        if m:
+            try:
+                percentage = float(m.group(1).replace(",", "."))
+            except Exception:
+                percentage = None
 
         m = re.match(r"\s*state:\s*(.+?)\s*$", line, re.I)
         if m:
@@ -854,7 +862,13 @@ def wipe_battery_info():
     elif state in {"charging", "pending-charge"}:
         remaining = time_to_full
 
-    return health, state, wipe_compact_battery_time(remaining), power_w
+    return (
+        health,
+        percentage,
+        state,
+        wipe_compact_battery_time(remaining),
+        power_w,
+    )
 
 def wipe_disk_details(disk):
     if not disk or not Path(disk).exists():
@@ -921,10 +935,18 @@ class WipeCompactPanel:
 
         self.battery_value = Gtk.Label(label="--")
         self.battery_value.set_xalign(0.5)
-        self.battery_value.set_size_request(245, -1)
+        self.battery_value.set_size_request(190, -1)
         self.battery_value.set_hexpand(False)
         self.battery_value.add_css_class("wipe-big")
         battery_metrics.append(self.battery_value)
+
+        self.battery_soc = Gtk.Label(label="-- SoC")
+        self.battery_soc.set_xalign(0.5)
+        self.battery_soc.set_size_request(135, -1)
+        self.battery_soc.set_hexpand(False)
+        self.battery_soc.add_css_class("wipe-big")
+        self.battery_soc.add_css_class("neutral")
+        battery_metrics.append(self.battery_soc)
 
         self.battery_state = Gtk.Label(label="--")
         self.battery_state.set_xalign(0.5)
@@ -1011,7 +1033,7 @@ class WipeCompactPanel:
         widget.add_css_class(klass)
 
     def refresh_battery(self):
-        health, state, remaining, power_w = wipe_battery_info()
+        health, percentage, state, remaining, power_w = wipe_battery_info()
         power_text = wipe_format_battery_power(power_w, state)
 
         self.set_soh_alert(
@@ -1036,6 +1058,13 @@ class WipeCompactPanel:
             self.battery_note.set_text(
                 "Battery Health innerhalb der Prüfgrenze."
             )
+
+        if percentage is None:
+            self.battery_soc.set_text("-- SoC")
+            self.set_class(self.battery_soc, "warn")
+        else:
+            self.battery_soc.set_text(f"{percentage:.0f} % SoC")
+            self.set_class(self.battery_soc, "neutral")
 
         # Dieselben deutschen UPower-Zustände wie im Standalone-Wipe.
         if state == "fully-charged":
@@ -1359,17 +1388,24 @@ class CompactAudioPanel:
         }
 
         self.root = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=5,
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
         )
         self.root.set_hexpand(True)
         self.root.set_vexpand(False)
-        self.root.add_css_class("audio-strip")
+        self.root.add_css_class("card")
 
         title = Gtk.Label(label="AUDIO")
         title.set_xalign(0)
-        title.add_css_class("audio-strip-title")
+        title.add_css_class("card-title")
         self.root.append(title)
+
+        audio_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=5,
+        )
+        audio_row.set_hexpand(True)
+        audio_row.set_vexpand(False)
 
         self.wave = Gtk.DrawingArea()
         self.wave.set_content_width(210)
@@ -1377,7 +1413,7 @@ class CompactAudioPanel:
         self.wave.set_hexpand(True)
         self.wave.set_vexpand(False)
         self.wave.set_draw_func(self.draw_wave)
-        self.root.append(self.wave)
+        audio_row.append(self.wave)
 
         self.buttons = {}
         specs = (
@@ -1396,11 +1432,13 @@ class CompactAudioPanel:
                 lambda _button, value=action: self.trigger(value),
             )
             self.buttons[action] = button
-            self.root.append(button)
+            audio_row.append(button)
 
         # Der normale Tiling-Slot startet die Engine parallel. NC wartet
         # zunächst kurz darauf und startet sie nur selbst, falls der Slot
         # nicht läuft (z. B. bei einzeln geöffnetem Network Check).
+        self.root.append(audio_row)
+
         GLib.timeout_add(16, self.poll_state)
 
     def ensure_engine(self):
@@ -1639,14 +1677,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.36 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.37 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.36 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.37 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1719,8 +1757,8 @@ class NetworkCheckApp(Gtk.Application):
         self.wipe_panel.root.set_vexpand(False)
         content.append(self.wipe_panel.root)
 
-        # Audio bleibt dauerhaft sichtbar, benötigt aber nur eine einzige
-        # kompakte Zeile: Waveform + vier Testbuttons.
+        # Audio bleibt dauerhaft sichtbar: Überschrift oben, darunter
+        # Waveform ab ganz links und die vier Testbuttons.
         self.audio_panel = CompactAudioPanel()
         content.append(self.audio_panel.root)
 
@@ -1814,18 +1852,6 @@ class NetworkCheckApp(Gtk.Application):
             font-weight: 800;
         }
 
-        .audio-strip {
-            background: #17171c;
-            border: 1px solid #34343c;
-            border-radius: 8px;
-            padding: 5px 6px;
-        }
-        .audio-strip-title {
-            color: #f4f4f5;
-            font-size: 12px;
-            font-weight: 800;
-            min-width: 48px;
-        }
         button.audio-mini {
             min-height: 62px;
             padding: 2px 6px;
@@ -2157,7 +2183,7 @@ class NetworkCheckApp(Gtk.Application):
                 else:
                     klass = "good" if speed >= WIFI_LINK_MIN else "bad"
 
-                card.set_metric("link", format_mbps(speed), klass)
+                card.set_metric("link", format_link_speed(speed), klass)
         # Wenn gerade nicht getestet wird, vorheriges Testergebnis erhalten.
         if kind not in self.testing_kinds:
             if result["tested"]:
