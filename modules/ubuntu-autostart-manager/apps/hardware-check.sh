@@ -99,6 +99,7 @@ APP_ID = (
     else "com.david.HardwareCheck"
 )
 AUDIO_ACTION_APP_ID = "com.david.UwuntuAudioEngineExperiment"
+BENCHMARK_ACTION_APP_ID = "com.david.UwuntuAudioTest"
 LOG_FILE = Path.home() / "hardware_check.log"
 
 SYS_USB = Path("/sys/bus/usb/devices")
@@ -2393,6 +2394,7 @@ def run_global_arrow_monitor(parent_pid):
 
     key_map = {
         1: "escape",        # KEY_ESC
+        48: "benchmark",    # KEY_B
         30: "all",          # KEY_A
         37: "keyboard",     # KEY_K
         19: "ram",          # KEY_R
@@ -3113,6 +3115,25 @@ class App(Gtk.Application):
         }
 
         self.keyboard_focus_widget = None
+
+        # Die separate Benchmark-Instanz wird von der normalen HC-Instanz
+        # über GApplication angesprochen. Dadurch funktionieren B/R/A global,
+        # auch wenn Network, Kamera oder ein anderes Diagnosefenster Fokus hat.
+        self.last_benchmark_shortcut_at = {
+            "cpu": 0.0,
+            "ram": 0.0,
+            "all": 0.0,
+        }
+        if BENCHMARK_WINDOW_MODE:
+            for action_name in ("cpu", "ram", "all"):
+                app_action = Gio.SimpleAction.new(action_name, None)
+                app_action.connect(
+                    "activate",
+                    self.on_benchmark_app_action,
+                    action_name,
+                )
+                self.add_action(app_action)
+
     def do_activate(self):
         if self.window:
             self.window.present()
@@ -3122,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.130"
+            else "Hardware Check v4.5.131"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3135,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.130"
+                else "Hardware Check v4.5.131"
             )
         )
         title_label.add_css_class("title")
@@ -5749,10 +5770,10 @@ class App(Gtk.Application):
             ("↑", "Audio Test: beide Lautsprecher testen"),
             ("→", "Audio Test: rechten Lautsprecher testen"),
             ("↓", "Audio Test: kompletten Auto-Test starten"),
-            ("B", "Im Benchmark-Fenster: CPU-Kurztest starten"),
+            ("B", "GLOBAL: CPU-Kurztest im Benchmark-Fenster starten"),
             ("K", "Keyboard-Test global öffnen"),
-            ("R", "RAM-Kurztest auf der Benchmark-Seite starten"),
-            ("A", "ALLE Kurztests auf der Benchmark-Seite starten"),
+            ("R", "GLOBAL: RAM-Kurztest im Benchmark-Fenster starten"),
+            ("A", "GLOBAL: ALLE Kurztests im Benchmark-Fenster starten"),
             ("I", "Systeminformationen anzeigen"),
             ("U", "Uwuntu-Update suchen und installieren"),
             ("G", "Garantieprüfung Dell / Lenovo"),
@@ -6311,6 +6332,65 @@ except Exception:
         """Den lokalen Power-Tasten-Schutz ohne Timer oder Polling abfragen."""
         return time.monotonic() < self.power_dialog_guard_until
 
+    def run_benchmark_shortcut(self, action_name):
+        """B/R/A in der separaten Benchmark-Instanz genau einmal ausführen."""
+        if not BENCHMARK_WINDOW_MODE or self.stack is None:
+            return False
+
+        specs = {
+            "cpu": ("cpu-short", 10.0, "B", "CPU"),
+            "ram": ("ram-short", 10.0, "R", "RAM"),
+            "all": ("all-short", 30.0, "A", "ALLE"),
+        }
+        spec = specs.get(action_name)
+        if spec is None:
+            return False
+
+        now = time.monotonic()
+        if now - self.last_benchmark_shortcut_at.get(action_name, 0.0) < 0.15:
+            return False
+        self.last_benchmark_shortcut_at[action_name] = now
+
+        kind, duration, key_name, label = spec
+        self.start_test(None, kind, duration)
+        log(f"Benchmark global {key_name}: {label} Kurztest gestartet")
+        return False
+
+    def on_benchmark_app_action(self, _action, _parameter, action_name):
+        return self.run_benchmark_shortcut(action_name)
+
+    def send_benchmark_action(self, action):
+        action_name = {
+            "benchmark": "cpu",
+            "ram": "ram",
+            "all": "all",
+        }.get(action)
+        if not action_name:
+            return False
+
+        gapplication = shutil.which("gapplication")
+        if not gapplication:
+            log("Benchmark-Hotkey ignoriert: gapplication fehlt")
+            return False
+
+        try:
+            subprocess.Popen(
+                [
+                    gapplication,
+                    "action",
+                    BENCHMARK_ACTION_APP_ID,
+                    action_name,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            log(f"Globaler Benchmark-Hotkey weitergereicht: {action_name}")
+        except Exception as exc:
+            log(f"Benchmark-Hotkey Fehler ({action_name}): {exc}")
+        return False
+
     def send_audio_action(self, action):
         action_name = {
             "audio-left": "left",
@@ -6444,30 +6524,20 @@ except Exception:
             self.start_display_test()
             return False
 
-        if action == "benchmark":
-            # Im Experiment besitzt nur das separate Benchmark-Fenster den
-            # B-Shortcut. Der normale Hardware Check öffnet damit keine
-            # Benchmark-Seite mehr.
-            if not BENCHMARK_WINDOW_MODE:
-                return False
-            if visible == "benchmarks":
-                self.start_test(None, "cpu-short", 10.0)
-                log("Benchmark-Fenster: B startet CPU Kurztest")
+        if action in {"benchmark", "ram", "all"}:
+            benchmark_action = {
+                "benchmark": "cpu",
+                "ram": "ram",
+                "all": "all",
+            }[action]
+            if BENCHMARK_WINDOW_MODE:
+                return self.run_benchmark_shortcut(benchmark_action)
+            self.send_benchmark_action(action)
             return False
 
         if action == "keyboard":
             self.show_keyboard()
             log("Globaler Hotkey K: Tastatur-Test geöffnet")
-            return False
-
-        if action == "ram" and visible == "benchmarks":
-            self.start_test(None, "ram-short", 10.0)
-            log("Globaler Hotkey R: RAM Kurztest gestartet")
-            return False
-
-        if action == "all" and visible == "benchmarks":
-            self.start_test(None, "all-short", 30.0)
-            log("Globaler Hotkey A: ALLE Kurztests gestartet")
             return False
 
         return False
@@ -11143,20 +11213,23 @@ except Exception:
                 self.handle_global_hotkey(action)
                 return True
 
-        # A/K/R/I/U/G/F1 auch über GTK behandeln, wenn Hardware Check den Fokus hat.
-        # R/A gelten nur auf der Benchmark-Seite; K öffnet den Tastatur-Test.
-        # Innerhalb des Tastatur-Tests
-        # bleiben beide selbstverständlich normale Prüftasten.
-        # Der Hotkey-Handler entprellt das parallele /dev/input-Ereignis.
+        # B/R/A sind globale Benchmark-Hotkeys und werden auch dann
+        # an das separate Benchmark-Fenster gereicht, wenn der normale HC
+        # selbst Fokus hat. Der /dev/input-Pfad deckt alle anderen Fenster ab.
+        # Im aktiven Tastatur-Test bleiben Buchstaben reine Prüftasten.
         lower_name = name.lower()
+        benchmark_shortcuts = {
+            "b": "benchmark",
+            "r": "ram",
+            "a": "all",
+        }
+        benchmark_action = benchmark_shortcuts.get(lower_name)
+        if benchmark_action and visible != "keyboard":
+            self.handle_global_hotkey(benchmark_action)
+            return True
+
         if lower_name == "k" and visible != "keyboard":
             self.handle_global_hotkey("keyboard")
-            return True
-        if lower_name == "r" and visible == "benchmarks":
-            self.handle_global_hotkey("ram")
-            return True
-        if lower_name == "a" and visible == "benchmarks":
-            self.handle_global_hotkey("all")
             return True
         if lower_name == "i" and visible != "keyboard":
             self.handle_global_hotkey("info")
