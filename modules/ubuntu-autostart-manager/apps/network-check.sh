@@ -132,6 +132,7 @@ from gi.repository import Gtk, GLib, Gdk, Pango
 
 import os
 import re
+import json
 import signal
 import subprocess
 import threading
@@ -139,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.30"
+VERSION = "2.31"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1312,6 +1313,235 @@ class WipeCompactPanel:
         return False
 
 
+
+# ============================================================
+# Audio – kompakte Experiment-Leiste im Network/Wipe-Fenster
+# ============================================================
+AUDIO_ENGINE_APP_ID = "com.david.UwuntuAudioEngineExperiment"
+AUDIO_UI_STATE_FILE = (
+    Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+    / "uwuntu_audio_engine_ui.json"
+)
+
+class CompactAudioPanel:
+    def __init__(self):
+        self.waveform = []
+        self.wave_color = "orange"
+        self.last_engine_start = 0.0
+        self.created_at = time.monotonic()
+        self.button_states = {
+            "left": "orange",
+            "both": "orange",
+            "right": "orange",
+            "auto": "orange",
+        }
+
+        self.root = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=5,
+        )
+        self.root.set_hexpand(True)
+        self.root.set_vexpand(False)
+        self.root.add_css_class("audio-strip")
+
+        title = Gtk.Label(label="AUDIO")
+        title.set_xalign(0)
+        title.add_css_class("audio-strip-title")
+        self.root.append(title)
+
+        self.mic = Gtk.Label(label="🎤 --")
+        self.mic.set_xalign(0)
+        self.mic.add_css_class("audio-mic")
+        self.root.append(self.mic)
+
+        self.wave = Gtk.DrawingArea()
+        self.wave.set_content_width(210)
+        self.wave.set_content_height(38)
+        self.wave.set_hexpand(True)
+        self.wave.set_vexpand(False)
+        self.wave.set_draw_func(self.draw_wave)
+        self.root.append(self.wave)
+
+        self.buttons = {}
+        specs = (
+            ("left", "← LINKS"),
+            ("both", "↑ MITTE"),
+            ("right", "RECHTS →"),
+            ("auto", "↓ AUTO"),
+        )
+        for action, label in specs:
+            button = Gtk.Button(label=label)
+            button.set_focusable(False)
+            button.add_css_class("audio-mini")
+            button.add_css_class("audio-orange")
+            button.connect(
+                "clicked",
+                lambda _button, value=action: self.trigger(value),
+            )
+            self.buttons[action] = button
+            self.root.append(button)
+
+        # Der normale Tiling-Slot startet die Engine parallel. NC wartet
+        # zunächst kurz darauf und startet sie nur selbst, falls der Slot
+        # nicht läuft (z. B. bei einzeln geöffnetem Network Check).
+        GLib.timeout_add(100, self.poll_state)
+
+    def ensure_engine(self):
+        try:
+            if AUDIO_UI_STATE_FILE.exists():
+                if time.time() - AUDIO_UI_STATE_FILE.stat().st_mtime <= 2.5:
+                    return
+        except Exception:
+            pass
+
+        now = time.monotonic()
+        if now - self.last_engine_start < 2.0:
+            return
+        self.last_engine_start = now
+
+        script = Path.home() / ".local/bin/uwuntu-audio-test.sh"
+        if not script.exists():
+            return
+
+        env = os.environ.copy()
+        env["UWUNTU_AUDIO_ENGINE"] = "1"
+        try:
+            subprocess.Popen(
+                [str(script)],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def trigger(self, action):
+        self.ensure_engine()
+        try:
+            subprocess.Popen(
+                [
+                    "gapplication",
+                    "action",
+                    AUDIO_ENGINE_APP_ID,
+                    action,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def set_button_state(self, action, state):
+        button = self.buttons.get(action)
+        if button is None:
+            return
+        for css_class in (
+            "audio-orange",
+            "audio-blue",
+            "audio-green",
+            "audio-red",
+        ):
+            button.remove_css_class(css_class)
+        if state not in {"orange", "blue", "green", "red"}:
+            state = "orange"
+        button.add_css_class("audio-" + state)
+        self.button_states[action] = state
+
+    def poll_state(self):
+        data = None
+        try:
+            if AUDIO_UI_STATE_FILE.exists():
+                age = time.time() - AUDIO_UI_STATE_FILE.stat().st_mtime
+                if age <= 2.5:
+                    data = json.loads(
+                        AUDIO_UI_STATE_FILE.read_text(encoding="utf-8")
+                    )
+        except Exception:
+            data = None
+
+        if not isinstance(data, dict):
+            self.mic.set_text("🎤 START")
+            self.mic.remove_css_class("good")
+            self.mic.remove_css_class("bad")
+            self.mic.add_css_class("warn")
+            self.waveform = []
+            self.wave_color = "orange"
+            if time.monotonic() - self.created_at >= 1.5:
+                self.ensure_engine()
+            self.wave.queue_draw()
+            return True
+
+        mic_running = bool(data.get("mic_running"))
+        self.mic.set_text("🎤 OK" if mic_running else "🎤 FEHLT")
+        self.mic.remove_css_class("good")
+        self.mic.remove_css_class("bad")
+        self.mic.remove_css_class("warn")
+        self.mic.add_css_class("good" if mic_running else "bad")
+
+        states = data.get("buttons") or {}
+        for action in self.buttons:
+            self.set_button_state(
+                action,
+                str(states.get(action, "orange")),
+            )
+
+        values = data.get("waveform")
+        if isinstance(values, list):
+            cleaned = []
+            for value in values[:128]:
+                try:
+                    cleaned.append(max(-1.0, min(1.0, float(value))))
+                except Exception:
+                    pass
+            self.waveform = cleaned
+        else:
+            self.waveform = []
+
+        self.wave_color = str(data.get("color") or "orange")
+        self.wave.queue_draw()
+        return True
+
+    def draw_wave(self, _area, cr, width, height):
+        colors = {
+            "green": (0.38, 0.83, 0.42),
+            "blue": (0.35, 0.64, 1.0),
+            "red": (1.0, 0.30, 0.30),
+            "orange": (0.96, 0.65, 0.14),
+        }
+
+        cr.set_source_rgb(0.09, 0.09, 0.11)
+        cr.paint()
+
+        mid = height / 2.0
+        cr.set_source_rgb(0.24, 0.24, 0.28)
+        cr.set_line_width(1.0)
+        cr.move_to(0, mid)
+        cr.line_to(width, mid)
+        cr.stroke()
+
+        values = self.waveform
+        if len(values) < 2:
+            return
+
+        color = colors.get(self.wave_color, colors["orange"])
+        cr.set_source_rgb(*color)
+        cr.set_line_width(2.0)
+
+        step = width / max(1, len(values) - 1)
+        amplitude = max(4.0, height * 0.42)
+        for index, value in enumerate(values):
+            x = index * step
+            y = mid - value * amplitude
+            if index == 0:
+                cr.move_to(x, y)
+            else:
+                cr.line_to(x, y)
+        cr.stroke()
+
 class NetworkCheckApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="com.david.NetworkCheck")
@@ -1373,14 +1603,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.30 + Wipe Auto v3.33")
+        self.window.set_title("Network Check v2.31 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.30 + Wipe Auto v3.33")
+        title_label = Gtk.Label(label="Network Check v2.31 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1431,8 +1661,17 @@ class NetworkCheckApp(Gtk.Application):
             self.cards[key].root.set_hexpand(True)
             self.cards[key].root.set_vexpand(False)
 
-        content.append(self.cards["lan"].root)
-        content.append(self.cards["wifi"].root)
+        # LAN und WLAN teilen sich im Experiment eine Zeile. Dadurch wird
+        # genau der Platz frei, den die schmale Audio-Leiste unten benötigt.
+        network_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=3,
+        )
+        network_row.set_hexpand(True)
+        network_row.set_vexpand(False)
+        network_row.append(self.cards["lan"].root)
+        network_row.append(self.cards["wifi"].root)
+        content.append(network_row)
 
         self.wipe_panel = WipeCompactPanel(self.window)
         self.wipe_panel.refresh_button = self.header_refresh_button
@@ -1440,6 +1679,11 @@ class NetworkCheckApp(Gtk.Application):
         self.wipe_panel.root.set_hexpand(True)
         self.wipe_panel.root.set_vexpand(False)
         content.append(self.wipe_panel.root)
+
+        # Audio bleibt dauerhaft sichtbar, benötigt aber nur eine einzige
+        # kompakte Zeile: Mikrofonstatus + Waveform + vier Testbuttons.
+        self.audio_panel = CompactAudioPanel()
+        content.append(self.audio_panel.root)
 
         shell.append(content)
 
@@ -1529,6 +1773,51 @@ class NetworkCheckApp(Gtk.Application):
             border-radius: 6px;
             font-size: 11px;
             font-weight: 800;
+        }
+
+        .audio-strip {
+            background: #17171c;
+            border: 1px solid #34343c;
+            border-radius: 8px;
+            padding: 3px 5px;
+        }
+        .audio-strip-title {
+            color: #f4f4f5;
+            font-size: 11px;
+            font-weight: 800;
+            min-width: 44px;
+        }
+        .audio-mic {
+            font-size: 10px;
+            font-weight: 800;
+            min-width: 52px;
+        }
+        button.audio-mini {
+            min-height: 30px;
+            padding: 1px 6px;
+            border-radius: 7px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        button.audio-mini.audio-orange {
+            background: #232329;
+            color: #f5a623;
+            border: 1px solid #f5a623;
+        }
+        button.audio-mini.audio-blue {
+            background: #232329;
+            color: #5aa2ff;
+            border: 1px solid #5aa2ff;
+        }
+        button.audio-mini.audio-green {
+            background: #232329;
+            color: #61d36b;
+            border: 1px solid #61d36b;
+        }
+        button.audio-mini.audio-red {
+            background: #232329;
+            color: #ff4c4c;
+            border: 1px solid #ff4c4c;
         }
 
         window {

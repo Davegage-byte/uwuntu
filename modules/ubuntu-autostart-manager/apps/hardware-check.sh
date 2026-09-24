@@ -92,7 +92,13 @@ import threading
 import time
 import select
 
-APP_ID = "com.david.HardwareCheck"
+BENCHMARK_WINDOW_MODE = os.environ.get("UWUNTU_BENCHMARK_WINDOW") == "1"
+APP_ID = (
+    "com.david.UwuntuAudioTest"
+    if BENCHMARK_WINDOW_MODE
+    else "com.david.HardwareCheck"
+)
+AUDIO_ACTION_APP_ID = "com.david.UwuntuAudioEngineExperiment"
 LOG_FILE = Path.home() / "hardware_check.log"
 
 SYS_USB = Path("/sys/bus/usb/devices")
@@ -3114,21 +3120,38 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.126")
+        window_title = (
+            "Hardware Benchmark EXP"
+            if BENCHMARK_WINDOW_MODE
+            else "Hardware Check v4.5.127"
+        )
+        self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.126")
+        title_label = Gtk.Label(
+            label=(
+                "Hardware Benchmark EXP"
+                if BENCHMARK_WINDOW_MODE
+                else "Hardware Check v4.5.127"
+            )
+        )
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
         self.header_refresh_button = Gtk.Button(label="REFRESH")
         self.header_refresh_button.add_css_class("refresh-button")
         self.header_refresh_button.set_focusable(False)
-        self.header_refresh_button.connect("clicked", self.reset_all)
+        if BENCHMARK_WINDOW_MODE:
+            self.header_refresh_button.connect(
+                "clicked",
+                lambda *_: self.reset_benchmark_ui(),
+            )
+        else:
+            self.header_refresh_button.connect("clicked", self.reset_all)
         self.header_bar.pack_end(self.header_refresh_button)
 
         self.window.set_titlebar(self.header_bar)
@@ -3143,9 +3166,13 @@ class App(Gtk.Application):
 
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.stack.add_named(self.build_overview(), "overview")
-        self.stack.add_named(self.build_keyboard(), "keyboard")
-        self.stack.add_named(self.build_benchmarks(), "benchmarks")
+        if BENCHMARK_WINDOW_MODE:
+            self.stack.add_named(self.build_benchmarks(), "benchmarks")
+            self.stack.set_visible_child_name("benchmarks")
+        else:
+            self.stack.add_named(self.build_overview(), "overview")
+            self.stack.add_named(self.build_keyboard(), "keyboard")
+            self.stack.add_named(self.build_benchmarks(), "benchmarks")
         # Die Hardware-Test-Buttons dürfen niemals Tastaturfokus bekommen.
         # Dadurch kann z.B. SPACE im Tastatur-Test nicht versehentlich
         # "ÜBERSICHT", "RESET" oder einen anderen Button auslösen.
@@ -3153,25 +3180,31 @@ class App(Gtk.Application):
 
         self.window.set_child(self.stack)
 
-        self.refresh_security()
-        self.refresh_hdmi_status()
-        self.reset_touchpad_test()
-        self.start_touchpad_click_monitors()
-        self.usb_rediscover(reset=True)
-        self.refresh_touch_status()
-        self.refresh_display_status()
-        self.refresh_media_status()
-        self.refresh_sensors()
-        GLib.timeout_add(300, self.poll_usb)
-        GLib.timeout_add(500, self.poll_hdmi_status)
-        GLib.timeout_add(500, self.poll_touch_status)
-        GLib.timeout_add(500, self.poll_display_status)
-        GLib.timeout_add(400, self.poll_media_status)
-        GLib.timeout_add(1000, self.poll_sensors)
-        self.start_power_dialog_helper()
-        self.start_global_input_listener()
-
-        log("Hardware Check gestartet")
+        if BENCHMARK_WINDOW_MODE:
+            # Zweite HC-Instanz nur für die dauerhaft sichtbare Benchmark-Seite.
+            # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
+            # doppelt starten.
+            GLib.timeout_add(1200, self.start_experimental_benchmark)
+            log("Hardware Benchmark EXP gestartet")
+        else:
+            self.refresh_security()
+            self.refresh_hdmi_status()
+            self.reset_touchpad_test()
+            self.start_touchpad_click_monitors()
+            self.usb_rediscover(reset=True)
+            self.refresh_touch_status()
+            self.refresh_display_status()
+            self.refresh_media_status()
+            self.refresh_sensors()
+            GLib.timeout_add(300, self.poll_usb)
+            GLib.timeout_add(500, self.poll_hdmi_status)
+            GLib.timeout_add(500, self.poll_touch_status)
+            GLib.timeout_add(500, self.poll_display_status)
+            GLib.timeout_add(400, self.poll_media_status)
+            GLib.timeout_add(1000, self.poll_sensors)
+            self.start_power_dialog_helper()
+            self.start_global_input_listener()
+            log("Hardware Check gestartet")
         # Beim ersten Start nur sichtbar mappen, ohne eine Fokus-/Aktivierungs-
         # Anforderung an GNOME zu senden. Dadurch soll die Shell keinen
         # "Hardware Check ... ist bereit"-Hinweis mehr erzeugen.
@@ -6303,7 +6336,7 @@ except Exception:
                 [
                     gapplication,
                     "action",
-                    "com.david.UwuntuAudioTest",
+                    AUDIO_ACTION_APP_ID,
                     action_name,
                 ],
                 stdin=subprocess.DEVNULL,
@@ -7687,7 +7720,7 @@ except Exception:
         root.append(
             self.header(
                 "BENCHMARKS",
-                back=True,
+                back=not BENCHMARK_WINDOW_MODE,
                 back_label="← ÜBERSICHT (ESC)",
                 compact_back=True,
             )
@@ -9109,6 +9142,15 @@ except Exception:
 
         if hasattr(self, "cancel_test_button"):
             self.cancel_test_button.set_sensitive(running)
+
+    def start_experimental_benchmark(self):
+        if not BENCHMARK_WINDOW_MODE:
+            return False
+        if self.test_proc is not None and self.test_proc.poll() is None:
+            return False
+        self.start_test(None, "all-short", 30.0)
+        log("Benchmark EXP: ALLE Kurztests automatisch gestartet")
+        return False
 
     def show_benchmarks(self, *_):
         # Die Benchmark-Seite übernimmt exakt die bestehende Fenstergröße.
@@ -11035,12 +11077,45 @@ except Exception:
 
         visible = self.stack.get_visible_child_name()
 
+        # Das zweite Benchmark-Fenster bleibt bewusst auf seine Aufgabe
+        # beschränkt. Es darf keine Keyboard-/Info-/Update-Dialoge der
+        # normalen Hardware-Check-Instanz öffnen.
+        if BENCHMARK_WINDOW_MODE:
+            if name == "Escape":
+                if self.test_proc is not None and self.test_proc.poll() is None:
+                    self.cancel_test()
+                return True
+
+            audio_shortcuts = {
+                "Left": "audio-left",
+                "Up": "audio-both",
+                "Right": "audio-right",
+                "Down": "audio-auto",
+            }
+            action = audio_shortcuts.get(name)
+            if action:
+                self.handle_global_hotkey(action)
+                return True
+
+            lower_name = name.lower()
+            benchmark_shortcuts = {
+                "b": "benchmark",
+                "r": "ram",
+                "a": "all",
+            }
+            action = benchmark_shortcuts.get(lower_name)
+            if action:
+                self.handle_global_hotkey(action)
+                return True
+            return False
+
         # ESC auf der Benchmark-Seite bricht einen laufenden CPU-/RAM-Test ab
         # und geht danach zurück zur Übersicht.
         if name == "Escape" and visible == "benchmarks":
             if self.test_proc is not None and self.test_proc.poll() is None:
                 self.cancel_test()
-            self.show_overview()
+            if not BENCHMARK_WINDOW_MODE:
+                self.show_overview()
             return True
 
         # Im Tastatur-Test übernimmt bei aktivem /dev/input-Monitor dieser

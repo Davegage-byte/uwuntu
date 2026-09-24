@@ -67,7 +67,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 APP_NAME="Uwuntu Audio Test"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-audio-test"
-PY_FILE="$CACHE_DIR/audio_test_v1_25.py"
+PY_FILE="$CACHE_DIR/audio_test_v1_26.py"
 STATE_FILE="$HOME/.local/state/uwuntu/audio_test_status.json"
 
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -148,11 +148,15 @@ import cairo
 from gi.repository import Gtk, GLib, Gdk, Gio
 
 
-VERSION = "v1.25"
+VERSION = "v1.26"
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "audio_test_status.json"
 HARDWARE_REFRESH_FILE = STATE_DIR / "hardware_refresh.json"
+UI_STATE_FILE = (
+    Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+    / "uwuntu_audio_engine_ui.json"
+)
 
 
 def hardware_refresh_stamp():
@@ -1369,6 +1373,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "right": "orange",
             "auto": "orange",
         }
+        self.last_compact_export_at = 0.0
 
         # Testergebnis getrennt vom transienten Blauzustand merken.
         # Sonst kann ein zweiter schneller Klick "blau" als Rückkehrfarbe
@@ -1700,6 +1705,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         button.add_css_class("state-" + state)
         self.button_states[name] = state
+        self.export_compact_state(force=True)
 
     def reset_side_buttons(self):
         self.set_button_state("left", "orange")
@@ -1829,8 +1835,48 @@ class MainWindow(Gtk.ApplicationWindow):
 
         return False
 
+    def export_compact_state(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.last_compact_export_at < 0.08:
+            return
+        self.last_compact_export_at = now
+
+        try:
+            waveform = self.analyzer.waveform
+            length = len(waveform) if waveform is not None else 0
+            if length >= 2:
+                point_count = min(96, length)
+                indices = np.linspace(
+                    0,
+                    length - 1,
+                    point_count,
+                    dtype=np.int32,
+                )
+                values = [
+                    round(float(waveform[index]), 4)
+                    for index in indices
+                ]
+            else:
+                values = []
+
+            data = {
+                "time": time.time(),
+                "pid": os.getpid(),
+                "mic_running": bool(self.analyzer.running),
+                "busy": bool(self.speaker_tester.busy),
+                "color": self.waveform_color(),
+                "buttons": dict(self.button_states),
+                "waveform": values,
+            }
+            tmp = UI_STATE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(UI_STATE_FILE)
+        except Exception:
+            pass
+
     def refresh(self):
         self.update_picture()
+        self.export_compact_state()
         return True
 
     def on_key(self, controller, keyval, keycode, state):
@@ -1880,13 +1926,17 @@ class MainWindow(Gtk.ApplicationWindow):
         except Exception:
             pass
         self.analyzer.stop()
+        try:
+            UI_STATE_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
         return False
 
 
 class App(Gtk.Application):
     def __init__(self):
         super().__init__(
-            application_id="com.david.UwuntuAudioTest"
+            application_id="com.david.UwuntuAudioEngineExperiment"
         )
         self.window = None
 
@@ -1904,7 +1954,10 @@ class App(Gtk.Application):
     def do_activate(self):
         if self.window is None:
             self.window = MainWindow(self)
-        self.window.present()
+            # Im Experiment ist Audio eine unsichtbare Mess-Engine. Die
+            # sichtbare Waveform und Bedienung liegen im Network/Wipe-Fenster.
+            self.hold()
+        self.window.set_visible(False)
 
 
 if __name__ == "__main__":
@@ -1914,5 +1967,23 @@ PYCODE
 
 chmod +x "$PY_FILE"
 
-echo "Starte $APP_NAME ..."
-exec -a uwuntu-audio-test-python python3 "$PY_FILE"
+# Experimenteller 4-Felder-Modus:
+# Der historische Audio-Slot des Tiling Assistant bleibt bestehen, zeigt aber
+# das Benchmark-Fenster. Die Audio-Messung läuft parallel unsichtbar weiter.
+if [ "${UWUNTU_AUDIO_ENGINE:-0}" != "1" ]; then
+    (
+        UWUNTU_AUDIO_ENGINE=1 "$0"             >>"$HOME/audio_engine_experiment.log" 2>&1
+    ) &
+
+    HARDWARE_CHECK="$HOME/.local/bin/hardware-check.sh"
+    if [ ! -x "$HARDWARE_CHECK" ]; then
+        echo "FEHLER: Hardware Check fehlt: $HARDWARE_CHECK"
+        exit 20
+    fi
+
+    echo "Starte Benchmark im bisherigen Audio-Slot ..."
+    exec env UWUNTU_BENCHMARK_WINDOW=1 "$HARDWARE_CHECK"
+fi
+
+echo "Starte $APP_NAME als unsichtbare Audio-Engine ..."
+exec -a uwuntu-audio-engine-python python3 "$PY_FILE"
