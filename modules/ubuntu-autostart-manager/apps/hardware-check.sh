@@ -948,17 +948,20 @@ def discover_physical_ports():
 
     # Dell Latitude 5450, BIOS 1.23.x: gemessene 4-Port-Topologie.
     #
-    # Der generische Ansatz "gleiche Root-Portnummer = USB2/SS-Companion"
-    # ist auf diesem Modell falsch. Die geführte Messung zeigt:
-    #   USB-C Port 1 -> PCI 00:0d.0 SS Port 3 + UCSI port0
-    #   USB-A Port 2 -> PCI 00:14.0 Peer-Gruppe USB3 Port 1 / USB2 Port 3
-    #   USB-A Port 3 -> PCI 00:0d.0 SS Port 1
-    #   USB-C Port 4 -> PCI 00:0d.0 SS Port 4 + UCSI port1
+    # Physisch liegen links zwei USB-C und ein USB-A gemeinsam am
+    # Thunderbolt/USB4-Controller 00:0d.0. Rechts sitzt ein einzelner USB-A
+    # am PCH-xHCI-Controller 00:14.0.
     #
-    # Die USB2-Pfade werden vollständig per Topologie zugeordnet:
-    # 00:14.0 Port 1 gehört zu USB-A 3, Port 2 zu USB-C 1 und
-    # Port 4 zu USB-C 4. Damit bleibt die Zuordnung unabhängig davon,
-    # von welcher Buchse Uwuntu gebootet wurde.
+    # Gemessen mit zwei vollständigen Mapper-Läufen (Boot über A und C):
+    #   USB-C links #1 -> 00:0d.0 / 2-3 + UCSI port0
+    #   USB-A rechts   -> 00:14.0 / 4-1 <-> 3-3 Peer
+    #   USB-A links    -> 00:0d.0 / 2-1
+    #   USB-C links #2 -> 00:0d.0 / 2-4 + UCSI port1
+    #
+    # Wichtig: Die zusätzlichen USB2-Pfade 3-1 / 3-2 / 3-4 dürfen NICHT
+    # anhand ihrer Portnummer fest an A/C gebunden werden. Sie sind Teil des
+    # gemeinsam gemultiplexten linken Portblocks und werden beim Hotplug
+    # dynamisch über UCSI zugeordnet.
     if (
         layout_quirk
         and layout_quirk.get("name") == "Dell Latitude 5450"
@@ -990,7 +993,7 @@ def discover_physical_ports():
 
             return matches[0] if len(matches) == 1 else None
 
-        dell_a2 = next(
+        dell_a_right = next(
             (
                 group
                 for group in groups
@@ -1003,22 +1006,21 @@ def discover_physical_ports():
             ),
             None,
         )
-        dell_a3_ss = dell_group("0d.0", 1, superspeed=True, peer=False)
+        dell_a_left_ss = dell_group("0d.0", 1, superspeed=True, peer=False)
         dell_c1_ss = dell_group("0d.0", 3, superspeed=True, peer=False)
-        dell_c4_ss = dell_group("0d.0", 4, superspeed=True, peer=False)
+        dell_c2_ss = dell_group("0d.0", 4, superspeed=True, peer=False)
 
-        dell_a3_usb2 = dell_group("14.0", 1, superspeed=False, peer=False)
-        dell_c1_usb2 = dell_group("14.0", 2, superspeed=False, peer=False)
-        dell_c4_usb2 = dell_group("14.0", 4, superspeed=False, peer=False)
+        dynamic_usb2 = []
+        for port_no in (1, 2, 4):
+            group = dell_group("14.0", port_no, superspeed=False, peer=False)
+            if group is not None:
+                dynamic_usb2.append(group)
 
         required = (
-            dell_a2,
-            dell_a3_ss,
+            dell_a_right,
+            dell_a_left_ss,
             dell_c1_ss,
-            dell_c4_ss,
-            dell_a3_usb2,
-            dell_c1_usb2,
-            dell_c4_usb2,
+            dell_c2_ss,
         )
         required_keys = {
             group["raw_key"]
@@ -1026,17 +1028,20 @@ def discover_physical_ports():
             if group is not None
         }
 
-        if all(group is not None for group in required) and len(required_keys) == 7:
-            classification = "dell-5450-measured-topology"
+        if (
+            all(group is not None for group in required)
+            and len(required_keys) == 4
+            and len(dynamic_usb2) == 3
+        ):
+            classification = "dell-5450-left-cluster"
 
-            a_map[dell_a2["raw_key"]] = 0
-            a_map[dell_a3_ss["raw_key"]] = 1
-            a_map[dell_a3_usb2["raw_key"]] = 1
+            # UI-Reihenfolge:
+            # C links oben, A rechts, A links, C links unten.
+            a_map[dell_a_right["raw_key"]] = 0
+            a_map[dell_a_left_ss["raw_key"]] = 1
 
             c_map[dell_c1_ss["raw_key"]] = 0
-            c_map[dell_c1_usb2["raw_key"]] = 0
-            c_map[dell_c4_ss["raw_key"]] = 1
-            c_map[dell_c4_usb2["raw_key"]] = 1
+            c_map[dell_c2_ss["raw_key"]] = 1
 
             a_reserve = []
             a_count = 2
@@ -1055,6 +1060,10 @@ def discover_physical_ports():
                 "a_map": a_map,
                 "c_map": c_map,
                 "a_reserve": a_reserve,
+                "dynamic_usb2": [
+                    group["raw_key"]
+                    for group in dynamic_usb2
+                ],
                 "layout_quirk": layout_quirk["name"],
             }
 
@@ -2917,6 +2926,10 @@ class App(Gtk.Application):
         # Value = USB-A-Slot. Wird nur genutzt, wenn derselbe Root-Pfad
         # ohne aktives Type-C/UCSI-Signal erscheint.
         self.usb_c_a_shadow_slots = {}
+        # Dynamische USB2-Pfade, die bei gemeinsam gemultiplexten
+        # A/C-Portblöcken erst beim Hotplug sicher zugeordnet werden können.
+        self.usb_dynamic_group_slots = {}
+        self.usb_dynamic_group_seen_at = {}
         self.usb_last_group_present = {}
         self.usb_last_devices = {}
         self.usb_fallback = {}
@@ -3096,14 +3109,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.120")
+        self.window.set_title("Hardware Check v4.5.121")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.120")
+        title_label = Gtk.Label(label="Hardware Check v4.5.121")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6516,7 +6529,7 @@ except Exception:
                 default=999,
             )
             slots.append(slot)
-        if discovery.get("classification") == "dell-5450-measured-topology":
+        if discovery.get("classification") == "dell-5450-left-cluster":
             # Physische Reihenfolge am Latitude 5450:
             # USB-C 1, USB-A 2, USB-A 3, USB-C 4.
             dell_order = {
@@ -6546,21 +6559,150 @@ except Exception:
             for raw_key in slot["groups"]:
                 self.usb_group_to_slot[raw_key] = slot_idx
 
-        # Nur für unbekannte künftige Topologien vorgesehen. Beim Latitude
-        # 5450 ist die Matrix inzwischen gemessen und eindeutig, daher keine
-        # dynamische C/A-Doppelzuordnung mehr.
+        # Beim 5450 sind die High-Speed-Pfade eindeutig. Nur die drei
+        # zusätzlichen USB2-Pfade der linken Portgruppe bleiben dynamisch.
         self.usb_c_a_shadow_slots = {}
+        self.usb_dynamic_group_slots = {}
+        self.usb_dynamic_group_seen_at = {}
     def usb_slot_for_device(self, device_name):
         if not device_name or not self.usb_discovery:
             return None
 
         for group in self.usb_discovery["groups"]:
-            if group_contains_device(group, device_name):
-                slot_idx = self.usb_group_to_slot.get(group["raw_key"])
-                if slot_idx is not None:
-                    return slot_idx
+            if not group_contains_device(group, device_name):
+                continue
+
+            raw_key = group["raw_key"]
+            slot_idx = self.usb_group_to_slot.get(raw_key)
+            if slot_idx is not None:
+                return slot_idx
+
+            dynamic_idx = self.usb_dynamic_group_slots.get(raw_key)
+            if dynamic_idx is not None:
+                return dynamic_idx
 
         return None
+
+    def usb_typec_slot_for_name(self, typec_name):
+        """UCSI-Portname auf den sichtbaren USB-C-Slot abbilden."""
+        if not self.usb_discovery:
+            return None
+
+        typec_idx = next(
+            (
+                idx
+                for idx, port in enumerate(
+                    self.usb_discovery.get("typec", [])
+                )
+                if port.get("name") == typec_name
+            ),
+            None,
+        )
+        if typec_idx is None:
+            return None
+
+        for slot_idx, slot in enumerate(self.usb_slots):
+            if slot.get("type") != "USB-C":
+                continue
+            if slot.get("local_idx") == typec_idx:
+                return slot_idx
+
+        return None
+
+    def usb_left_a_slot(self):
+        """Beim Latitude 5450 den USB-A-Slot der linken Dreiergruppe finden."""
+        if (
+            not self.usb_discovery
+            or self.usb_discovery.get("classification")
+            != "dell-5450-left-cluster"
+        ):
+            return None
+
+        for slot_idx, slot in enumerate(self.usb_slots):
+            if (
+                slot.get("type") == "USB-A"
+                and slot.get("local_idx") == 1
+            ):
+                return slot_idx
+        return None
+
+    def usb_assign_dynamic_group(self, raw_key, slot_idx, reason):
+        if raw_key not in set(
+            self.usb_discovery.get("dynamic_usb2") or []
+        ):
+            return False
+        if slot_idx is None or not (0 <= slot_idx < len(self.usb_slots)):
+            return False
+
+        previous = self.usb_dynamic_group_slots.get(raw_key)
+        self.usb_dynamic_group_slots[raw_key] = slot_idx
+        self.usb_dynamic_group_seen_at[raw_key] = time.monotonic()
+
+        if previous != slot_idx:
+            log(
+                f"USB2 dynamisch: {raw_key} -> "
+                f"{self.usb_slots[slot_idx]['type']} Port {slot_idx + 1} "
+                f"({reason})"
+            )
+            return True
+        return False
+
+    def usb_initialize_dynamic_groups(
+        self,
+        group_states,
+        typec_partner_present,
+    ):
+        """Bereits beim Start belegte dynamische USB2-Pfade zuordnen."""
+        if (
+            not self.usb_discovery
+            or self.usb_discovery.get("classification")
+            != "dell-5450-left-cluster"
+        ):
+            return
+
+        dynamic_keys = set(self.usb_discovery.get("dynamic_usb2") or [])
+        present_keys = [
+            key for key in dynamic_keys
+            if group_states.get(key, False)
+        ]
+        if not present_keys:
+            return
+
+        # Bootstick auf einem USB2-Pfad: UCSI entscheidet C, andernfalls A.
+        boot_key = None
+        if self.usb_boot_device:
+            for group in self.usb_discovery.get("groups", []):
+                if group["raw_key"] not in dynamic_keys:
+                    continue
+                if group_contains_device(group, self.usb_boot_device):
+                    boot_key = group["raw_key"]
+                    break
+
+        active_typec = [
+            name
+            for name, present in typec_partner_present.items()
+            if present
+        ]
+
+        if boot_key is not None and len(active_typec) == 1:
+            c_slot = self.usb_typec_slot_for_name(active_typec[0])
+            if c_slot is not None:
+                self.usb_assign_dynamic_group(
+                    boot_key,
+                    c_slot,
+                    "Boot + UCSI",
+                )
+
+        left_a = self.usb_left_a_slot()
+        for raw_key in present_keys:
+            if raw_key in self.usb_dynamic_group_slots:
+                continue
+            if left_a is not None:
+                self.usb_assign_dynamic_group(
+                    raw_key,
+                    left_a,
+                    "Start ohne eindeutiges UCSI-Hotplug",
+                )
     def usb_group_states(self):
         if not self.usb_discovery:
             return {}
@@ -6613,8 +6755,10 @@ except Exception:
         return active
 
     def usb_effective_slot_for_group(self, raw_key, active_c_slots):
-        """Mehrdeutigen Dell-C/A-Pfad anhand des Steckertyps auflösen."""
+        """Statischen oder dynamisch gelernten Port-Slot bestimmen."""
         slot_idx = self.usb_group_to_slot.get(raw_key)
+        if slot_idx is None:
+            slot_idx = self.usb_dynamic_group_slots.get(raw_key)
         if slot_idx is None:
             return None
 
@@ -6768,12 +6912,16 @@ except Exception:
 
         group_states = self.usb_group_states()
         self.usb_last_group_present = dict(group_states)
-        self.sync_usb_connected(group_states, mark_tested=True)
-        self.usb_last_devices = usb_device_snapshot()
         self.usb_last_typec_partner_present = {
             port["name"]: bool(port["partner"].exists())
             for port in self.usb_discovery.get("typec", [])
         }
+        self.usb_initialize_dynamic_groups(
+            group_states,
+            self.usb_last_typec_partner_present,
+        )
+        self.sync_usb_connected(group_states, mark_tested=True)
+        self.usb_last_devices = usb_device_snapshot()
         discovery = self.usb_discovery
         log(
             "USB Topologie: "
@@ -7015,6 +7163,85 @@ except Exception:
         old_connected = set(self.usb_connected)
         changed = False
 
+        # Beim 5450 sind 3-1 / 3-2 / 3-4 keine fest an eine Buchse
+        # gebundenen Companion-Pfade. Erst der konkrete Hotplug + UCSI
+        # entscheidet, ob der neue USB2-Pfad zu C1, C4 oder zum linken A gehört.
+        if (
+            self.usb_discovery.get("classification")
+            == "dell-5450-left-cluster"
+        ):
+            dynamic_keys = set(
+                self.usb_discovery.get("dynamic_usb2") or []
+            )
+
+            newly_present_dynamic = [
+                key
+                for key in dynamic_keys
+                if current_groups.get(key, False)
+                and not self.usb_last_group_present.get(key, False)
+            ]
+
+            newly_gone_dynamic = [
+                key
+                for key in dynamic_keys
+                if not current_groups.get(key, False)
+                and self.usb_last_group_present.get(key, False)
+            ]
+
+            target_c_slot = None
+            if len(newly_active_typec) == 1:
+                target_c_slot = self.usb_typec_slot_for_name(
+                    newly_active_typec[0]
+                )
+
+            left_a_slot = self.usb_left_a_slot()
+
+            for raw_key in newly_present_dynamic:
+                target_slot = target_c_slot
+                reason = "UCSI-Hotplug"
+
+                if target_slot is None:
+                    target_slot = left_a_slot
+                    reason = "kein neuer Type-C-Partner"
+
+                if self.usb_assign_dynamic_group(
+                    raw_key,
+                    target_slot,
+                    reason,
+                ):
+                    changed = True
+
+            # UCSI kann wenige Polls später erscheinen. Dann den zuletzt
+            # aktivierten, noch belegten dynamischen A-Pfad nach C korrigieren.
+            if target_c_slot is not None and not newly_present_dynamic:
+                now_mono = time.monotonic()
+                candidates = [
+                    (
+                        self.usb_dynamic_group_seen_at.get(key, 0.0),
+                        key,
+                    )
+                    for key in dynamic_keys
+                    if current_groups.get(key, False)
+                    and self.usb_dynamic_group_slots.get(key)
+                    == left_a_slot
+                    and now_mono
+                    - self.usb_dynamic_group_seen_at.get(key, 0.0)
+                    <= 3.0
+                ]
+                if candidates:
+                    _seen_at, raw_key = max(candidates)
+                    if self.usb_assign_dynamic_group(
+                        raw_key,
+                        target_c_slot,
+                        "verzögertes UCSI",
+                    ):
+                        changed = True
+
+            for raw_key in newly_gone_dynamic:
+                # Zuordnung bis nach sync/logging behalten; unten wird sie
+                # nach dem Entfernen bereinigt.
+                self.usb_dynamic_group_seen_at.pop(raw_key, None)
+
         groups_by_key = {
             group["raw_key"]: group
             for group in self.usb_discovery["groups"]
@@ -7167,6 +7394,8 @@ except Exception:
         # unter diesem Pfad hängt.
         if (
             self.usb_discovery.get("layout_quirk")
+            and self.usb_discovery.get("classification")
+            != "dell-5450-left-cluster"
             and hotplug_c_slot_idx is not None
         ):
             companion_keys = []
@@ -7257,6 +7486,15 @@ except Exception:
         if self.usb_connected != old_connected:
             changed = True
         self.usb_last_group_present = dict(current_groups)
+
+        if (
+            self.usb_discovery.get("classification")
+            == "dell-5450-left-cluster"
+        ):
+            for raw_key in list(self.usb_dynamic_group_slots):
+                if not current_groups.get(raw_key, False):
+                    self.usb_dynamic_group_slots.pop(raw_key, None)
+                    self.usb_dynamic_group_seen_at.pop(raw_key, None)
 
         for dev_name in sorted(new_device_names, key=natural_key):
             if self.usb_slot_for_device(dev_name) is not None:
