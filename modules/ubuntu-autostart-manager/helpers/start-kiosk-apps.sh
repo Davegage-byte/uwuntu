@@ -676,6 +676,106 @@ fi
 # Wipe Auto sitzt jetzt im gemeinsamen Network-Check-Fenster oben links.
 # Deshalb gezielt dieses Fenster aktivieren und danach den eingebetteten
 # WIPE-SSD-Button fokussieren.
+#
+# Update- und Shortcut-Fenster haben Vorrang. Solange eines davon sichtbar
+# ist, darf der abschließende Wipe-Fokus das Network/Wipe-Fenster nicht nach
+# vorne holen. Nach dem Schließen wird der normale LÖSCHEN-Fokus fortgesetzt.
+echo "Prüfe auf vorrangige Uwuntu-Fenster vor dem LÖSCHEN-Fokus ..."
+if ! python3 - <<'PY'
+import time
+import pyatspi
+
+PRIORITY_TITLES = {"Uwuntu Update", "Shortcuts / Hotkeys"}
+MAX_WAIT_SECONDS = 120.0
+POLL_SECONDS = 0.20
+deadline = time.monotonic() + MAX_WAIT_SECONDS
+last_titles = None
+
+
+def walk(obj, depth=0):
+    if depth > 4:
+        return
+    try:
+        count = obj.childCount
+    except Exception:
+        count = 0
+    for index in range(count):
+        try:
+            child = obj.getChildAtIndex(index)
+        except Exception:
+            continue
+        yield child
+        yield from walk(child, depth + 1)
+
+
+def visible_priority_titles():
+    try:
+        desktop = pyatspi.Registry.getDesktop(0)
+        app_count = desktop.childCount
+    except Exception:
+        return set()
+
+    found = set()
+    for app_index in range(app_count):
+        try:
+            app = desktop.getChildAtIndex(app_index)
+        except Exception:
+            continue
+
+        for candidate in walk(app):
+            try:
+                role = (candidate.getRoleName() or "").lower()
+                title = (candidate.name or "").strip()
+            except Exception:
+                continue
+
+            if role not in ("dialog", "frame", "window"):
+                continue
+            if title not in PRIORITY_TITLES:
+                continue
+
+            try:
+                state = candidate.getState()
+                if not state.contains(pyatspi.STATE_SHOWING):
+                    continue
+            except Exception:
+                pass
+
+            found.add(title)
+
+    return found
+
+
+while True:
+    titles = visible_priority_titles()
+    if not titles:
+        raise SystemExit(0)
+
+    if titles != last_titles:
+        print(
+            "Vorrangiges Fenster offen: " + ", ".join(sorted(titles))
+            + " · LÖSCHEN-Fokus wartet.",
+            flush=True,
+        )
+        last_titles = titles
+
+    if time.monotonic() >= deadline:
+        print(
+            "WARNUNG: Vorrangiges Fenster nach 120s noch offen · "
+            "LÖSCHEN-Fokus wird für diesen Start ausgelassen.",
+            flush=True,
+        )
+        raise SystemExit(2)
+
+    time.sleep(POLL_SECONDS)
+PY
+then
+    echo "Vorrangiges Fenster blieb offen; LÖSCHEN-Fokus wird nicht erzwungen."
+    restore_accessibility
+    echo "Kiosk fertig ohne erzwungenen LÖSCHEN-Fokus: $(date)"
+    exit 0
+fi
+
 if command -v gapplication >/dev/null 2>&1; then
     gapplication activate com.david.NetworkCheck >/dev/null 2>&1 || true
 else
