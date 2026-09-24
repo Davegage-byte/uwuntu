@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.37"
+VERSION = "2.38"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1409,7 +1409,7 @@ class CompactAudioPanel:
 
         self.wave = Gtk.DrawingArea()
         self.wave.set_content_width(210)
-        self.wave.set_content_height(100)
+        self.wave.set_content_height(88)
         self.wave.set_hexpand(True)
         self.wave.set_vexpand(False)
         self.wave.set_draw_func(self.draw_wave)
@@ -1677,14 +1677,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.37 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.38 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.37 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.38 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
