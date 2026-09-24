@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.34"
+VERSION = "2.35"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1371,7 +1371,7 @@ class CompactAudioPanel:
 
         self.wave = Gtk.DrawingArea()
         self.wave.set_content_width(210)
-        self.wave.set_content_height(70)
+        self.wave.set_content_height(100)
         self.wave.set_hexpand(True)
         self.wave.set_vexpand(False)
         self.wave.set_draw_func(self.draw_wave)
@@ -1483,7 +1483,7 @@ class CompactAudioPanel:
         if not isinstance(data, dict):
             if self.mic_state != "warn":
                 self.mic_state = "warn"
-                self.mic.set_text("🎤 START")
+                self.mic.set_text("🎤 MIC START")
                 self.mic.remove_css_class("good")
                 self.mic.remove_css_class("bad")
                 self.mic.remove_css_class("warn")
@@ -1499,7 +1499,7 @@ class CompactAudioPanel:
         mic_state = "good" if mic_running else "bad"
         if self.mic_state != mic_state:
             self.mic_state = mic_state
-            self.mic.set_text("🎤 OK" if mic_running else "🎤 FEHLT")
+            self.mic.set_text("🎤 MIC OK" if mic_running else "🎤 MIC FEHLT")
             self.mic.remove_css_class("good")
             self.mic.remove_css_class("bad")
             self.mic.remove_css_class("warn")
@@ -1654,14 +1654,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.34 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.35 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.34 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.35 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1841,7 +1841,7 @@ class NetworkCheckApp(Gtk.Application):
         .audio-mic {
             font-size: 11px;
             font-weight: 800;
-            min-width: 56px;
+            min-width: 82px;
         }
         button.audio-mini {
             min-height: 62px;
