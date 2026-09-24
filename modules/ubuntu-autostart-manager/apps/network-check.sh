@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.33"
+VERSION = "2.34"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -252,6 +252,18 @@ def format_mbps(value, decimals=0):
     if decimals:
         return f"{value:.1f} Mbps"
     return f"{value:,.0f}".replace(",", ".") + " Mbps"
+
+
+def format_link_speed(value):
+    """LAN/WLAN-Link kompakt anzeigen: ab 1000 Mbps in Gbps."""
+    if value is None:
+        return "--"
+    if value >= 1000.0:
+        gbps = value / 1000.0
+        if abs(gbps - round(gbps)) < 0.01:
+            return f"{int(round(gbps))} Gbps"
+        return f"{gbps:.1f} Gbps"
+    return format_mbps(value, decimals=0)
 
 def get_devices():
     """
@@ -1359,7 +1371,7 @@ class CompactAudioPanel:
 
         self.wave = Gtk.DrawingArea()
         self.wave.set_content_width(210)
-        self.wave.set_content_height(38)
+        self.wave.set_content_height(70)
         self.wave.set_hexpand(True)
         self.wave.set_vexpand(False)
         self.wave.set_draw_func(self.draw_wave)
@@ -1642,14 +1654,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.33 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.34 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.33 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.34 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1818,22 +1830,22 @@ class NetworkCheckApp(Gtk.Application):
             background: #17171c;
             border: 1px solid #34343c;
             border-radius: 8px;
-            padding: 3px 5px;
+            padding: 5px 6px;
         }
         .audio-strip-title {
             color: #f4f4f5;
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 800;
-            min-width: 44px;
+            min-width: 48px;
         }
         .audio-mic {
-            font-size: 10px;
+            font-size: 11px;
             font-weight: 800;
-            min-width: 52px;
+            min-width: 56px;
         }
         button.audio-mini {
-            min-height: 30px;
-            padding: 1px 6px;
+            min-height: 62px;
+            padding: 2px 6px;
             border-radius: 7px;
             font-size: 10px;
             font-weight: 800;
@@ -1923,16 +1935,16 @@ class NetworkCheckApp(Gtk.Application):
         .metric {
             background: #111318;
             border-radius: 8px;
-            padding: 4px 6px;
+            padding: 3px 4px;
         }
         .metric-caption {
             color: #9d9da7;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 600;
         }
 
         .metric-value {
-            font-size: 17px;
+            font-size: 14px;
             font-weight: 800;
         }
 
@@ -2844,9 +2856,9 @@ class NetworkCheckApp(Gtk.Application):
         # Laufender Test = Blau. Bereits abgeschlossene Werte behalten
         # ihre fertige Grün/Orange/Rot-Bewertung.
         if phase == "DOWNLOAD":
-            card.set_metric("down", "0.0 Mbps", "live")
+            card.set_metric("down", "0 Mbps", "live")
         elif phase == "UPLOAD":
-            card.set_metric("up", "0.0 Mbps", "live")
+            card.set_metric("up", "0 Mbps", "live")
 
         self.global_status.set_text(f"{kind.upper()} {iface}: {phase}")
         return False
@@ -2854,7 +2866,7 @@ class NetworkCheckApp(Gtk.Application):
         card = self.cards[kind]
         card.set_metric(
             "link",
-            format_mbps(speed),
+            format_link_speed(speed),
             self.metric_class(kind, "link", speed),
         )
         return False
@@ -2898,7 +2910,7 @@ class NetworkCheckApp(Gtk.Application):
         # Erst der fertige Messwert wird Grün/Orange/Rot bewertet.
         card.set_metric(
             metric,
-            format_mbps(speed, decimals=1),
+            format_mbps(speed, decimals=0),
             "live",
         )
         return False
@@ -2925,7 +2937,7 @@ class NetworkCheckApp(Gtk.Application):
         card = self.cards[kind]
         card.set_metric(
             "link",
-            format_mbps(r["link"]),
+            format_link_speed(r["link"]),
             self.metric_class(kind, "link", r["link"]),
         )
 

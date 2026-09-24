@@ -2393,7 +2393,6 @@ def run_global_arrow_monitor(parent_pid):
 
     key_map = {
         1: "escape",        # KEY_ESC
-        48: "benchmark",    # KEY_B
         30: "all",          # KEY_A
         37: "keyboard",     # KEY_K
         19: "ram",          # KEY_R
@@ -3123,7 +3122,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.129"
+            else "Hardware Check v4.5.130"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3136,7 +3135,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.129"
+                else "Hardware Check v4.5.130"
             )
         )
         title_label.add_css_class("title")
@@ -5750,7 +5749,7 @@ class App(Gtk.Application):
             ("↑", "Audio Test: beide Lautsprecher testen"),
             ("→", "Audio Test: rechten Lautsprecher testen"),
             ("↓", "Audio Test: kompletten Auto-Test starten"),
-            ("B", "Benchmark-Seite öffnen / CPU-Kurztest starten"),
+            ("B", "Im Benchmark-Fenster: CPU-Kurztest starten"),
             ("K", "Keyboard-Test global öffnen"),
             ("R", "RAM-Kurztest auf der Benchmark-Seite starten"),
             ("A", "ALLE Kurztests auf der Benchmark-Seite starten"),
@@ -6446,12 +6445,14 @@ except Exception:
             return False
 
         if action == "benchmark":
+            # Im Experiment besitzt nur das separate Benchmark-Fenster den
+            # B-Shortcut. Der normale Hardware Check öffnet damit keine
+            # Benchmark-Seite mehr.
+            if not BENCHMARK_WINDOW_MODE:
+                return False
             if visible == "benchmarks":
                 self.start_test(None, "cpu-short", 10.0)
-                log("Globaler Hotkey B: CPU Benchmark gestartet")
-            else:
-                self.show_benchmarks()
-                log("Globaler Hotkey B: Benchmark-Seite geöffnet")
+                log("Benchmark-Fenster: B startet CPU Kurztest")
             return False
 
         if action == "keyboard":
@@ -11142,15 +11143,12 @@ except Exception:
                 self.handle_global_hotkey(action)
                 return True
 
-        # A/B/K/R/I/U/G/F1 auch über GTK behandeln, wenn Hardware Check den Fokus hat.
-        # B = CPU/Benchmark, R = RAM, A = ALLE, K = Tastatur-Test.
+        # A/K/R/I/U/G/F1 auch über GTK behandeln, wenn Hardware Check den Fokus hat.
+        # R/A gelten nur auf der Benchmark-Seite; K öffnet den Tastatur-Test.
         # Innerhalb des Tastatur-Tests
         # bleiben beide selbstverständlich normale Prüftasten.
         # Der Hotkey-Handler entprellt das parallele /dev/input-Ereignis.
         lower_name = name.lower()
-        if lower_name == "b" and visible != "keyboard":
-            self.handle_global_hotkey("benchmark")
-            return True
         if lower_name == "k" and visible != "keyboard":
             self.handle_global_hotkey("keyboard")
             return True
