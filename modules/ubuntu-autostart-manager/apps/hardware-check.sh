@@ -3114,14 +3114,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.125")
+        self.window.set_title("Hardware Check v4.5.126")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.125")
+        title_label = Gtk.Label(label="Hardware Check v4.5.126")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -7731,13 +7731,35 @@ except Exception:
             chooser.attach(b, index % 4, index // 4, 1, 1)
 
         body.append(chooser)
+
+        # Status, Laufzeit und ABBRECHEN sitzen gemeinsam direkt unter den
+        # Testbuttons. Dadurch bleibt unten mehr Platz für die Ergebniszeile
+        # und die jeweilige Telemetrie-Grafik.
+        status_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+        )
+
         self.benchmark_status = Gtk.Label(label="Bereit")
         self.benchmark_status.set_xalign(0)
         self.benchmark_status.set_hexpand(True)
         self.benchmark_status.set_ellipsize(Pango.EllipsizeMode.END)
         self.benchmark_status.set_single_line_mode(True)
         self.benchmark_status.add_css_class("benchmark-status")
-        body.append(self.benchmark_status)
+        status_row.append(self.benchmark_status)
+
+        self.benchmark_time = Gtk.Label(label="00:00 / 00:00")
+        self.benchmark_time.set_xalign(1)
+        self.benchmark_time.add_css_class("muted")
+        status_row.append(self.benchmark_time)
+
+        self.cancel_test_button = Gtk.Button(label="ABBRECHEN")
+        self.cancel_test_button.add_css_class("benchmark-compact")
+        self.cancel_test_button.set_sensitive(False)
+        self.cancel_test_button.connect("clicked", self.cancel_test)
+        status_row.append(self.cancel_test_button)
+
+        body.append(status_row)
 
         self.benchmark_progress = Gtk.ProgressBar()
         self.benchmark_progress.set_fraction(0.0)
@@ -7805,23 +7827,6 @@ except Exception:
         self.gpu_frame_values = [0.0] * 24
         body.append(self.gpu_activity)
 
-        progress_row = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=8
-        )
-
-        self.benchmark_time = Gtk.Label(label="00:00 / 00:00")
-        self.benchmark_time.set_xalign(0)
-        self.benchmark_time.set_hexpand(True)
-        self.benchmark_time.add_css_class("muted")
-        self.cancel_test_button = Gtk.Button(label="ABBRECHEN")
-        self.cancel_test_button.add_css_class("benchmark-compact")
-        self.cancel_test_button.set_sensitive(False)
-        self.cancel_test_button.connect("clicked", self.cancel_test)
-
-        progress_row.append(self.benchmark_time)
-        progress_row.append(self.cancel_test_button)
-        body.append(progress_row)
         self.benchmark_result = Gtk.Label(label="")
         self.benchmark_result.set_xalign(0)
         self.benchmark_result.set_hexpand(True)
@@ -9433,11 +9438,12 @@ except Exception:
                     force=True,
                 )
             elif not sequence_was_active:
-                running_button = self.benchmark_button_by_kind.get(
-                    completed_kind
+                # Einzeltests erhalten nach Abschluss denselben sichtbaren
+                # Grün/Rot-Zustand wie die Schritte einer ALLE-Sequenz.
+                self.set_benchmark_button_result(
+                    completed_kind,
+                    bool(outcome and outcome.get("ok")),
                 )
-                if running_button is not None:
-                    running_button.remove_css_class("benchmark-running")
                 self.set_benchmark_controls(False)
 
         return False
