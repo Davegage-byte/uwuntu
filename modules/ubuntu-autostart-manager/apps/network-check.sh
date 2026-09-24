@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.38"
+VERSION = "2.39"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1416,15 +1416,25 @@ class CompactAudioPanel:
         audio_row.append(self.wave)
 
         self.buttons = {}
+        button_grid = Gtk.Grid()
+        button_grid.set_row_spacing(4)
+        button_grid.set_column_spacing(4)
+        button_grid.set_row_homogeneous(True)
+        button_grid.set_column_homogeneous(True)
+        button_grid.set_hexpand(False)
+        button_grid.set_vexpand(True)
+
         specs = (
-            ("left", "← LINKS"),
-            ("both", "↑ MITTE"),
-            ("right", "RECHTS →"),
-            ("auto", "↓ AUTO"),
+            ("left", "← LINKS", 0, 0),
+            ("right", "RECHTS →", 1, 0),
+            ("both", "↑ MITTE", 0, 1),
+            ("auto", "AUTO ↓", 1, 1),
         )
-        for action, label in specs:
+        for action, label, column, row in specs:
             button = Gtk.Button(label=label)
             button.set_focusable(False)
+            button.set_hexpand(True)
+            button.set_vexpand(True)
             button.add_css_class("audio-mini")
             button.add_css_class("audio-orange")
             button.connect(
@@ -1432,7 +1442,9 @@ class CompactAudioPanel:
                 lambda _button, value=action: self.trigger(value),
             )
             self.buttons[action] = button
-            audio_row.append(button)
+            button_grid.attach(button, column, row, 1, 1)
+
+        audio_row.append(button_grid)
 
         # Der normale Tiling-Slot startet die Engine parallel. NC wartet
         # zunächst kurz darauf und startet sie nur selbst, falls der Slot
@@ -1677,14 +1689,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.38 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.39 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.38 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.39 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1853,8 +1865,9 @@ class NetworkCheckApp(Gtk.Application):
         }
 
         button.audio-mini {
-            min-height: 62px;
-            padding: 2px 6px;
+            min-height: 34px;
+            min-width: 82px;
+            padding: 2px 7px;
             border-radius: 7px;
             font-size: 10px;
             font-weight: 800;
