@@ -946,6 +946,118 @@ def discover_physical_ports():
 
     common_ports = sorted(set(ss_by_port) & set(usb2_by_port))
 
+    # Dell Latitude 5450, BIOS 1.23.x: gemessene 4-Port-Topologie.
+    #
+    # Der generische Ansatz "gleiche Root-Portnummer = USB2/SS-Companion"
+    # ist auf diesem Modell falsch. Die geführte Messung zeigt:
+    #   USB-C Port 1 -> PCI 00:0d.0 SS Port 3 + UCSI port0
+    #   USB-A Port 2 -> PCI 00:14.0 Peer-Gruppe USB3 Port 1 / USB2 Port 3
+    #   USB-A Port 3 -> PCI 00:0d.0 SS Port 1
+    #   USB-C Port 4 -> PCI 00:0d.0 SS Port 4 + UCSI port1
+    #
+    # Die USB2-Pfade werden vollständig per Topologie zugeordnet:
+    # 00:14.0 Port 1 gehört zu USB-A 3, Port 2 zu USB-C 1 und
+    # Port 4 zu USB-C 4. Damit bleibt die Zuordnung unabhängig davon,
+    # von welcher Buchse Uwuntu gebootet wurde.
+    if (
+        layout_quirk
+        and layout_quirk.get("name") == "Dell Latitude 5450"
+        and c_count_hint == 2
+    ):
+        def dell_group(controller, port_no, superspeed=None, peer=None):
+            matches = []
+            token = f"/0000:00:{controller}/"
+            for group in groups:
+                if peer is not None and group_has_peer(group) != peer:
+                    continue
+
+                matched = False
+                for item in group["items"]:
+                    if token not in item.get("path", ""):
+                        continue
+                    if int(item.get("port_no") or -1) != int(port_no):
+                        continue
+                    speed = float(item.get("speed") or 0.0)
+                    if superspeed is True and speed <= 480.0:
+                        continue
+                    if superspeed is False and speed > 480.0:
+                        continue
+                    matched = True
+                    break
+
+                if matched:
+                    matches.append(group)
+
+            return matches[0] if len(matches) == 1 else None
+
+        dell_a2 = next(
+            (
+                group
+                for group in groups
+                if group_has_peer(group)
+                and any(
+                    "/0000:00:14.0/" in item.get("path", "")
+                    and float(item.get("speed") or 0.0) > 480.0
+                    for item in group["items"]
+                )
+            ),
+            None,
+        )
+        dell_a3_ss = dell_group("0d.0", 1, superspeed=True, peer=False)
+        dell_c1_ss = dell_group("0d.0", 3, superspeed=True, peer=False)
+        dell_c4_ss = dell_group("0d.0", 4, superspeed=True, peer=False)
+
+        dell_a3_usb2 = dell_group("14.0", 1, superspeed=False, peer=False)
+        dell_c1_usb2 = dell_group("14.0", 2, superspeed=False, peer=False)
+        dell_c4_usb2 = dell_group("14.0", 4, superspeed=False, peer=False)
+
+        required = (
+            dell_a2,
+            dell_a3_ss,
+            dell_c1_ss,
+            dell_c4_ss,
+            dell_a3_usb2,
+            dell_c1_usb2,
+            dell_c4_usb2,
+        )
+        required_keys = {
+            group["raw_key"]
+            for group in required
+            if group is not None
+        }
+
+        if all(group is not None for group in required) and len(required_keys) == 7:
+            classification = "dell-5450-measured-topology"
+
+            a_map[dell_a2["raw_key"]] = 0
+            a_map[dell_a3_ss["raw_key"]] = 1
+            a_map[dell_a3_usb2["raw_key"]] = 1
+
+            c_map[dell_c1_ss["raw_key"]] = 0
+            c_map[dell_c1_usb2["raw_key"]] = 0
+            c_map[dell_c4_ss["raw_key"]] = 1
+            c_map[dell_c4_usb2["raw_key"]] = 1
+
+            a_reserve = []
+            a_count = 2
+            c_count = 2
+            physical_total = 4
+
+            return {
+                "mode": mode,
+                "classification": classification,
+                "groups": groups,
+                "typec": typec,
+                "raw_group_count": raw_count,
+                "physical_total": physical_total,
+                "usb_a_count": a_count,
+                "usb_c_count": c_count,
+                "a_map": a_map,
+                "c_map": c_map,
+                "a_reserve": a_reserve,
+                "layout_quirk": layout_quirk["name"],
+            }
+
     if c_count_hint > 0 and len(common_ports) >= c_count_hint:
         classification = "ucsi-companion-topology"
         c_ports = common_ports[:c_count_hint]
@@ -2984,14 +3096,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.119")
+        self.window.set_title("Hardware Check v4.5.120")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.119")
+        title_label = Gtk.Label(label="Hardware Check v4.5.120")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6404,13 +6516,29 @@ except Exception:
                 default=999,
             )
             slots.append(slot)
-        slots.sort(
-            key=lambda slot: (
-                slot["sort"],
-                0 if slot["type"] == "USB-C" else 1,
-                slot["type"],
+        if discovery.get("classification") == "dell-5450-measured-topology":
+            # Physische Reihenfolge am Latitude 5450:
+            # USB-C 1, USB-A 2, USB-A 3, USB-C 4.
+            dell_order = {
+                ("USB-C", 0): 0,
+                ("USB-A", 0): 1,
+                ("USB-A", 1): 2,
+                ("USB-C", 1): 3,
+            }
+            slots.sort(
+                key=lambda slot: dell_order.get(
+                    (slot.get("type"), slot.get("local_idx")),
+                    99,
+                )
             )
-        )
+        else:
+            slots.sort(
+                key=lambda slot: (
+                    slot["sort"],
+                    0 if slot["type"] == "USB-C" else 1,
+                    slot["type"],
+                )
+            )
 
         self.usb_slots = slots
         self.usb_group_to_slot = {}
@@ -6418,20 +6546,10 @@ except Exception:
             for raw_key in slot["groups"]:
                 self.usb_group_to_slot[raw_key] = slot_idx
 
+        # Nur für unbekannte künftige Topologien vorgesehen. Beim Latitude
+        # 5450 ist die Matrix inzwischen gemessen und eindeutig, daher keine
+        # dynamische C/A-Doppelzuordnung mehr.
         self.usb_c_a_shadow_slots = {}
-        # Dell Latitude 5450: In der beobachteten Firmware-Topologie ist der
-        # im UI als "USB-C Port 1" geführte Root-Pfad auch der Datenpfad des
-        # im UI als "USB-A Port 3" sichtbaren Anschlusses. Der Steckertyp wird
-        # deshalb zur Laufzeit über UCSI entschieden:
-        #   Type-C Partner aktiv -> USB-C Port 1
-        #   kein Type-C Partner -> USB-A Port 3
-        if discovery.get("layout_quirk") == "Dell Latitude 5450":
-            if (
-                len(self.usb_slots) >= 3
-                and self.usb_slots[0].get("type") == "USB-C"
-                and self.usb_slots[2].get("type") == "USB-A"
-            ):
-                self.usb_c_a_shadow_slots[0] = 2
     def usb_slot_for_device(self, device_name):
         if not device_name or not self.usb_discovery:
             return None
