@@ -66,7 +66,7 @@ uwuntu_set_dock_autohide() {
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/uwuntu-camera-test"
-PY_FILE="$CACHE_DIR/camera_test_v1_23.py"
+PY_FILE="$CACHE_DIR/camera_test_v1_24.py"
 LOG_FILE="$CACHE_DIR/camera_test.log"
 STATE_FILE="$HOME/.local/state/uwuntu/camera_test_status.json"
 mkdir -p "$CACHE_DIR" "$(dirname "$STATE_FILE")"
@@ -75,7 +75,7 @@ rm -f "$STATE_FILE" 2>/dev/null || true
 {
     echo
     echo "============================================================"
-    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.23 Start"
+    echo "$(date '+%Y-%m-%d %H:%M:%S')  Uwuntu Kamera Test v1.24 Start"
 } >> "$LOG_FILE" 2>/dev/null || true
 
 # XWayland gibt dem Kamera-Fenster eine klassische WM_CLASS. Zusammen mit
@@ -160,9 +160,10 @@ from gi.repository import Gtk, Gdk, Gst, GLib, Gio
 
 APP_ID = "com.david.UwuntuCameraTest"
 APP_NAME = "Uwuntu Kamera Test"
-VERSION = "1.23"
+VERSION = "1.24"
 ERROR_TEXT = "KEIN KAMERABILD ERKANNT"
 IPU7_LIMITED_TEXT = "IPU7 KAMERA – LINUX NICHT TESTBAR"
+AUTO_FAILURE_LIMIT = 6
 
 STATE_DIR = Path.home() / ".local/state/uwuntu"
 STATE_FILE = STATE_DIR / "camera_test_status.json"
@@ -379,6 +380,9 @@ class CameraWindow(Gtk.ApplicationWindow):
         )
         self.device_index = 0
         self.mode_index = 0
+        self.auto_failure_count = 0
+        self.auto_retry_blocked = False
+        self.last_failed_serial = 0
 
         # Dynamische Vorschauauflösung: normales Fenster bevorzugt 720p,
         # deutlich vergrößert/maximiert bevorzugt 1080p. Größenänderungen
@@ -731,6 +735,9 @@ window { background: #000; }
         return self.devices[self.device_index]
 
     def try_current(self):
+        if self.auto_retry_blocked:
+            return False
+
         self.serial += 1
         current_serial = self.serial
         self.stop_pipeline()
@@ -767,6 +774,7 @@ window { background: #000; }
             self.face_pipeline_enabled = self.face_cascade is not None
             if self.device_index >= len(self.devices):
                 self.device_index = 0
+                self.auto_retry_blocked = True
                 self.set_status_color("red")
                 self.error_label.show()
                 print("Keine funktionierende Kamera-Konfiguration gefunden.", flush=True)
@@ -825,6 +833,9 @@ window { background: #000; }
             return
         if not self.frame_seen:
             self.frame_seen = True
+            self.auto_failure_count = 0
+            self.auto_retry_blocked = False
+            self.last_failed_serial = 0
             device = self.current_device()
             label, _ = self.preview_modes()[self.mode_index]
             print(f"Kamera aktiv: {device} | {label}", flush=True)
@@ -896,7 +907,11 @@ window { background: #000; }
         return False
 
     def fail_current(self, current_serial):
-        if current_serial != self.serial or self.frame_seen:
+        if (
+            current_serial != self.serial
+            or self.frame_seen
+            or self.auto_retry_blocked
+        ):
             return False
 
         # Falls gerade der Face-Zweig aktiv war, dieselbe Kamera/Auflösung
@@ -910,6 +925,30 @@ window { background: #000; }
             )
             self.face_pipeline_enabled = False
             GLib.idle_add(self.try_current)
+            return False
+
+        # Erst der einfache Pfad zählt als echte fehlgeschlagene
+        # Kamera-Konfiguration. Ein reiner Face-Zweig-Fehler soll den
+        # Schutzzaehler nicht vorschnell ausloesen.
+        if self.last_failed_serial != current_serial:
+            self.last_failed_serial = current_serial
+            self.auto_failure_count += 1
+
+        if self.auto_failure_count >= AUTO_FAILURE_LIMIT:
+            self.auto_retry_blocked = True
+            self.stop_pipeline()
+            self.error_label.set_text(ERROR_TEXT)
+            self.error_label.get_style_context().remove_class(
+                "camera-warning"
+            )
+            self.set_status_color("red")
+            self.error_label.show()
+            print(
+                "Automatischer Kamera-Fallback nach "
+                f"{self.auto_failure_count} fehlerhaften "
+                "Kamera-Konfigurationen gestoppt.",
+                flush=True,
+            )
             return False
 
         # Auch der einfache Pfad hat kein Bild geliefert: nächste Auflösung.
@@ -966,6 +1005,9 @@ window { background: #000; }
 
         self.device_index = (pos + 1) % len(self.devices)
         self.mode_index = 0
+        self.auto_failure_count = 0
+        self.auto_retry_blocked = False
+        self.last_failed_serial = 0
         self.face_pipeline_enabled = self.face_cascade is not None
         self.reset_face_state()
         self.error_label.hide()
