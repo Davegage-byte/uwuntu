@@ -2801,6 +2801,10 @@ class App(Gtk.Application):
         # auftauchen. Die A-Zuordnung bleibt dabei erhalten; sie wird nur
         # solange unterdrückt, wie der zugehörige C-Port wirklich aktiv ist.
         self.usb_a_c_companions = {}
+        # Modellbezogene dynamische Doppelzuordnung. Key = USB-C-Slot,
+        # Value = USB-A-Slot. Wird nur genutzt, wenn derselbe Root-Pfad
+        # ohne aktives Type-C/UCSI-Signal erscheint.
+        self.usb_c_a_shadow_slots = {}
         self.usb_last_group_present = {}
         self.usb_last_devices = {}
         self.usb_fallback = {}
@@ -2980,14 +2984,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.117")
+        self.window.set_title("Hardware Check v4.5.118")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.117")
+        title_label = Gtk.Label(label="Hardware Check v4.5.118")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6413,6 +6417,21 @@ except Exception:
         for slot_idx, slot in enumerate(self.usb_slots):
             for raw_key in slot["groups"]:
                 self.usb_group_to_slot[raw_key] = slot_idx
+
+        self.usb_c_a_shadow_slots = {}
+        # Dell Latitude 5450: In der beobachteten Firmware-Topologie ist der
+        # im UI als "USB-C Port 1" geführte Root-Pfad auch der Datenpfad des
+        # im UI als "USB-A Port 3" sichtbaren Anschlusses. Der Steckertyp wird
+        # deshalb zur Laufzeit über UCSI entschieden:
+        #   Type-C Partner aktiv -> USB-C Port 1
+        #   kein Type-C Partner -> USB-A Port 3
+        if discovery.get("layout_quirk") == "Dell Latitude 5450":
+            if (
+                len(self.usb_slots) >= 3
+                and self.usb_slots[0].get("type") == "USB-C"
+                and self.usb_slots[2].get("type") == "USB-A"
+            ):
+                self.usb_c_a_shadow_slots[0] = 2
     def usb_slot_for_device(self, device_name):
         if not device_name or not self.usb_discovery:
             return None
@@ -6435,7 +6454,12 @@ except Exception:
     def usb_active_c_slots(self, group_states, typec_partner_present=None):
         """Aktuell aktive USB-C-Slots aus Root-Pfaden und UCSI ableiten."""
         active = set()
+        shadow_c_slots = set(self.usb_c_a_shadow_slots)
 
+        # Nicht mehrdeutige C-Pfade dürfen weiterhin über ihren Root-Present-
+        # Zustand erkannt werden. Bei bekannten C/A-Shadow-Pfaden ist genau
+        # dieses Signal dagegen unbrauchbar, weil auch der echte USB-A-Port
+        # denselben Pfad aktiviert.
         for raw_key, present in group_states.items():
             if not present:
                 continue
@@ -6444,9 +6468,13 @@ except Exception:
                 continue
             if not (0 <= slot_idx < len(self.usb_slots)):
                 continue
-            if self.usb_slots[slot_idx].get("type") == "USB-C":
-                active.add(slot_idx)
+            if self.usb_slots[slot_idx].get("type") != "USB-C":
+                continue
+            if slot_idx in shadow_c_slots:
+                continue
+            active.add(slot_idx)
 
+        # Für den mehrdeutigen Dell-Pfad ist UCSI die entscheidende Quelle.
         if typec_partner_present:
             discovery = self.usb_discovery or {}
             c_map = discovery.get("c_map", {})
@@ -6465,6 +6493,21 @@ except Exception:
                         break
 
         return active
+
+    def usb_effective_slot_for_group(self, raw_key, active_c_slots):
+        """Mehrdeutigen Dell-C/A-Pfad anhand des Steckertyps auflösen."""
+        slot_idx = self.usb_group_to_slot.get(raw_key)
+        if slot_idx is None:
+            return None
+
+        shadow_a_slot = self.usb_c_a_shadow_slots.get(slot_idx)
+        if (
+            shadow_a_slot is not None
+            and slot_idx not in set(active_c_slots or ())
+        ):
+            return shadow_a_slot
+
+        return slot_idx
 
     def usb_a_companion_suppressed(self, raw_key, active_c_slots):
         c_slot_idx = self.usb_a_c_companions.get(raw_key)
@@ -6485,7 +6528,10 @@ except Exception:
         for raw_key, present in group_states.items():
             if not present:
                 continue
-            slot_idx = self.usb_group_to_slot.get(raw_key)
+            slot_idx = self.usb_effective_slot_for_group(
+                raw_key,
+                active_c_slots,
+            )
             if slot_idx is None:
                 continue
 
@@ -6856,6 +6902,14 @@ except Exception:
             for group in self.usb_discovery["groups"]
         }
 
+        # Bereits vor der Hotplug-Klassifizierung bestimmen, welche C-Slots
+        # durch ein echtes Type-C-Signal bestätigt sind. Das verhindert, dass
+        # der Dell-Shadow-Pfad beim Einstecken in USB-A Port 3 als C1 gilt.
+        active_c_slots = self.usb_active_c_slots(
+            current_groups,
+            current_typec_partner_present,
+        )
+
         # Einen USB-C-Hotplug nicht ausschließlich über UCSI erkennen.
         # Auf dem Latitude 5450 meldet die Firmware den Type-C-Partner nicht
         # auf jedem Steckvorgang rechtzeitig. Deshalb wird zusätzlich geprüft,
@@ -6874,6 +6928,11 @@ except Exception:
             if not (0 <= candidate_idx < len(self.usb_slots)):
                 continue
             if self.usb_slots[candidate_idx].get("type") == "USB-C":
+                if (
+                    candidate_idx in self.usb_c_a_shadow_slots
+                    and candidate_idx not in active_c_slots
+                ):
+                    continue
                 newly_present_c_slots.add(candidate_idx)
 
         hotplug_c_slot_idx = None
@@ -6887,6 +6946,11 @@ except Exception:
             if not (0 <= candidate_idx < len(self.usb_slots)):
                 continue
             if self.usb_slots[candidate_idx].get("type") != "USB-C":
+                continue
+            if (
+                candidate_idx in self.usb_c_a_shadow_slots
+                and candidate_idx not in active_c_slots
+            ):
                 continue
             hotplug_c_slot_idx = candidate_idx
             break
@@ -7037,7 +7101,10 @@ except Exception:
 
         for raw_key, present in current_groups.items():
             before = self.usb_last_group_present.get(raw_key, False)
-            slot_idx = self.usb_group_to_slot.get(raw_key)
+            slot_idx = self.usb_effective_slot_for_group(
+                raw_key,
+                active_c_slots,
+            )
 
             if present == before:
                 continue
