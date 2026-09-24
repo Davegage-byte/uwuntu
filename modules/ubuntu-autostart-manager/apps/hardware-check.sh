@@ -668,15 +668,6 @@ def collect_root_port_objects(include_unknown=False, superspeed_only=False):
         ):
             connect_type = read_text(port / "connect_type").lower()
             port_no = port_number_from_name(port.name)
-            location = read_text(port / "location").strip().lower()
-            if location:
-                try:
-                    # Kernel-ABI: location ist ein hexadezimaler Firmwarewert.
-                    # 0 bedeutet praktisch "keine verwertbare Ortsangabe".
-                    if int(location, 16) == 0:
-                        location = ""
-                except ValueError:
-                    location = ""
 
             if port_no is None:
                 continue
@@ -697,7 +688,6 @@ def collect_root_port_objects(include_unknown=False, superspeed_only=False):
                 "connect_type": connect_type or "unknown",
                 "peer": peer,
                 "connector": connector,
-                "location": location,
                 "device_name": port_device_name(hub["bus"], port_no),
             })
 
@@ -798,6 +788,29 @@ def discover_typec_ports():
     return result
 
 
+def usb_port_layout_quirk():
+    """Dokumentierte physische Portanzahl für bekannte Firmware-Sonderfälle."""
+    dmi = Path("/sys/class/dmi/id")
+    vendor = read_first_value(dmi / "sys_vendor", dmi / "board_vendor")
+    model = read_first_value(dmi / "product_name", dmi / "board_name")
+
+    vendor_key = "" if vendor == "--" else vendor.strip().lower()
+    model_key = "" if model == "--" else model.strip().lower()
+
+    # Dell dokumentiert für das Latitude 5450 zwei USB-A- und zwei
+    # Thunderbolt-4/USB-C-Buchsen. Auf einzelnen Firmwareständen meldet
+    # Linux zusätzlich einen hotplug-fähigen logischen Root-Port, der keine
+    # weitere physische Buchse darstellt.
+    if "dell" in vendor_key and re.search(r"\blatitude\s+5450\b", model_key):
+        return {
+            "name": "Dell Latitude 5450",
+            "usb_a": 2,
+            "usb_c": 2,
+        }
+
+    return None
+
+
 def group_present(group):
     for item in group["items"]:
         if (SYS_USB / item["device_name"]).exists():
@@ -859,11 +872,13 @@ def discover_physical_ports():
 
     groups = group_physical_ports(objects)
     typec = discover_typec_ports()
+    layout_quirk = usb_port_layout_quirk()
 
     raw_count = len(groups)
     c_count_hint = min(len(typec), len(groups))
     a_map = {}
     c_map = {}
+    a_reserve = []
     classification = "generic"
 
     def group_max_speed(group):
@@ -880,63 +895,32 @@ def discover_physical_ports():
     def group_has_peer(group):
         return any(bool(item.get("peer")) for item in group["items"])
 
-    def group_locations(group):
-        return {
-            item.get("location")
-            for item in group["items"]
-            if item.get("location")
-        }
+    def select_a_groups(a_groups, c_count):
+        """Bekannte Überzählung ohne falsche Typ-Umsortierung begrenzen.
 
-    def absorb_typec_location_companions():
-        """Weitere logische Pfade derselben physischen USB-C-Buchse zuordnen.
-
-        Linux stellt den Firmware-Ort eines Root-Ports über "location" bereit.
-        Das ist genau dafür gedacht, logische USB2-/USB3-/USB4-Pfade derselben
-        physischen Buchse zu paaren. Einige USB4-/Thunderbolt-Systeme liefern
-        dabei keinen direkten peer-/connector-Link für jeden Begleitpfad.
+        Kandidaten, an denen bereits ein Gerät steckt, werden bevorzugt
+        sichtbar gehalten. Weitere Kandidaten bleiben als Reserve erhalten
+        und können beim echten Hotplug dynamisch einen unbestätigten Slot
+        ersetzen.
         """
-        if not c_map:
-            return 0
+        if not layout_quirk:
+            return a_groups, []
 
-        groups_by_key = {
-            group["raw_key"]: group
-            for group in groups
-        }
-        location_to_slots = {}
+        wanted_a = int(layout_quirk.get("usb_a") or 0)
+        wanted_c = int(layout_quirk.get("usb_c") or 0)
+        if wanted_a <= 0 or c_count != wanted_c or len(a_groups) < wanted_a:
+            return a_groups, []
 
-        for raw_key, slot_idx in c_map.items():
-            group = groups_by_key.get(raw_key)
-            if not group:
-                continue
-            for location in group_locations(group):
-                location_to_slots.setdefault(location, set()).add(slot_idx)
-
-        added = 0
-        for group in groups:
-            raw_key = group["raw_key"]
-            if raw_key in c_map:
-                continue
-
-            # Ein bereits per USB2/USB3-peer gekoppelter Root-Port ist eine
-            # eigenständige physische Buchse. Solche Gruppen dürfen niemals
-            # allein wegen eines gleichen Firmware-location-Werts nach USB-C
-            # umklassifiziert werden. Das schützt insbesondere echte USB-A-
-            # Ports vor fehlerhaften/mehrdeutigen Firmware-Location-Werten.
-            if group_has_peer(group):
-                continue
-
-            matches = set()
-            for location in group_locations(group):
-                matches.update(location_to_slots.get(location, set()))
-
-            # Nur eindeutige Firmware-Zuordnungen für bislang ungepaarte
-            # logische Pfade übernehmen. Bei widersprüchlicher Location oder
-            # bereits vorhandenem peer bleibt die bisherige Zuordnung aktiv.
-            if len(matches) == 1:
-                c_map[raw_key] = next(iter(matches))
-                added += 1
-
-        return added
+        ordered = sorted(
+            a_groups,
+            key=lambda g: (
+                0 if group_present(g) else 1,
+                0 if group_has_peer(g) else 1,
+                min(group_port_numbers(g) or [999]),
+                g["raw_key"],
+            ),
+        )
+        return ordered[:wanted_a], ordered[wanted_a:]
 
     unpaired_ss = [
         g for g in groups
@@ -972,9 +956,6 @@ def discover_physical_ports():
             c_map[ss_group["raw_key"]] = idx
             c_map[usb2_group["raw_key"]] = idx
 
-        if absorb_typec_location_companions():
-            classification += "+location"
-
         used_keys = set(c_map)
         a_groups = [g for g in groups if g["raw_key"] not in used_keys]
         a_groups.sort(
@@ -984,11 +965,16 @@ def discover_physical_ports():
             )
         )
 
-        for idx, group in enumerate(a_groups):
+        c_count = len(c_ports)
+        visible_a, reserve_a = select_a_groups(a_groups, c_count)
+        if reserve_a:
+            classification += "+layout-reserve"
+            a_reserve = [g["raw_key"] for g in reserve_a]
+
+        for idx, group in enumerate(visible_a):
             a_map[group["raw_key"]] = idx
 
-        c_count = len(c_ports)
-        a_count = len(a_groups)
+        a_count = len(visible_a)
         physical_total = a_count + c_count
     else:
         classification = "generic-fallback"
@@ -1002,15 +988,24 @@ def discover_physical_ports():
         c_count = min(c_count, len(groups))
         used_keys = set(c_map)
         a_groups = [g for g in groups if g["raw_key"] not in used_keys]
-        if c_count > 0 and len(groups) >= 2 * c_count:
-            physical_total = max(c_count, len(groups) - c_count)
+
+        visible_a, reserve_a = select_a_groups(a_groups, c_count)
+        if reserve_a:
+            classification += "+layout-reserve"
+            a_reserve = [g["raw_key"] for g in reserve_a]
+            a_count = len(visible_a)
+            physical_total = a_count + c_count
         else:
-            physical_total = len(groups)
+            if c_count > 0 and len(groups) >= 2 * c_count:
+                physical_total = max(c_count, len(groups) - c_count)
+            else:
+                physical_total = len(groups)
+            a_count = max(0, physical_total - c_count)
+            visible_a = a_groups[:a_count]
 
-        a_count = max(0, physical_total - c_count)
-
-        for idx, group in enumerate(a_groups[:a_count]):
+        for idx, group in enumerate(visible_a):
             a_map[group["raw_key"]] = idx
+
     return {
         "mode": mode,
         "classification": classification,
@@ -1022,6 +1017,8 @@ def discover_physical_ports():
         "usb_c_count": c_count,
         "a_map": a_map,
         "c_map": c_map,
+        "a_reserve": a_reserve,
+        "layout_quirk": layout_quirk["name"] if layout_quirk else "",
     }
 
 
@@ -2978,14 +2975,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.112")
+        self.window.set_title("Hardware Check v4.5.113")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.112")
+        title_label = Gtk.Label(label="Hardware Check v4.5.113")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6543,6 +6540,10 @@ except Exception:
         self.usb_last_group_present = dict(group_states)
         self.sync_usb_connected(group_states, mark_tested=True)
         self.usb_last_devices = usb_device_snapshot()
+        self.usb_last_typec_partner_present = {
+            port["name"]: bool(port["partner"].exists())
+            for port in self.usb_discovery.get("typec", [])
+        }
         discovery = self.usb_discovery
         log(
             "USB Topologie: "
@@ -6551,7 +6552,9 @@ except Exception:
             f"logische_Pfade={discovery['raw_group_count']} | "
             f"physische_Ports={discovery['physical_total']} | "
             f"USB-A={discovery['usb_a_count']} | "
-            f"USB-C={discovery['usb_c_count']}"
+            f"USB-C={discovery['usb_c_count']} | "
+            f"Reserve-A={len(discovery.get('a_reserve') or [])} | "
+            f"Quirk={discovery.get('layout_quirk') or '-'}"
         )
         for idx, slot in enumerate(self.usb_slots):
             log(
@@ -6571,19 +6574,237 @@ except Exception:
                 )
 
         self.rebuild_usb()
+    def attach_usb_c_reserve(self, raw_key, typec_idx, group_states):
+        """Einen bestätigten Reservepfad einer vorhandenen USB-C-Buchse zuordnen."""
+        discovery = self.usb_discovery or {}
+        reserve = list(discovery.get("a_reserve") or [])
+        if raw_key not in reserve:
+            return None
+
+        c_slots = []
+        for slot_idx, slot in enumerate(self.usb_slots):
+            if slot.get("type") != "USB-C":
+                continue
+
+            local_indices = {
+                discovery.get("c_map", {}).get(key)
+                for key in slot.get("groups", set())
+                if key in discovery.get("c_map", {})
+            }
+            slot_connected = any(
+                bool(group_states.get(key, False))
+                for key in slot.get("groups", set())
+            )
+            c_slots.append((
+                1 if slot_connected else 0,
+                0 if typec_idx in local_indices else 1,
+                slot_idx,
+                next(iter(local_indices), None),
+            ))
+
+        if not c_slots:
+            log(f"USB-C Reserve ohne vorhandenen C-Slot: {raw_key}")
+            return None
+
+        _connected_penalty, _index_penalty, slot_idx, local_idx = min(c_slots)
+        if local_idx is None:
+            local_idx = typec_idx
+
+        slot = self.usb_slots[slot_idx]
+        slot["groups"].add(raw_key)
+        self.usb_group_to_slot[raw_key] = slot_idx
+        discovery["c_map"][raw_key] = local_idx
+        discovery["a_reserve"] = [
+            key for key in reserve
+            if key != raw_key
+        ]
+
+        log(
+            f"USB-C Reserve bestätigt: {raw_key} ergänzt "
+            f"USB-C Slot {slot_idx + 1}"
+        )
+        return slot_idx
+
+    def promote_usb_a_reserve(self, raw_key, group_states, current_devices):
+        """Einen beim Hotplug bestätigten Reservepfad als echten USB-A übernehmen."""
+        discovery = self.usb_discovery or {}
+        reserve = list(discovery.get("a_reserve") or [])
+        if raw_key not in reserve:
+            return None
+
+        candidates = []
+        for slot_idx, slot in enumerate(self.usb_slots):
+            if slot.get("type") != "USB-A":
+                continue
+
+            slot_connected = False
+            for key in slot.get("groups", set()):
+                group = next(
+                    (
+                        item
+                        for item in self.usb_discovery.get("groups", [])
+                        if item["raw_key"] == key
+                    ),
+                    None,
+                )
+                if not group:
+                    continue
+
+                for dev_name in current_devices:
+                    if not group_contains_device(group, dev_name):
+                        continue
+                    if dev_name == self.usb_boot_device:
+                        slot_connected = True
+                        break
+                    if not usb_fallback_ignore_reason(dev_name):
+                        slot_connected = True
+                        break
+
+                if slot_connected:
+                    break
+
+            if slot_connected:
+                continue
+
+            candidates.append((
+                1 if slot_idx == self.usb_boot_slot else 0,
+                1 if slot_idx in self.usb_tested else 0,
+                slot_idx,
+            ))
+
+        if not candidates:
+            log(
+                f"USB-A Reserve aktiv, aber kein freier Slot ersetzbar: {raw_key}"
+            )
+            return None
+
+        _boot_penalty, _tested_penalty, slot_idx = min(candidates)
+        slot = self.usb_slots[slot_idx]
+        old_groups = set(slot.get("groups", set()))
+
+        local_idx = None
+        for old_key in old_groups:
+            if old_key in discovery.get("a_map", {}):
+                local_idx = discovery["a_map"].pop(old_key)
+                break
+
+        if local_idx is None:
+            log(f"USB-A Reserve konnte keinem lokalen A-Slot zugeordnet werden: {raw_key}")
+            return None
+
+        for old_key in old_groups:
+            self.usb_group_to_slot.pop(old_key, None)
+            if old_key not in reserve:
+                reserve.append(old_key)
+
+        reserve = [key for key in reserve if key != raw_key]
+        discovery["a_reserve"] = reserve
+        discovery["a_map"][raw_key] = local_idx
+
+        slot["groups"] = {raw_key}
+        self.usb_group_to_slot[raw_key] = slot_idx
+
+        # Der Slot repräsentiert ab jetzt eine andere physische Buchse.
+        self.usb_tested.discard(slot_idx)
+        self.usb_connected.discard(slot_idx)
+
+        log(
+            f"USB-A Reserve bestätigt: {raw_key} ersetzt "
+            f"{' || '.join(sorted(old_groups))} in USB-A Slot {slot_idx + 1}"
+        )
+        return slot_idx
+
     def poll_usb(self):
         if self.window is None or not self.usb_discovery:
             return False
 
         current_groups = self.usb_group_states()
+        current_devices = usb_device_snapshot()
+        previous_names = set(self.usb_last_devices)
+        current_names = set(current_devices)
+        new_device_names = current_names - previous_names
+        current_typec_partner_present = {
+            port["name"]: bool(port["partner"].exists())
+            for port in self.usb_discovery.get("typec", [])
+        }
+        previous_typec_partner_present = getattr(
+            self,
+            "usb_last_typec_partner_present",
+            {},
+        )
+        newly_active_typec = [
+            port["name"]
+            for port in self.usb_discovery.get("typec", [])
+            if current_typec_partner_present.get(port["name"], False)
+            and not previous_typec_partner_present.get(port["name"], False)
+        ]
         old_connected = set(self.usb_connected)
         changed = False
 
+        groups_by_key = {
+            group["raw_key"]: group
+            for group in self.usb_discovery["groups"]
+        }
+
+        # Ein echter Geräte-Hotplug ist aussagekräftiger als der reine
+        # Present-Zustand des Root-Ports. Ein Root-Port kann bei Hubs/USB4
+        # dauerhaft present bleiben, während erst ein Child-Gerät neu erscheint.
+        for raw_key in list(self.usb_discovery.get("a_reserve") or []):
+            group = groups_by_key.get(raw_key)
+            if not group:
+                continue
+
+            external_hotplug = False
+            for dev_name in new_device_names:
+                if not group_contains_device(group, dev_name):
+                    continue
+                if dev_name != self.usb_boot_device:
+                    if usb_fallback_ignore_reason(dev_name):
+                        continue
+                external_hotplug = True
+                break
+
+            if not external_hotplug:
+                continue
+
+            slot_idx = None
+            if len(newly_active_typec) == 1:
+                typec_name = newly_active_typec[0]
+                typec_idx = next(
+                    (
+                        idx
+                        for idx, port in enumerate(
+                            self.usb_discovery.get("typec", [])
+                        )
+                        if port["name"] == typec_name
+                    ),
+                    None,
+                )
+                if typec_idx is not None:
+                    slot_idx = self.attach_usb_c_reserve(
+                        raw_key,
+                        typec_idx,
+                        current_groups,
+                    )
+
+            if slot_idx is None and not newly_active_typec:
+                slot_idx = self.promote_usb_a_reserve(
+                    raw_key,
+                    current_groups,
+                    current_devices,
+                )
+
+            if slot_idx is not None:
+                self.usb_tested.add(slot_idx)
+                changed = True
+
         for raw_key, present in current_groups.items():
             before = self.usb_last_group_present.get(raw_key, False)
+            slot_idx = self.usb_group_to_slot.get(raw_key)
+
             if present == before:
                 continue
-            slot_idx = self.usb_group_to_slot.get(raw_key)
+
             if present:
                 if slot_idx is not None:
                     self.usb_tested.add(slot_idx)
@@ -6594,15 +6815,13 @@ except Exception:
                 if slot_idx is not None:
                     log(f"USB-Port {slot_idx + 1}: Pfad entfernt")
             changed = True
+
         self.sync_usb_connected(current_groups, mark_tested=True)
         if self.usb_connected != old_connected:
             changed = True
         self.usb_last_group_present = dict(current_groups)
 
-        current_devices = usb_device_snapshot()
-        previous_names = set(self.usb_last_devices)
-        current_names = set(current_devices)
-        for dev_name in sorted(current_names - previous_names, key=natural_key):
+        for dev_name in sorted(new_device_names, key=natural_key):
             if self.usb_slot_for_device(dev_name) is not None:
                 continue
 
@@ -6626,6 +6845,7 @@ except Exception:
                 f"{current_devices[dev_name]}"
             )
             changed = True
+
         for dev_name in sorted(previous_names - current_names, key=natural_key):
             if dev_name not in self.usb_fallback:
                 continue
@@ -6633,6 +6853,7 @@ except Exception:
             self.usb_fallback[dev_name]["connected"] = False
             log(f"USB Backup entfernt: {dev_name}")
             changed = True
+
         for dev_name in current_names:
             if dev_name not in self.usb_fallback:
                 continue
@@ -6655,11 +6876,13 @@ except Exception:
             self.usb_fallback[dev_name]["title"] = current_devices[dev_name]
 
         self.usb_last_devices = current_devices
+        self.usb_last_typec_partner_present = current_typec_partner_present
 
         if changed:
             self.rebuild_usb()
 
         return True
+
     def reset_usb(self, *_):
         log("USB REFRESH / Neu-Erkennung")
         self.usb_rediscover(reset=True)
