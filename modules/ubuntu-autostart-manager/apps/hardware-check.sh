@@ -917,12 +917,21 @@ def discover_physical_ports():
             if raw_key in c_map:
                 continue
 
+            # Ein bereits per USB2/USB3-peer gekoppelter Root-Port ist eine
+            # eigenständige physische Buchse. Solche Gruppen dürfen niemals
+            # allein wegen eines gleichen Firmware-location-Werts nach USB-C
+            # umklassifiziert werden. Das schützt insbesondere echte USB-A-
+            # Ports vor fehlerhaften/mehrdeutigen Firmware-Location-Werten.
+            if group_has_peer(group):
+                continue
+
             matches = set()
             for location in group_locations(group):
                 matches.update(location_to_slots.get(location, set()))
 
-            # Nur eindeutige Firmware-Zuordnungen übernehmen. Bei einer
-            # widersprüchlichen Location bleibt die bisherige Logik aktiv.
+            # Nur eindeutige Firmware-Zuordnungen für bislang ungepaarte
+            # logische Pfade übernehmen. Bei widersprüchlicher Location oder
+            # bereits vorhandenem peer bleibt die bisherige Zuordnung aktiv.
             if len(matches) == 1:
                 c_map[raw_key] = next(iter(matches))
                 added += 1
@@ -2969,14 +2978,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.111")
+        self.window.set_title("Hardware Check v4.5.112")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.111")
+        title_label = Gtk.Label(label="Hardware Check v4.5.112")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
