@@ -2975,14 +2975,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.114")
+        self.window.set_title("Hardware Check v4.5.115")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.114")
+        title_label = Gtk.Label(label="Hardware Check v4.5.115")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6854,28 +6854,76 @@ except Exception:
                 self.usb_tested.add(slot_idx)
                 changed = True
 
-                if newly_active_typec:
-                    # Auf manchen USB4/xHCI-Topologien wird beim selben
-                    # physischen USB-C-Hotplug zusätzlich ein bisher als
-                    # USB-A sichtbarer Companion-Pfad aktiv. Genau dieser
-                    # Pfad darf den A-Slot nicht ebenfalls auf BELEGT setzen.
-                    for a_slot_idx, a_slot in enumerate(self.usb_slots):
-                        if a_slot_idx == slot_idx:
+
+        # Dell/USB4-Sonderfall: Auch wenn der echte USB-C-Pfad bereits
+        # sauber in c_map liegt, kann derselbe Hotplug parallel einen zuvor
+        # als USB-A einsortierten xHCI-Begleitpfad aktivieren. Der bisherige
+        # Fix innerhalb der Reserve-Behandlung sah diesen Fall nicht.
+        #
+        # Die UCSI-Partner-Aktivierung liefert hier das eindeutige Signal:
+        # genau eine USB-C-Buchse wurde gerade physisch verbunden. Danach
+        # werden ausschließlich A-Pfade umgehängt, die im selben Poll von
+        # "nicht present" auf "present" gewechselt sind.
+        if (
+            self.usb_discovery.get("layout_quirk")
+            and len(newly_active_typec) == 1
+        ):
+            typec_name = newly_active_typec[0]
+            typec_idx = next(
+                (
+                    idx
+                    for idx, port in enumerate(
+                        self.usb_discovery.get("typec", [])
+                    )
+                    if port["name"] == typec_name
+                ),
+                None,
+            )
+            c_slot_idx = None
+
+            # Zuerst den C-Slot über ein tatsächlich neu erschienenes Gerät
+            # bestimmen. Das ist genauer als nur die Reihenfolge der UCSI-
+            # Ports, wenn die Firmware intern anders nummeriert.
+            for dev_name in sorted(new_device_names, key=natural_key):
+                candidate_idx = self.usb_slot_for_device(dev_name)
+                if candidate_idx is None:
+                    continue
+                if self.usb_slots[candidate_idx].get("type") != "USB-C":
+                    continue
+                c_slot_idx = candidate_idx
+                break
+
+            # Fallback: UCSI-Portindex gegen die bereits ermittelte c_map.
+            if c_slot_idx is None and typec_idx is not None:
+                for candidate_idx, slot in enumerate(self.usb_slots):
+                    if slot.get("type") != "USB-C":
+                        continue
+                    if any(
+                        self.usb_discovery.get("c_map", {}).get(key)
+                        == typec_idx
+                        for key in slot.get("groups", set())
+                    ):
+                        c_slot_idx = candidate_idx
+                        break
+
+            if c_slot_idx is not None:
+                for a_slot_idx, a_slot in enumerate(self.usb_slots):
+                    if a_slot_idx == c_slot_idx:
+                        continue
+                    if a_slot.get("type") != "USB-A":
+                        continue
+
+                    for a_key in list(a_slot.get("groups", set())):
+                        if not current_groups.get(a_key, False):
                             continue
-                        if a_slot.get("type") != "USB-A":
+                        if self.usb_last_group_present.get(a_key, False):
                             continue
 
-                        for a_key in list(a_slot.get("groups", set())):
-                            if not current_groups.get(a_key, False):
-                                continue
-                            if self.usb_last_group_present.get(a_key, False):
-                                continue
-
-                            if self.attach_active_a_companion_to_c(
-                                a_key,
-                                slot_idx,
-                            ):
-                                changed = True
+                        if self.attach_active_a_companion_to_c(
+                            a_key,
+                            c_slot_idx,
+                        ):
+                            changed = True
 
         for raw_key, present in current_groups.items():
             before = self.usb_last_group_present.get(raw_key, False)
