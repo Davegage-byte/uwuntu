@@ -668,6 +668,15 @@ def collect_root_port_objects(include_unknown=False, superspeed_only=False):
         ):
             connect_type = read_text(port / "connect_type").lower()
             port_no = port_number_from_name(port.name)
+            location = read_text(port / "location").strip().lower()
+            if location:
+                try:
+                    # Kernel-ABI: location ist ein hexadezimaler Firmwarewert.
+                    # 0 bedeutet praktisch "keine verwertbare Ortsangabe".
+                    if int(location, 16) == 0:
+                        location = ""
+                except ValueError:
+                    location = ""
 
             if port_no is None:
                 continue
@@ -688,6 +697,7 @@ def collect_root_port_objects(include_unknown=False, superspeed_only=False):
                 "connect_type": connect_type or "unknown",
                 "peer": peer,
                 "connector": connector,
+                "location": location,
                 "device_name": port_device_name(hub["bus"], port_no),
             })
 
@@ -869,6 +879,56 @@ def discover_physical_ports():
 
     def group_has_peer(group):
         return any(bool(item.get("peer")) for item in group["items"])
+
+    def group_locations(group):
+        return {
+            item.get("location")
+            for item in group["items"]
+            if item.get("location")
+        }
+
+    def absorb_typec_location_companions():
+        """Weitere logische Pfade derselben physischen USB-C-Buchse zuordnen.
+
+        Linux stellt den Firmware-Ort eines Root-Ports über "location" bereit.
+        Das ist genau dafür gedacht, logische USB2-/USB3-/USB4-Pfade derselben
+        physischen Buchse zu paaren. Einige USB4-/Thunderbolt-Systeme liefern
+        dabei keinen direkten peer-/connector-Link für jeden Begleitpfad.
+        """
+        if not c_map:
+            return 0
+
+        groups_by_key = {
+            group["raw_key"]: group
+            for group in groups
+        }
+        location_to_slots = {}
+
+        for raw_key, slot_idx in c_map.items():
+            group = groups_by_key.get(raw_key)
+            if not group:
+                continue
+            for location in group_locations(group):
+                location_to_slots.setdefault(location, set()).add(slot_idx)
+
+        added = 0
+        for group in groups:
+            raw_key = group["raw_key"]
+            if raw_key in c_map:
+                continue
+
+            matches = set()
+            for location in group_locations(group):
+                matches.update(location_to_slots.get(location, set()))
+
+            # Nur eindeutige Firmware-Zuordnungen übernehmen. Bei einer
+            # widersprüchlichen Location bleibt die bisherige Logik aktiv.
+            if len(matches) == 1:
+                c_map[raw_key] = next(iter(matches))
+                added += 1
+
+        return added
+
     unpaired_ss = [
         g for g in groups
         if not group_has_peer(g) and group_max_speed(g) > 480.0
@@ -896,15 +956,17 @@ def discover_physical_ports():
     if c_count_hint > 0 and len(common_ports) >= c_count_hint:
         classification = "ucsi-companion-topology"
         c_ports = common_ports[:c_count_hint]
-        used_keys = set()
         for idx, port_no in enumerate(c_ports):
             ss_group = ss_by_port[port_no]
             usb2_group = usb2_by_port[port_no]
 
             c_map[ss_group["raw_key"]] = idx
             c_map[usb2_group["raw_key"]] = idx
-            used_keys.add(ss_group["raw_key"])
-            used_keys.add(usb2_group["raw_key"])
+
+        if absorb_typec_location_companions():
+            classification += "+location"
+
+        used_keys = set(c_map)
         a_groups = [g for g in groups if g["raw_key"] not in used_keys]
         a_groups.sort(
             key=lambda g: (
@@ -2907,14 +2969,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.110")
+        self.window.set_title("Hardware Check v4.5.111")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.110")
+        title_label = Gtk.Label(label="Hardware Check v4.5.111")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
