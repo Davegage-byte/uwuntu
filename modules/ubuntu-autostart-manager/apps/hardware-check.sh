@@ -3114,14 +3114,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.124")
+        self.window.set_title("Hardware Check v4.5.125")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.124")
+        title_label = Gtk.Label(label="Hardware Check v4.5.125")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -4821,6 +4821,24 @@ class App(Gtk.Application):
         if previous == "false":
             GLib.timeout_add(500, self.restore_center_new_windows, previous)
 
+    def bind_priority_window_after_centering(self, window):
+        """Vordergrundbindung erst nach der Bildschirm-Zentrierung setzen.
+
+        Ein bereits vor dem ersten Mapping gesetztes transient-for lässt
+        Mutter/Wayland das Fenster relativ zum gekachelten Hardware-Check
+        platzieren. Deshalb wird zuerst normal zentriert und die Bindung erst
+        nach dem Platzieren ergänzt.
+        """
+        if window is None or self.window is None:
+            return False
+        try:
+            if not window.get_visible():
+                return False
+            window.set_transient_for(self.window)
+        except Exception:
+            pass
+        return False
+
     def copy_serial_to_clipboard(self, serial):
         """Erkannte Seriennummer für anschließendes Strg+V kopieren.
 
@@ -5655,11 +5673,9 @@ class App(Gtk.Application):
         window.set_default_size(560, 470)
         window.set_resizable(False)
 
-        # Als nicht-modales Dialogfenster an Hardware Check binden. Dadurch
-        # hält Mutter/Wayland die Shortcut-Hilfe zuverlässig über dem
-        # Hardware-Check-Fenster, ohne die restliche Bedienung zu sperren.
-        if self.window is not None:
-            window.set_transient_for(self.window)
+        # Zuerst ohne transient-for präsentieren, damit Mutter das Fenster
+        # wirklich auf dem Bildschirm zentriert. Die Vordergrundbindung folgt
+        # direkt nach dem Platzieren.
         window.set_modal(False)
 
         window.connect("close-request", self.close_hotkeys_window)
@@ -5809,6 +5825,11 @@ class App(Gtk.Application):
         window.set_child(overlay)
         self.hotkeys_window = window
         self.present_centered(window)
+        GLib.timeout_add(
+            650,
+            self.bind_priority_window_after_centering,
+            window,
+        )
         log("Shortcut-/Hotkey-Übersicht per F1 geöffnet")
         return False
 
@@ -5957,8 +5978,8 @@ class App(Gtk.Application):
         window.set_title("Uwuntu Update")
         window.set_default_size(560, 145)
         window.set_resizable(False)
-        if self.window is not None:
-            window.set_transient_for(self.window)
+        # Wie beim Shortcut-Fenster erst mittig platzieren und die
+        # Vordergrundbindung anschließend setzen.
         window.set_modal(False)
         window.connect("close-request", self.close_update_window)
 
@@ -5989,6 +6010,11 @@ class App(Gtk.Application):
         self.update_window = window
         self.update_status_label = status
         self.present_centered(window)
+        GLib.timeout_add(
+            650,
+            self.bind_priority_window_after_centering,
+            window,
+        )
 
         if not helper.exists():
             self.set_update_status(
