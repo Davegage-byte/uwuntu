@@ -2975,14 +2975,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.113")
+        self.window.set_title("Hardware Check v4.5.114")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.113")
+        title_label = Gtk.Label(label="Hardware Check v4.5.114")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6344,13 +6344,21 @@ except Exception:
         for raw_key, local_idx in discovery.get("a_map", {}).items():
             slot = raw_slots.setdefault(
                 ("USB-A", int(local_idx)),
-                {"type": "USB-A", "groups": set()},
+                {
+                    "type": "USB-A",
+                    "groups": set(),
+                    "local_idx": int(local_idx),
+                },
             )
             slot["groups"].add(raw_key)
         for raw_key, local_idx in discovery.get("c_map", {}).items():
             slot = raw_slots.setdefault(
                 ("USB-C", int(local_idx)),
-                {"type": "USB-C", "groups": set()},
+                {
+                    "type": "USB-C",
+                    "groups": set(),
+                    "local_idx": int(local_idx),
+                },
             )
             slot["groups"].add(raw_key)
 
@@ -6625,6 +6633,51 @@ except Exception:
         )
         return slot_idx
 
+    def attach_active_a_companion_to_c(self, raw_key, c_slot_idx):
+        """Gleichzeitig aktivierten A-Kandidaten als C-Begleitpfad umhängen."""
+        discovery = self.usb_discovery or {}
+        a_slot_idx = self.usb_group_to_slot.get(raw_key)
+        if a_slot_idx is None or a_slot_idx == c_slot_idx:
+            return False
+        if not (0 <= a_slot_idx < len(self.usb_slots)):
+            return False
+        if not (0 <= c_slot_idx < len(self.usb_slots)):
+            return False
+
+        a_slot = self.usb_slots[a_slot_idx]
+        c_slot = self.usb_slots[c_slot_idx]
+        if a_slot.get("type") != "USB-A" or c_slot.get("type") != "USB-C":
+            return False
+        if raw_key not in a_slot.get("groups", set()):
+            return False
+
+        local_a_idx = discovery.get("a_map", {}).pop(raw_key, None)
+        if local_a_idx is not None:
+            a_slot["local_idx"] = int(local_a_idx)
+
+        c_local_idx = c_slot.get("local_idx")
+        if c_local_idx is None:
+            for key in c_slot.get("groups", set()):
+                if key in discovery.get("c_map", {}):
+                    c_local_idx = discovery["c_map"][key]
+                    break
+        if c_local_idx is None:
+            return False
+
+        a_slot["groups"].discard(raw_key)
+        c_slot["groups"].add(raw_key)
+        self.usb_group_to_slot[raw_key] = c_slot_idx
+        discovery["c_map"][raw_key] = int(c_local_idx)
+
+        self.usb_tested.discard(a_slot_idx)
+        self.usb_connected.discard(a_slot_idx)
+
+        log(
+            f"USB-C Companion korrigiert: {raw_key} von USB-A Slot "
+            f"{a_slot_idx + 1} nach USB-C Slot {c_slot_idx + 1}"
+        )
+        return True
+
     def promote_usb_a_reserve(self, raw_key, group_states, current_devices):
         """Einen beim Hotplug bestätigten Reservepfad als echten USB-A übernehmen."""
         discovery = self.usb_discovery or {}
@@ -6687,6 +6740,9 @@ except Exception:
             if old_key in discovery.get("a_map", {}):
                 local_idx = discovery["a_map"].pop(old_key)
                 break
+
+        if local_idx is None:
+            local_idx = slot.get("local_idx")
 
         if local_idx is None:
             log(f"USB-A Reserve konnte keinem lokalen A-Slot zugeordnet werden: {raw_key}")
@@ -6797,6 +6853,29 @@ except Exception:
             if slot_idx is not None:
                 self.usb_tested.add(slot_idx)
                 changed = True
+
+                if newly_active_typec:
+                    # Auf manchen USB4/xHCI-Topologien wird beim selben
+                    # physischen USB-C-Hotplug zusätzlich ein bisher als
+                    # USB-A sichtbarer Companion-Pfad aktiv. Genau dieser
+                    # Pfad darf den A-Slot nicht ebenfalls auf BELEGT setzen.
+                    for a_slot_idx, a_slot in enumerate(self.usb_slots):
+                        if a_slot_idx == slot_idx:
+                            continue
+                        if a_slot.get("type") != "USB-A":
+                            continue
+
+                        for a_key in list(a_slot.get("groups", set())):
+                            if not current_groups.get(a_key, False):
+                                continue
+                            if self.usb_last_group_present.get(a_key, False):
+                                continue
+
+                            if self.attach_active_a_companion_to_c(
+                                a_key,
+                                slot_idx,
+                            ):
+                                changed = True
 
         for raw_key, present in current_groups.items():
             before = self.usb_last_group_present.get(raw_key, False)
