@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.35"
+VERSION = "2.36"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -423,10 +423,13 @@ class ConnectionCard:
         self.interface_label.set_visible(False)
 
         self.state_label = Gtk.Label(label="CHECKING")
-        # Nach dem kompakten Horizontal-Layout ist genug Platz vorhanden:
-        # Statusmeldungen wieder vollständig ausschreiben, ohne Ellipse.
-        self.state_label.set_ellipsize(Pango.EllipsizeMode.NONE)
-        self.state_label.set_max_width_chars(24)
+        # Wechselnde Texte wie CHECKING/DOWNLOAD/UPLOAD dürfen die Kartenbreite
+        # nicht verändern. Breite bleibt stabil, bei sehr kleinem Fenster wird
+        # nur der Text selbst gekürzt.
+        self.state_label.set_width_chars(12)
+        self.state_label.set_max_width_chars(12)
+        self.state_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.state_label.set_xalign(0.5)
         self.state_label.add_css_class("badge")
         self.set_widget_class(self.state_label, "warn")
 
@@ -456,8 +459,9 @@ class ConnectionCard:
         self.note_label = Gtk.Label(label="")
         self.note_label.set_xalign(0)
         self.note_label.set_wrap(False)
+        self.note_label.set_hexpand(True)
         self.note_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self.note_label.set_max_width_chars(80)
+        self.note_label.set_max_width_chars(1)
         self.note_label.add_css_class("note")
         self.root.append(self.note_label)
 
@@ -468,6 +472,10 @@ class ConnectionCard:
         cap = Gtk.Label(label=caption)
         cap.add_css_class("metric-caption")
         value = Gtk.Label(label="--")
+        value.set_width_chars(8)
+        value.set_max_width_chars(8)
+        value.set_ellipsize(Pango.EllipsizeMode.END)
+        value.set_xalign(0.5)
         value.add_css_class("metric-value")
         value.add_css_class("neutral")
 
@@ -1349,7 +1357,6 @@ class CompactAudioPanel:
             "right": "orange",
             "auto": "orange",
         }
-        self.mic_state = None
 
         self.root = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -1363,11 +1370,6 @@ class CompactAudioPanel:
         title.set_xalign(0)
         title.add_css_class("audio-strip-title")
         self.root.append(title)
-
-        self.mic = Gtk.Label(label="🎤 --")
-        self.mic.set_xalign(0)
-        self.mic.add_css_class("audio-mic")
-        self.root.append(self.mic)
 
         self.wave = Gtk.DrawingArea()
         self.wave.set_content_width(210)
@@ -1481,29 +1483,12 @@ class CompactAudioPanel:
             data = None
 
         if not isinstance(data, dict):
-            if self.mic_state != "warn":
-                self.mic_state = "warn"
-                self.mic.set_text("🎤 MIC START")
-                self.mic.remove_css_class("good")
-                self.mic.remove_css_class("bad")
-                self.mic.remove_css_class("warn")
-                self.mic.add_css_class("warn")
             self.waveform = []
             self.wave_color = "orange"
             if time.monotonic() - self.created_at >= 1.5:
                 self.ensure_engine()
             self.wave.queue_draw()
             return True
-
-        mic_running = bool(data.get("mic_running"))
-        mic_state = "good" if mic_running else "bad"
-        if self.mic_state != mic_state:
-            self.mic_state = mic_state
-            self.mic.set_text("🎤 MIC OK" if mic_running else "🎤 MIC FEHLT")
-            self.mic.remove_css_class("good")
-            self.mic.remove_css_class("bad")
-            self.mic.remove_css_class("warn")
-            self.mic.add_css_class(mic_state)
 
         states = data.get("buttons") or {}
         for action in self.buttons:
@@ -1654,14 +1639,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.35 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.36 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.35 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.36 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1720,6 +1705,9 @@ class NetworkCheckApp(Gtk.Application):
         )
         network_row.set_hexpand(True)
         network_row.set_vexpand(False)
+        # LAN und WLAN bleiben bei jeder Live-Anzeige exakt gleich breit.
+        # Die Aufteilung folgt weiter der verfügbaren Fensterbreite.
+        network_row.set_homogeneous(True)
         network_row.append(self.cards["lan"].root)
         network_row.append(self.cards["wifi"].root)
         content.append(network_row)
@@ -1732,7 +1720,7 @@ class NetworkCheckApp(Gtk.Application):
         content.append(self.wipe_panel.root)
 
         # Audio bleibt dauerhaft sichtbar, benötigt aber nur eine einzige
-        # kompakte Zeile: Mikrofonstatus + Waveform + vier Testbuttons.
+        # kompakte Zeile: Waveform + vier Testbuttons.
         self.audio_panel = CompactAudioPanel()
         content.append(self.audio_panel.root)
 
@@ -1837,11 +1825,6 @@ class NetworkCheckApp(Gtk.Application):
             font-size: 12px;
             font-weight: 800;
             min-width: 48px;
-        }
-        .audio-mic {
-            font-size: 11px;
-            font-weight: 800;
-            min-width: 82px;
         }
         button.audio-mini {
             min-height: 62px;
