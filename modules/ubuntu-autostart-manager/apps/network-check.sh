@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.32"
+VERSION = "2.33"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -406,7 +406,9 @@ class ConnectionCard:
         self.interface_label.add_css_class("interface")
 
         identity.append(self.title_label)
-        identity.append(self.interface_label)
+        # Interface-Name wird intern weiter gepflegt, aber nicht mehr sichtbar
+        # angezeigt. Im kompakten LAN/WLAN-Zweispaltenlayout zählt jeder Pixel.
+        self.interface_label.set_visible(False)
 
         self.state_label = Gtk.Label(label="CHECKING")
         # Nach dem kompakten Horizontal-Layout ist genug Platz vorhanden:
@@ -1501,7 +1503,7 @@ class CompactAudioPanel:
         values = data.get("waveform")
         if isinstance(values, list):
             cleaned = []
-            for value in values[:128]:
+            for value in values[:512]:
                 try:
                     cleaned.append(max(-1.0, min(1.0, float(value))))
                 except Exception:
@@ -1525,26 +1527,54 @@ class CompactAudioPanel:
         cr.set_source_rgb(0.09, 0.09, 0.11)
         cr.paint()
 
-        mid = height / 2.0
+        # Gleiche Proportionen wie der frühere große Audio-WaveRenderer:
+        # kleiner Rand, zentrierte Nulllinie und 90 % nutzbare Amplitude.
+        x0 = width * 0.025
+        x1 = width - x0
+        y0 = height * 0.05
+        y1 = height - y0
+        plot_width = max(2.0, x1 - x0)
+        plot_height = max(2.0, y1 - y0)
+        mid = y0 + plot_height / 2.0
+
         cr.set_source_rgb(0.24, 0.24, 0.28)
         cr.set_line_width(1.0)
-        cr.move_to(0, mid)
-        cr.line_to(width, mid)
+        cr.move_to(x0, mid)
+        cr.line_to(x1, mid)
         cr.stroke()
 
         values = self.waveform
         if len(values) < 2:
             return
 
+        # Wie vorher etwa ein Stützpunkt je 1,5 Pixel. Die Engine liefert
+        # genügend Samples, sodass die Kurve auch bei breiter Audio-Leiste
+        # nicht zu einem spitzen Polygon mit wenigen Ecken wird.
+        point_count = min(
+            len(values),
+            max(2, int(plot_width / 1.5)),
+        )
+        if point_count < len(values):
+            last = len(values) - 1
+            indices = [
+                round(index * last / max(1, point_count - 1))
+                for index in range(point_count)
+            ]
+            draw_values = [values[index] for index in indices]
+        else:
+            draw_values = values
+
         color = colors.get(self.wave_color, colors["orange"])
         cr.set_source_rgb(*color)
-        cr.set_line_width(2.0)
+        cr.set_line_width(2.5)
+        cr.set_line_join(1)  # cairo.LINE_JOIN_ROUND
+        cr.set_line_cap(1)   # cairo.LINE_CAP_ROUND
 
-        step = width / max(1, len(values) - 1)
-        amplitude = max(4.0, height * 0.42)
-        for index, value in enumerate(values):
-            x = index * step
-            y = mid - value * amplitude
+        step = plot_width / max(1, len(draw_values) - 1)
+        amplitude = plot_height * 0.45
+        for index, value in enumerate(draw_values):
+            x = x0 + index * step
+            y = max(y0 + 1.5, min(y1 - 1.5, mid - value * amplitude))
             if index == 0:
                 cr.move_to(x, y)
             else:
@@ -1612,14 +1642,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.32 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.33 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.32 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.33 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
