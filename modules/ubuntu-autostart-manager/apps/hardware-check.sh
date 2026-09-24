@@ -3109,14 +3109,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.121")
+        self.window.set_title("Hardware Check v4.5.122")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.121")
+        title_label = Gtk.Label(label="Hardware Check v4.5.122")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -7195,26 +7195,21 @@ except Exception:
                 )
 
             left_a_slot = self.usb_left_a_slot()
+            now_mono = time.monotonic()
 
+            # Neue USB2-Pfade zunächst NICHT sofort als USB-A markieren.
+            # Auf dem Latitude 5450 erscheint der Datenpfad teilweise einen
+            # Poll vor dem UCSI-Type-C-Partner. Würden wir sofort A3 setzen,
+            # leuchten bei C1/C4 kurz oder dauerhaft C + A gleichzeitig.
             for raw_key in newly_present_dynamic:
-                target_slot = target_c_slot
-                reason = "UCSI-Hotplug"
-
-                if target_slot is None:
-                    target_slot = left_a_slot
-                    reason = "kein neuer Type-C-Partner"
-
-                if self.usb_assign_dynamic_group(
+                self.usb_dynamic_group_seen_at.setdefault(
                     raw_key,
-                    target_slot,
-                    reason,
-                ):
-                    changed = True
+                    now_mono,
+                )
 
-            # UCSI kann wenige Polls später erscheinen. Dann den zuletzt
-            # aktivierten, noch belegten dynamischen A-Pfad nach C korrigieren.
-            if target_c_slot is not None and not newly_present_dynamic:
-                now_mono = time.monotonic()
+            # Sobald UCSI eindeutig einen C-Port bestätigt, gehört der zuletzt
+            # erschienene noch unklare USB2-Pfad zu genau diesem USB-C-Port.
+            if target_c_slot is not None:
                 candidates = [
                     (
                         self.usb_dynamic_group_seen_at.get(key, 0.0),
@@ -7222,8 +7217,11 @@ except Exception:
                     )
                     for key in dynamic_keys
                     if current_groups.get(key, False)
-                    and self.usb_dynamic_group_slots.get(key)
-                    == left_a_slot
+                    and (
+                        key not in self.usb_dynamic_group_slots
+                        or self.usb_dynamic_group_slots.get(key)
+                        == left_a_slot
+                    )
                     and now_mono
                     - self.usb_dynamic_group_seen_at.get(key, 0.0)
                     <= 3.0
@@ -7233,7 +7231,30 @@ except Exception:
                     if self.usb_assign_dynamic_group(
                         raw_key,
                         target_c_slot,
-                        "verzögertes UCSI",
+                        "UCSI bestätigt",
+                    ):
+                        changed = True
+
+            # Nur wenn nach einer kurzen Karenzzeit KEIN neuer Type-C-Partner
+            # erschienen ist, darf der Pfad als linker USB-A gelten.
+            # 1,0 s ist lang genug für UCSI, aber kurz genug für die UI.
+            if target_c_slot is None:
+                for raw_key in dynamic_keys:
+                    if not current_groups.get(raw_key, False):
+                        continue
+                    if raw_key in self.usb_dynamic_group_slots:
+                        continue
+
+                    first_seen = self.usb_dynamic_group_seen_at.get(raw_key)
+                    if first_seen is None:
+                        continue
+                    if now_mono - first_seen < 1.0:
+                        continue
+
+                    if self.usb_assign_dynamic_group(
+                        raw_key,
+                        left_a_slot,
+                        "1s ohne Type-C-Signal",
                     ):
                         changed = True
 
