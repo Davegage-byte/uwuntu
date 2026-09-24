@@ -2984,14 +2984,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.118")
+        self.window.set_title("Hardware Check v4.5.119")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.118")
+        title_label = Gtk.Label(label="Hardware Check v4.5.119")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -10649,12 +10649,552 @@ except Exception:
 
         return False
 
+
+# ---------------------------------------------------------------------------
+# USB Port Mapper
+# Separater Rohdaten-Diagnosemodus für schwer auflösbare USB-C/USB-A-
+# Companion-Topologien. Normaler Hardware Check bleibt davon unberührt.
+# Start: hardware-check.sh --usb-map
+# ---------------------------------------------------------------------------
+
+USB_MAPPER_PORTS = (
+    "USB-C Port 1",
+    "USB-A Port 2",
+    "USB-A Port 3",
+    "USB-C Port 4",
+)
+
+
+def usb_mapper_cmd(args, timeout=5):
+    try:
+        proc = subprocess.run(
+            args,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            check=False,
+        )
+        return proc.stdout.strip()
+    except Exception as exc:
+        return f"<Fehler: {exc}>"
+
+
+def usb_mapper_jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, set):
+        return sorted(usb_mapper_jsonable(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            str(key): usb_mapper_jsonable(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [usb_mapper_jsonable(item) for item in value]
+    return value
+
+
+def usb_mapper_file_values(path, names):
+    result = {}
+    for name in names:
+        result[name] = read_text(path / name)
+    return result
+
+
+def usb_mapper_raw_root_ports():
+    result = []
+
+    for hub in root_usb_hubs():
+        pattern = f"usb{hub['bus']}-port*"
+        for port in sorted(
+            hub["interface"].glob(pattern),
+            key=lambda p: natural_key(p.name),
+        ):
+            port_no = port_number_from_name(port.name)
+            device_name = (
+                port_device_name(hub["bus"], port_no)
+                if port_no is not None
+                else ""
+            )
+            dev_path = SYS_USB / device_name if device_name else None
+
+            result.append({
+                "bus": hub["bus"],
+                "root_speed": hub["speed"],
+                "name": port.name,
+                "port_no": port_no,
+                "path": str(port.resolve()),
+                "connect_type": read_text(port / "connect_type"),
+                "peer": symlink_target(port / "peer"),
+                "connector": symlink_target(port / "connector"),
+                "device_name": device_name,
+                "device_present": bool(
+                    dev_path is not None and dev_path.exists()
+                ),
+                "device_resolved": (
+                    str(dev_path.resolve())
+                    if dev_path is not None and dev_path.exists()
+                    else ""
+                ),
+            })
+
+    return result
+
+
+def usb_mapper_usb_devices():
+    result = []
+    if not SYS_USB.exists():
+        return result
+
+    fields = (
+        "idVendor",
+        "idProduct",
+        "manufacturer",
+        "product",
+        "serial",
+        "speed",
+        "removable",
+        "bDeviceClass",
+        "bDeviceSubClass",
+        "busnum",
+        "devnum",
+        "devpath",
+        "version",
+        "maxchild",
+        "authorized",
+    )
+
+    for dev in sorted(SYS_USB.iterdir(), key=lambda p: natural_key(p.name)):
+        if not re.fullmatch(r"\d+-\d+(?:\.\d+)*", dev.name):
+            continue
+        if not (dev / "idVendor").exists():
+            continue
+
+        item = {
+            "name": dev.name,
+            "path": str(dev.resolve()),
+        }
+        item.update(usb_mapper_file_values(dev, fields))
+        try:
+            item["uevent"] = (dev / "uevent").read_text(
+                encoding="utf-8",
+                errors="ignore",
+            ).strip()
+        except Exception:
+            item["uevent"] = ""
+        result.append(item)
+
+    return result
+
+
+def usb_mapper_typec():
+    result = []
+    if not SYS_TYPEC.exists():
+        return result
+
+    fields = (
+        "data_role",
+        "power_role",
+        "power_operation_mode",
+        "preferred_role",
+        "port_type",
+        "orientation",
+        "usb_power_delivery_revision",
+    )
+
+    for port in sorted(SYS_TYPEC.glob("port*"), key=lambda p: natural_key(p.name)):
+        if not re.fullmatch(r"port\d+", port.name):
+            continue
+
+        partner = port / f"{port.name}-partner"
+        item = {
+            "name": port.name,
+            "path": str(port.resolve()),
+            "partner_present": partner.exists(),
+            "partner_path": str(partner.resolve()) if partner.exists() else "",
+            "connector_symlink": symlink_target(port / "connector"),
+        }
+        item.update(usb_mapper_file_values(port, fields))
+
+        if partner.exists():
+            partner_fields = (
+                "accessory_mode",
+                "number_of_alternate_modes",
+                "supports_usb_power_delivery",
+                "usb_power_delivery_revision",
+            )
+            item["partner"] = usb_mapper_file_values(
+                partner,
+                partner_fields,
+            )
+        else:
+            item["partner"] = {}
+
+        result.append(item)
+
+    return result
+
+
+def usb_mapper_discovery():
+    try:
+        discovery = discover_physical_ports()
+        result = {
+            "mode": discovery.get("mode"),
+            "classification": discovery.get("classification"),
+            "raw_group_count": discovery.get("raw_group_count"),
+            "physical_total": discovery.get("physical_total"),
+            "usb_a_count": discovery.get("usb_a_count"),
+            "usb_c_count": discovery.get("usb_c_count"),
+            "layout_quirk": discovery.get("layout_quirk"),
+            "a_map": discovery.get("a_map", {}),
+            "c_map": discovery.get("c_map", {}),
+            "a_reserve": discovery.get("a_reserve", []),
+            "groups": discovery.get("groups", []),
+            "typec": [],
+        }
+        for port in discovery.get("typec", []):
+            result["typec"].append({
+                "name": port.get("name"),
+                "path": port.get("path"),
+                "partner": str(port.get("partner", "")),
+                "partner_present": bool(
+                    port.get("partner") and port["partner"].exists()
+                ),
+            })
+        return usb_mapper_jsonable(result)
+    except Exception as exc:
+        return {"error": repr(exc)}
+
+
+def usb_mapper_snapshot(label, phase):
+    boot_name = boot_usb_device_name()
+    return {
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "monotonic": time.monotonic(),
+        "label": label,
+        "phase": phase,
+        "boot_usb_device_name": boot_name or "",
+        "findmnt_cdrom": usb_mapper_cmd(
+            ["findmnt", "-n", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS", "/cdrom"]
+        ),
+        "findmnt_root": usb_mapper_cmd(
+            ["findmnt", "-n", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS", "/"]
+        ),
+        "lsusb": usb_mapper_cmd(["lsusb"]),
+        "lsusb_tree": usb_mapper_cmd(["lsusb", "-t"]),
+        "lsblk": usb_mapper_cmd([
+            "lsblk",
+            "-o",
+            "NAME,KNAME,PKNAME,TRAN,TYPE,SIZE,MODEL,SERIAL,MOUNTPOINTS",
+        ]),
+        "raw_root_ports": usb_mapper_raw_root_ports(),
+        "usb_devices": usb_mapper_usb_devices(),
+        "typec": usb_mapper_typec(),
+        "hc_discovery": usb_mapper_discovery(),
+    }
+
+
+def usb_mapper_keyed(items, key):
+    return {
+        str(item.get(key)): item
+        for item in items
+        if item.get(key) not in (None, "")
+    }
+
+
+def usb_mapper_delta(before, after):
+    before_devs = usb_mapper_keyed(before.get("usb_devices", []), "name")
+    after_devs = usb_mapper_keyed(after.get("usb_devices", []), "name")
+    before_ports = usb_mapper_keyed(before.get("raw_root_ports", []), "name")
+    after_ports = usb_mapper_keyed(after.get("raw_root_ports", []), "name")
+    before_typec = usb_mapper_keyed(before.get("typec", []), "name")
+    after_typec = usb_mapper_keyed(after.get("typec", []), "name")
+
+    result = {
+        "usb_devices_added": sorted(set(after_devs) - set(before_devs)),
+        "usb_devices_removed": sorted(set(before_devs) - set(after_devs)),
+        "root_port_presence_changed": [],
+        "typec_partner_changed": [],
+    }
+
+    for name in sorted(set(before_ports) | set(after_ports), key=natural_key):
+        old = bool(before_ports.get(name, {}).get("device_present"))
+        new = bool(after_ports.get(name, {}).get("device_present"))
+        if old != new:
+            result["root_port_presence_changed"].append({
+                "name": name,
+                "from": old,
+                "to": new,
+                "before": before_ports.get(name, {}),
+                "after": after_ports.get(name, {}),
+            })
+
+    for name in sorted(set(before_typec) | set(after_typec), key=natural_key):
+        old = bool(before_typec.get(name, {}).get("partner_present"))
+        new = bool(after_typec.get(name, {}).get("partner_present"))
+        if old != new:
+            result["typec_partner_changed"].append({
+                "name": name,
+                "from": old,
+                "to": new,
+                "before": before_typec.get(name, {}),
+                "after": after_typec.get(name, {}),
+            })
+
+    return result
+
+
+def usb_mapper_print_delta(delta):
+    added = ", ".join(delta["usb_devices_added"]) or "-"
+    removed = ", ".join(delta["usb_devices_removed"]) or "-"
+    ports = ", ".join(
+        f"{item['name']}:{int(item['from'])}->{int(item['to'])}"
+        for item in delta["root_port_presence_changed"]
+    ) or "-"
+    typec = ", ".join(
+        f"{item['name']}:{int(item['from'])}->{int(item['to'])}"
+        for item in delta["typec_partner_changed"]
+    ) or "-"
+
+    print(f"  Neue USB-Geräte:      {added}")
+    print(f"  Entfernte USB-Geräte: {removed}")
+    print(f"  Root-Port-Änderungen: {ports}")
+    print(f"  Type-C-Partner:       {typec}")
+
+
+def usb_mapper_choose_boot_port():
+    print()
+    print("Wo steckt der Uwuntu-Bootstick gerade?")
+    for idx, label in enumerate(USB_MAPPER_PORTS, 1):
+        print(f"  {idx}) {label}")
+    print("  0) anderer / unbekannt")
+
+    while True:
+        answer = input("Auswahl [0-4]: ").strip()
+        if answer in {"0", "1", "2", "3", "4"}:
+            if answer == "0":
+                return ""
+            return USB_MAPPER_PORTS[int(answer) - 1]
+        print("Bitte 0, 1, 2, 3 oder 4 eingeben.")
+
+
+def usb_mapper_wait(message):
+    while True:
+        answer = input(message).strip().lower()
+        if answer in {"", "enter", "ok", "j", "ja"}:
+            return True
+        if answer in {"s", "skip", "überspringen", "ueberspringen"}:
+            return False
+        print("ENTER = weiter, S = diesen Port überspringen")
+
+
+def run_usb_port_mapper():
+    print("=" * 72)
+    print(" UWUNTU USB PORT MAPPER")
+    print(" Rohdaten-Mapping für USB-A / USB-C / UCSI / xHCI")
+    print("=" * 72)
+    print()
+    print("WICHTIG:")
+    print("- Uwuntu-Bootstick NICHT abziehen.")
+    print("- Für die Tests möglichst immer denselben zweiten USB-Stick verwenden.")
+    print("- Alle anderen externen USB-Geräte nach Möglichkeit vorher abziehen.")
+    print("- Das Tool verändert keine USB-Zuordnung im Hardware Check.")
+    print()
+
+    boot_label = usb_mapper_choose_boot_port()
+    test_ports = [
+        label for label in USB_MAPPER_PORTS
+        if label != boot_label
+    ]
+
+    run_id = time.strftime("%Y%m%d-%H%M%S")
+    desktop = Path.home() / "Desktop"
+    output_dir = desktop if desktop.exists() else Path.home()
+    safe_boot = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        boot_label or "unknown",
+    ).strip("_")
+    base = output_dir / f"uwuntu-usb-map-{run_id}-boot-{safe_boot}"
+
+    report = {
+        "tool": "Uwuntu USB Port Mapper",
+        "tool_version": "1.0",
+        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "boot_label_user": boot_label or "anderer / unbekannt",
+        "dmi": {
+            "sys_vendor": read_text(Path("/sys/class/dmi/id/sys_vendor")),
+            "product_name": read_text(Path("/sys/class/dmi/id/product_name")),
+            "product_version": read_text(Path("/sys/class/dmi/id/product_version")),
+            "bios_version": read_text(Path("/sys/class/dmi/id/bios_version")),
+            "bios_date": read_text(Path("/sys/class/dmi/id/bios_date")),
+        },
+        "initial_kernel_tail": "\n".join(
+            usb_mapper_cmd(["dmesg", "--ctime"], timeout=5).splitlines()[-120:]
+        ),
+        "steps": [],
+    }
+
+    print()
+    print("Erste Gesamtsicherung wird aufgenommen ...")
+    report["initial"] = usb_mapper_snapshot("START", "initial")
+    print(
+        "Boot-USB laut Linux:",
+        report["initial"].get("boot_usb_device_name") or "nicht erkannt",
+    )
+
+    for index, label in enumerate(test_ports, 1):
+        print()
+        print("=" * 72)
+        print(f"TEST {index}/{len(test_ports)}: {label}")
+        print("=" * 72)
+
+        if not usb_mapper_wait(
+            f"{label}: Testgerät ABZIEHEN/Port frei lassen, dann ENTER "
+            "(S = überspringen): "
+        ):
+            report["steps"].append({
+                "port": label,
+                "skipped": True,
+            })
+            print(f"{label} übersprungen.")
+            continue
+
+        time.sleep(0.4)
+        before = usb_mapper_snapshot(label, "before")
+
+        if not usb_mapper_wait(
+            f">>> Jetzt Teststick in {label} EINSTECKEN, "
+            "2 Sekunden warten, dann ENTER: "
+        ):
+            report["steps"].append({
+                "port": label,
+                "skipped": True,
+                "before": before,
+            })
+            print(f"{label} nach Baseline übersprungen.")
+            continue
+
+        time.sleep(0.15)
+        inserted_1 = usb_mapper_snapshot(label, "inserted_150ms")
+        time.sleep(0.45)
+        inserted_2 = usb_mapper_snapshot(label, "inserted_600ms")
+        time.sleep(1.0)
+        inserted_3 = usb_mapper_snapshot(label, "inserted_1600ms")
+
+        delta_insert = usb_mapper_delta(before, inserted_3)
+        print()
+        print("Erkannte Änderung beim EINSTECKEN:")
+        usb_mapper_print_delta(delta_insert)
+
+        usb_mapper_wait(
+            f">>> Teststick aus {label} wieder ABZIEHEN, "
+            "2 Sekunden warten, dann ENTER: "
+        )
+        time.sleep(0.2)
+        removed_1 = usb_mapper_snapshot(label, "removed_200ms")
+        time.sleep(0.8)
+        removed_2 = usb_mapper_snapshot(label, "removed_1000ms")
+
+        delta_remove = usb_mapper_delta(inserted_3, removed_2)
+        print()
+        print("Erkannte Änderung beim ABZIEHEN:")
+        usb_mapper_print_delta(delta_remove)
+
+        report["steps"].append({
+            "port": label,
+            "skipped": False,
+            "before": before,
+            "inserted_150ms": inserted_1,
+            "inserted_600ms": inserted_2,
+            "inserted_1600ms": inserted_3,
+            "removed_200ms": removed_1,
+            "removed_1000ms": removed_2,
+            "delta_insert": delta_insert,
+            "delta_remove": delta_remove,
+        })
+
+    report["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    report["final_kernel_tail"] = "\n".join(
+        usb_mapper_cmd(["dmesg", "--ctime"], timeout=5).splitlines()[-180:]
+    )
+
+    json_path = base.with_suffix(".json")
+    txt_path = base.with_suffix(".txt")
+
+    json_path.write_text(
+        json.dumps(
+            usb_mapper_jsonable(report),
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = []
+    summary.append("UWUNTU USB PORT MAPPER")
+    summary.append("=" * 72)
+    summary.append(f"Start: {report['started']}")
+    summary.append(f"Boot-Port laut Benutzer: {report['boot_label_user']}")
+    summary.append(
+        f"Boot-USB laut Linux: "
+        f"{report['initial'].get('boot_usb_device_name') or '-'}"
+    )
+    summary.append(
+        f"System: {report['dmi'].get('sys_vendor','')} "
+        f"{report['dmi'].get('product_name','')}"
+    )
+    summary.append("")
+
+    for step in report["steps"]:
+        summary.append(step["port"])
+        summary.append("-" * 72)
+        if step.get("skipped"):
+            summary.append("ÜBERSPRUNGEN")
+        else:
+            summary.append("EINSTECKEN:")
+            summary.append(json.dumps(
+                step["delta_insert"],
+                indent=2,
+                ensure_ascii=False,
+            ))
+            summary.append("ABZIEHEN:")
+            summary.append(json.dumps(
+                step["delta_remove"],
+                indent=2,
+                ensure_ascii=False,
+            ))
+        summary.append("")
+
+    summary.append("Vollständige Rohdaten stehen in:")
+    summary.append(str(json_path))
+    txt_path.write_text("\n".join(summary) + "\n", encoding="utf-8")
+
+    print()
+    print("=" * 72)
+    print("FERTIG")
+    print("=" * 72)
+    print("Bitte diese Datei hier im Chat hochladen:")
+    print(f"  {json_path}")
+    print()
+    print("Kurze Zusammenfassung:")
+    print(f"  {txt_path}")
+    print()
+    input("ENTER beendet den USB Port Mapper ... ")
+    return 0
+
+
+
 if len(sys.argv) >= 3 and sys.argv[1] == "--global-arrow-monitor":
     try:
         monitor_parent_pid = int(sys.argv[2])
     except (TypeError, ValueError):
         raise SystemExit(2)
     raise SystemExit(run_global_arrow_monitor(monitor_parent_pid))
+
+if len(sys.argv) >= 2 and sys.argv[1] == "--usb-map":
+    raise SystemExit(run_usb_port_mapper())
 
 app = App()
 raise SystemExit(app.run([]))
@@ -10665,4 +11205,4 @@ if ! python3 -c 'import gi; gi.require_version("Gtk","4.0"); from gi.repository 
     exit 1
 fi
 
-python3 "$TMP_PY"
+python3 "$TMP_PY" "$@"
