@@ -2930,6 +2930,11 @@ class App(Gtk.Application):
         # A/C-Portblöcken erst beim Hotplug sicher zugeordnet werden können.
         self.usb_dynamic_group_slots = {}
         self.usb_dynamic_group_seen_at = {}
+        # USB-C-Hubs enumerieren oft zuerst den SuperSpeed-Teil und etwas
+        # später einen separaten USB2-Hub. Diese kurze Sitzung verbindet beide
+        # Enumerationen mit derselben physischen USB-C-Buchse.
+        self.usb_recent_c_hotplug_slot = None
+        self.usb_recent_c_hotplug_at = 0.0
         self.usb_last_group_present = {}
         self.usb_last_devices = {}
         self.usb_fallback = {}
@@ -3109,14 +3114,14 @@ class App(Gtk.Application):
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.122")
+        self.window.set_title("Hardware Check v4.5.123")
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.122")
+        title_label = Gtk.Label(label="Hardware Check v4.5.123")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -6564,6 +6569,8 @@ except Exception:
         self.usb_c_a_shadow_slots = {}
         self.usb_dynamic_group_slots = {}
         self.usb_dynamic_group_seen_at = {}
+        self.usb_recent_c_hotplug_slot = None
+        self.usb_recent_c_hotplug_at = 0.0
     def usb_slot_for_device(self, device_name):
         if not device_name or not self.usb_discovery:
             return None
@@ -7163,9 +7170,10 @@ except Exception:
         old_connected = set(self.usb_connected)
         changed = False
 
-        # Beim 5450 sind 3-1 / 3-2 / 3-4 keine fest an eine Buchse
-        # gebundenen Companion-Pfade. Erst der konkrete Hotplug + UCSI
-        # entscheidet, ob der neue USB2-Pfad zu C1, C4 oder zum linken A gehört.
+        # Beim 5450 sind 3-1 / 3-2 / 3-4 keine eigenen physischen
+        # Buchsen. USB-C-Hubs können zusätzlich zum SuperSpeed-Gerät einen
+        # separaten USB2-Hub (z.B. GenesysLogic) etwas später enumerieren.
+        # Deshalb wird ein neuer C-Hotplug als kurze "Sitzung" gemerkt.
         if (
             self.usb_discovery.get("classification")
             == "dell-5450-left-cluster"
@@ -7173,6 +7181,7 @@ except Exception:
             dynamic_keys = set(
                 self.usb_discovery.get("dynamic_usb2") or []
             )
+            now_mono = time.monotonic()
 
             newly_present_dynamic = [
                 key
@@ -7188,57 +7197,105 @@ except Exception:
                 and self.usb_last_group_present.get(key, False)
             ]
 
-            target_c_slot = None
+            # Eindeutigen C-Hotplug schon hier bestimmen, damit ein im selben
+            # oder folgenden Poll erscheinender USB2-Hub sofort zu C gehört.
+            c_event_slot = None
+
+            # 1) UCSI ist die stärkste Quelle.
             if len(newly_active_typec) == 1:
-                target_c_slot = self.usb_typec_slot_for_name(
+                c_event_slot = self.usb_typec_slot_for_name(
                     newly_active_typec[0]
                 )
 
-            left_a_slot = self.usb_left_a_slot()
-            now_mono = time.monotonic()
+            # 2) Neues Gerät direkt unter einem fest gemappten C-SuperSpeed-Pfad.
+            if c_event_slot is None:
+                for dev_name in sorted(new_device_names, key=natural_key):
+                    candidate_idx = self.usb_slot_for_device(dev_name)
+                    if candidate_idx is None:
+                        continue
+                    if not (0 <= candidate_idx < len(self.usb_slots)):
+                        continue
+                    if self.usb_slots[candidate_idx].get("type") != "USB-C":
+                        continue
+                    c_event_slot = candidate_idx
+                    break
 
-            # Neue USB2-Pfade zunächst NICHT sofort als USB-A markieren.
-            # Auf dem Latitude 5450 erscheint der Datenpfad teilweise einen
-            # Poll vor dem UCSI-Type-C-Partner. Würden wir sofort A3 setzen,
-            # leuchten bei C1/C4 kurz oder dauerhaft C + A gleichzeitig.
+            # 3) Ein statischer C-Root-Pfad wurde gerade present.
+            if c_event_slot is None:
+                c_candidates = set()
+                for raw_key, present in current_groups.items():
+                    if not present:
+                        continue
+                    if self.usb_last_group_present.get(raw_key, False):
+                        continue
+                    candidate_idx = self.usb_group_to_slot.get(raw_key)
+                    if candidate_idx is None:
+                        continue
+                    if not (0 <= candidate_idx < len(self.usb_slots)):
+                        continue
+                    if self.usb_slots[candidate_idx].get("type") == "USB-C":
+                        c_candidates.add(candidate_idx)
+
+                if len(c_candidates) == 1:
+                    c_event_slot = next(iter(c_candidates))
+
+            if c_event_slot is not None:
+                self.usb_recent_c_hotplug_slot = c_event_slot
+                self.usb_recent_c_hotplug_at = now_mono
+                log(
+                    f"USB-C Hotplug-Sitzung: "
+                    f"USB-C Port {c_event_slot + 1}"
+                )
+
+            active_c_now = self.usb_active_c_slots(
+                current_groups,
+                current_typec_partner_present,
+            )
+
+            recent_c_slot = self.usb_recent_c_hotplug_slot
+            recent_c_valid = (
+                recent_c_slot is not None
+                and recent_c_slot in active_c_now
+                and now_mono - self.usb_recent_c_hotplug_at <= 5.0
+            )
+
+            if not recent_c_valid:
+                self.usb_recent_c_hotplug_slot = None
+                self.usb_recent_c_hotplug_at = 0.0
+                recent_c_slot = None
+
+            left_a_slot = self.usb_left_a_slot()
+
             for raw_key in newly_present_dynamic:
                 self.usb_dynamic_group_seen_at.setdefault(
                     raw_key,
                     now_mono,
                 )
 
-            # Sobald UCSI eindeutig einen C-Port bestätigt, gehört der zuletzt
-            # erschienene noch unklare USB2-Pfad zu genau diesem USB-C-Port.
-            if target_c_slot is not None:
-                candidates = [
-                    (
-                        self.usb_dynamic_group_seen_at.get(key, 0.0),
-                        key,
-                    )
-                    for key in dynamic_keys
-                    if current_groups.get(key, False)
-                    and (
-                        key not in self.usb_dynamic_group_slots
-                        or self.usb_dynamic_group_slots.get(key)
-                        == left_a_slot
-                    )
-                    and now_mono
-                    - self.usb_dynamic_group_seen_at.get(key, 0.0)
-                    <= 3.0
-                ]
-                if candidates:
-                    _seen_at, raw_key = max(candidates)
+            # Ein USB2-Pfad, der innerhalb derselben C-Hotplug-Sitzung
+            # erscheint, ist die USB2-Seite desselben USB-C-Geräts/Hubs.
+            if recent_c_slot is not None:
+                for raw_key in dynamic_keys:
+                    if not current_groups.get(raw_key, False):
+                        continue
+                    first_seen = self.usb_dynamic_group_seen_at.get(raw_key)
+                    if first_seen is None:
+                        continue
+                    if now_mono - first_seen > 5.0:
+                        continue
+                    if self.usb_dynamic_group_slots.get(raw_key) == recent_c_slot:
+                        continue
+
                     if self.usb_assign_dynamic_group(
                         raw_key,
-                        target_c_slot,
-                        "UCSI bestätigt",
+                        recent_c_slot,
+                        "USB-C-Hotplug-Sitzung",
                     ):
                         changed = True
 
-            # Nur wenn nach einer kurzen Karenzzeit KEIN neuer Type-C-Partner
-            # erschienen ist, darf der Pfad als linker USB-A gelten.
-            # 1,0 s ist lang genug für UCSI, aber kurz genug für die UI.
-            if target_c_slot is None:
+            # Nur ohne aktive C-Hotplug-Sitzung darf ein neuer dynamischer
+            # USB2-Pfad nach kurzer Karenz als linker USB-A gelten.
+            if recent_c_slot is None:
                 for raw_key in dynamic_keys:
                     if not current_groups.get(raw_key, False):
                         continue
@@ -7254,13 +7311,11 @@ except Exception:
                     if self.usb_assign_dynamic_group(
                         raw_key,
                         left_a_slot,
-                        "1s ohne Type-C-Signal",
+                        "1s ohne C-Hotplug-Sitzung",
                     ):
                         changed = True
 
             for raw_key in newly_gone_dynamic:
-                # Zuordnung bis nach sync/logging behalten; unten wird sie
-                # nach dem Entfernen bereinigt.
                 self.usb_dynamic_group_seen_at.pop(raw_key, None)
 
         groups_by_key = {
@@ -7516,6 +7571,18 @@ except Exception:
                 if not current_groups.get(raw_key, False):
                     self.usb_dynamic_group_slots.pop(raw_key, None)
                     self.usb_dynamic_group_seen_at.pop(raw_key, None)
+
+        # Falls ein Hub zuerst als Backup auftauchte und der dynamische
+        # Companion-Pfad erst danach dem C-Port zugeordnet wurde, Backup
+        # sofort wieder entfernen.
+        for dev_name in list(self.usb_fallback):
+            if self.usb_slot_for_device(dev_name) is None:
+                continue
+            self.usb_fallback.pop(dev_name, None)
+            log(
+                f"USB Backup nach Port-Zuordnung entfernt: {dev_name}"
+            )
+            changed = True
 
         for dev_name in sorted(new_device_names, key=natural_key):
             if self.usb_slot_for_device(dev_name) is not None:
