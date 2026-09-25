@@ -3143,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.136"
+            else "Hardware Check v4.5.137"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3156,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.136"
+                else "Hardware Check v4.5.137"
             )
         )
         title_label.add_css_class("title")
@@ -8102,23 +8102,6 @@ except Exception:
         cr.rectangle(0, 0, width, height)
         cr.fill()
 
-        # Dezentes technisches Raster. Es skaliert mit der Zeichenfläche und
-        # bleibt bewusst im Hintergrund, damit die Werte gut lesbar bleiben.
-        cr.set_line_width(1.0)
-        cr.set_source_rgba(track[0], track[1], track[2], 0.28)
-        grid_step = 24.0
-        x = grid_step
-        while x < width:
-            cr.move_to(x, 0)
-            cr.line_to(x, height)
-            x += grid_step
-        y = grid_step
-        while y < height:
-            cr.move_to(0, y)
-            cr.line_to(width, y)
-            y += grid_step
-        cr.stroke()
-
         progress = max(0.0, min(1.0, self.cpu_activity_progress))
         cores = os.cpu_count() or 1
         temp_c = self.cpu_visual_temp
@@ -8471,21 +8454,6 @@ except Exception:
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
         cr.fill()
-
-        cr.set_source_rgba(track[0], track[1], track[2], 0.28)
-        cr.set_line_width(1.0)
-        step = 24.0
-        pos = step
-        while pos < width:
-            cr.move_to(pos, 0)
-            cr.line_to(pos, height)
-            pos += step
-        pos = step
-        while pos < height:
-            cr.move_to(0, pos)
-            cr.line_to(width, pos)
-            pos += step
-        cr.stroke()
 
         temp_c = self.gpu_visual_temp
         accent = self._gpu_visual_color(temp_c)
