@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.45"
+VERSION = "2.46"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1710,14 +1710,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.45 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.46 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.45 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.46 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2054,16 +2054,16 @@ class NetworkCheckApp(Gtk.Application):
             font-weight: 800;
             padding: 4px 10px;
             border-radius: 8px;
+            border: 3px solid transparent;
         }
 
-        /* Clear keyboard focus, matching the old standalone Wipe Auto. */
+        /* Der 3-px-Rand ist immer vorhanden. Beim Fokus ändert sich nur
+           seine Farbe, daher bleibt die Button- und Fenstergröße konstant. */
         button.danger-action.keyboard-focus,
         button.danger-action:focus {
             background: #5aa2ff;
             color: #f4f4f5;
             border-color: #5aa2ff;
-            outline: 3px solid #5aa2ff;
-            outline-offset: 2px;
         }
 
         .confirm-warning {
