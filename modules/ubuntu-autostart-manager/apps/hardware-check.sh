@@ -3231,9 +3231,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.141"
+            "Hardware Benchmark v4.5.142"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.141"
+            else "Hardware Check v4.5.142"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3244,9 +3244,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.141"
+                "Hardware Benchmark v4.5.142"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.141"
+                else "Hardware Check v4.5.142"
             )
         )
         title_label.add_css_class("title")
@@ -3295,7 +3295,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.141 gestartet")
+            log("Hardware Benchmark v4.5.142 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -9153,13 +9153,27 @@ except Exception:
         for button in self.benchmark_buttons:
             button.remove_css_class("benchmark-running")
 
-        button = self.benchmark_button_by_kind.get(kind)
-        if button is None:
-            return
+        running_kinds = [kind]
 
-        button.remove_css_class("benchmark-passed")
-        button.remove_css_class("benchmark-failed")
-        button.add_css_class("benchmark-running")
+        # Während ALLE / ALLE ERW. läuft, ist nicht nur der aktuelle
+        # Einzeltest aktiv. Auch der übergeordnete Sequenz-Button bleibt
+        # durchgehend Blau, bis die komplette Sequenz abgeschlossen ist.
+        if self.test_sequence_active:
+            overall_kind = (
+                "all-long"
+                if self.test_sequence_mode == "ALLE ERW."
+                else "all-short"
+            )
+            running_kinds.append(overall_kind)
+
+        for running_kind in running_kinds:
+            button = self.benchmark_button_by_kind.get(running_kind)
+            if button is None:
+                continue
+
+            button.remove_css_class("benchmark-passed")
+            button.remove_css_class("benchmark-failed")
+            button.add_css_class("benchmark-running")
 
     def set_benchmark_button_result(self, kind, ok):
         button = self.benchmark_button_by_kind.get(kind)
