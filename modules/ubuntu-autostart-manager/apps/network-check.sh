@@ -138,9 +138,10 @@ import subprocess
 import threading
 import time
 import queue
+import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.53"
+VERSION = "2.54"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1585,13 +1586,41 @@ class CompactAudioPanel:
             "orange": (0.96, 0.65, 0.14),
         }
 
+        # Dunklen Waveform-Bereich wie die übrigen Karten abrunden und
+        # sämtliche Zeichenoperationen auf diese Fläche begrenzen.
+        radius = min(8.0, width / 2.0, height / 2.0)
+        cr.new_sub_path()
+        cr.arc(width - radius, radius, radius, -math.pi / 2.0, 0.0)
+        cr.arc(
+            width - radius,
+            height - radius,
+            radius,
+            0.0,
+            math.pi / 2.0,
+        )
+        cr.arc(
+            radius,
+            height - radius,
+            radius,
+            math.pi / 2.0,
+            math.pi,
+        )
+        cr.arc(
+            radius,
+            radius,
+            radius,
+            math.pi,
+            3.0 * math.pi / 2.0,
+        )
+        cr.close_path()
         cr.set_source_rgb(0.09, 0.09, 0.11)
-        cr.paint()
+        cr.fill_preserve()
+        cr.clip()
 
-        # Gleiche Proportionen wie der frühere große Audio-WaveRenderer:
-        # kleiner Rand, zentrierte Nulllinie und 90 % nutzbare Amplitude.
-        x0 = width * 0.025
-        x1 = width - x0
+        # Horizontal die komplette dunkle Fläche nutzen. Nur oben/unten bleibt
+        # der kleine Abstand für die maximale Waveform-Amplitude erhalten.
+        x0 = 0.0
+        x1 = float(width)
         y0 = height * 0.05
         y1 = height - y0
         plot_width = max(2.0, x1 - x0)
@@ -1721,14 +1750,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.53 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.54 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.53 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.54 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
