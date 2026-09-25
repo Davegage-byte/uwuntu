@@ -141,7 +141,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.54"
+VERSION = "2.55"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -443,6 +443,7 @@ class ConnectionCard:
 
         metrics = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         metrics.set_homogeneous(True)
+        self.metric_boxes = {}
 
         self.link_value = self.metric(metrics, "LINK")
         self.ping_value = self.metric(metrics, "PING")
@@ -486,6 +487,7 @@ class ConnectionCard:
         box.append(cap)
         box.append(value)
         parent.append(box)
+        self.metric_boxes[caption.lower()] = box
         return value
 
     def set_widget_class(self, widget, klass):
@@ -1750,14 +1752,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.54 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.55 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.54 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.55 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1803,6 +1805,7 @@ class NetworkCheckApp(Gtk.Application):
 
         self.cards["lan"] = ConnectionCard("LAN")
         self.cards["wifi"] = ConnectionCard("WLAN")
+        self.attach_network_metric_clicks()
 
         for key in ("lan", "wifi"):
             self.cards[key].root.set_hexpand(True)
@@ -2141,6 +2144,77 @@ class NetworkCheckApp(Gtk.Application):
     # Netzwerkzustand
     # --------------------------------------------------------
 
+    def attach_network_metric_clicks(self):
+        """Bestehende Messfelder unsichtbar für Maus und Touch aktivieren."""
+        phase_map = {
+            "link": "link",
+            "ping": "ping",
+            "download": "down",
+            "upload": "up",
+        }
+        for kind, card in self.cards.items():
+            for box_name, phase in phase_map.items():
+                box = card.metric_boxes.get(box_name)
+                if box is None:
+                    continue
+                gesture = Gtk.GestureClick.new()
+                gesture.set_button(1)
+                gesture.connect(
+                    "released",
+                    self.on_network_metric_clicked,
+                    kind,
+                    phase,
+                )
+                box.add_controller(gesture)
+
+    def connected_iface_for_kind(self, kind):
+        devices = get_devices()
+        device_type = "ethernet" if kind == "lan" else "wifi"
+        preferred = self.results[kind].get("iface")
+
+        for dev in devices[device_type]:
+            if dev["connected"] and dev["iface"] == preferred:
+                return preferred
+        for dev in devices[device_type]:
+            if dev["connected"]:
+                return dev["iface"]
+        return None
+
+    def on_network_metric_clicked(
+        self,
+        _gesture,
+        n_press,
+        _x,
+        _y,
+        kind,
+        phase,
+    ):
+        if n_press != 1:
+            return
+
+        iface = self.connected_iface_for_kind(kind)
+        if not iface:
+            card = self.cards[kind]
+            card.set_state("NICHT VERBUNDEN", "warn")
+            card.note_label.set_text(
+                "Einzeltest nicht möglich: keine aktive Verbindung."
+            )
+            return
+
+        if kind in self.testing_kinds:
+            log(
+                f"Einzeltest ignoriert: {kind.upper()} läuft bereits "
+                f"({phase.upper()})"
+            )
+            return
+
+        self.enqueue_test(
+            iface,
+            kind,
+            f"manual click {phase}",
+            phase=phase,
+        )
+
     def best_device(self, device_list):
         if not device_list:
             return None
@@ -2286,7 +2360,7 @@ class NetworkCheckApp(Gtk.Application):
             )
 
         return self.max_wifi_link[iface]
-    def enqueue_test(self, iface, kind, reason):
+    def enqueue_test(self, iface, kind, reason, phase="full"):
         key = (iface, kind)
 
         if key in self.pending:
@@ -2295,8 +2369,11 @@ class NetworkCheckApp(Gtk.Application):
             return
 
         self.pending.add(key)
-        self.test_queue.put((iface, kind, reason))
-        log(f"Test eingeplant: {kind.upper()} {iface} ({reason})")
+        self.test_queue.put((iface, kind, reason, phase))
+        log(
+            f"Test eingeplant: {kind.upper()} {iface} "
+            f"({reason}, phase={phase})"
+        )
 
     def reset_refresh_values(self, devices):
         """Alle sichtbaren und internen Speedtest-Werte sofort verwerfen.
@@ -2380,7 +2457,7 @@ class NetworkCheckApp(Gtk.Application):
     def worker(self):
         while not self.stop_event.is_set():
             try:
-                iface, kind, reason = self.test_queue.get(timeout=0.5)
+                iface, kind, reason, phase = self.test_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
@@ -2406,13 +2483,109 @@ class NetworkCheckApp(Gtk.Application):
             self.testing_kinds.add(kind)
             self.testing_ifaces[kind] = iface
             try:
-                self.run_full_test(iface, kind, reason)
+                if phase == "full":
+                    self.run_full_test(iface, kind, reason)
+                else:
+                    self.run_single_metric_test(
+                        iface,
+                        kind,
+                        phase,
+                        reason,
+                    )
             except Exception as e:
                 log(f"Testfehler {iface}: {e!r}")
                 GLib.idle_add(self.mark_test_error, kind, iface, str(e))
             finally:
                 self.testing_kinds.discard(kind)
                 self.testing_ifaces.pop(kind, None)
+    def run_single_metric_test(self, iface, kind, phase, reason):
+        log(
+            f"START EINZEL {kind.upper()} {iface}: "
+            f"{phase.upper()} ({reason})"
+        )
+
+        result = self.results[kind]
+        result["iface"] = iface
+
+        if phase == "link":
+            GLib.idle_add(
+                self.mark_testing,
+                kind,
+                iface,
+                "LINK",
+            )
+            current_link = link_speed(iface, kind)
+            if kind == "wifi":
+                # Manueller LINK-Klick soll den aktuellen Wert neu lesen und
+                # nicht das Maximum eines früheren Speedtests konservieren.
+                self.max_wifi_link.pop(iface, None)
+                if current_link is not None:
+                    self.max_wifi_link[iface] = current_link
+            result["link"] = current_link
+            GLib.idle_add(
+                self.update_link_result,
+                kind,
+                current_link,
+            )
+
+        elif phase == "ping":
+            GLib.idle_add(
+                self.mark_ping_testing,
+                kind,
+                iface,
+            )
+            latency = self.measure_ping(iface)
+            result["ping"] = latency
+            result["ping_ok"] = latency is not None
+            GLib.idle_add(
+                self.update_ping_result,
+                kind,
+                latency,
+            )
+
+        elif phase in ("down", "up"):
+            direction = "download" if phase == "down" else "upload"
+            label = "DOWNLOAD" if phase == "down" else "UPLOAD"
+            GLib.idle_add(
+                self.mark_testing,
+                kind,
+                iface,
+                label,
+            )
+            speed = self.measure_phase(
+                iface,
+                kind,
+                direction,
+            )
+            result[phase] = speed
+            GLib.idle_add(
+                self.update_phase_final_value,
+                kind,
+                phase,
+                speed,
+            )
+        else:
+            raise ValueError(f"Unbekannte Einzeltest-Phase: {phase}")
+
+        all_measured = (
+            result["link"] is not None
+            and result["ping_ok"] is not None
+            and result["down"] is not None
+            and result["up"] is not None
+        )
+        if all_measured:
+            result["tested"] = True
+            result["passed"] = self.result_passes(kind)
+        else:
+            result["tested"] = False
+            result["passed"] = None
+
+        GLib.idle_add(
+            self.finish_single_metric_ui,
+            kind,
+            phase,
+        )
+
     def run_full_test(self, iface, kind, reason):
         log(f"START {kind.upper()} {iface} ({reason})")
 
@@ -2951,6 +3124,39 @@ class NetworkCheckApp(Gtk.Application):
             "link",
             format_link_speed(speed),
             self.metric_class(kind, "link", speed),
+        )
+        return False
+
+    def update_link_result(self, kind, speed):
+        if speed is None:
+            self.cards[kind].set_metric("link", "--", "warn")
+            return False
+        return self.update_link(kind, speed)
+
+    def finish_single_metric_ui(self, kind, phase):
+        result = self.results[kind]
+        all_measured = (
+            result["link"] is not None
+            and result["ping_ok"] is not None
+            and result["down"] is not None
+            and result["up"] is not None
+        )
+        if all_measured:
+            return self.apply_result_to_ui(kind)
+
+        card = self.cards[kind]
+        card.set_state("VERBUNDEN", "neutral")
+        labels = {
+            "link": "LINK",
+            "ping": "PING",
+            "down": "DOWNLOAD",
+            "up": "UPLOAD",
+        }
+        card.note_label.set_text(
+            f"{labels.get(phase, phase.upper())} neu gemessen."
+        )
+        self.global_status.set_text(
+            f"{kind.upper()} {labels.get(phase, phase.upper())} abgeschlossen"
         )
         return False
 

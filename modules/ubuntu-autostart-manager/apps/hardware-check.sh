@@ -3143,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.135"
+            else "Hardware Check v4.5.136"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3156,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.135"
+                else "Hardware Check v4.5.136"
             )
         )
         title_label.add_css_class("title")
@@ -3277,6 +3277,19 @@ class App(Gtk.Application):
         while child is not None:
             self.disable_button_focus(child)
             child = child.get_next_sibling()
+
+    def add_invisible_click(self, widget, callback):
+        """Maus/Touch-Aktion ohne optische Änderung des bestehenden Widgets."""
+        gesture = Gtk.GestureClick.new()
+        gesture.set_button(1)
+        gesture.connect(
+            "released",
+            lambda _gesture, n_press, _x, _y: (
+                callback() if n_press == 1 else None
+            ),
+        )
+        widget.add_controller(gesture)
+        return gesture
 
     def card(self, title):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
@@ -3405,6 +3418,10 @@ class App(Gtk.Application):
         display_row.append(self.display_status_name)
         display_row.append(self.display_status_text)
         display.append(display_row)
+        self.add_invisible_click(
+            display_row,
+            self.start_display_test,
+        )
         left.append(display)
 
         # =====================================================
@@ -3461,6 +3478,10 @@ class App(Gtk.Application):
         # Notebook kein ID_INPUT_TOUCHSCREEN=1 Gerät erkannt wird.
         self.touchscreen_row = touch_row
         self.touchscreen_row.set_visible(False)
+        self.add_invisible_click(
+            touch_row,
+            self.start_touch_test,
+        )
         input_devices.append(touch_row)
 
         # Keyboard wie die übrigen Eingabegeräte.
@@ -3490,6 +3511,10 @@ class App(Gtk.Application):
         kb_row.append(self.keyboard_status_dot)
         kb_row.append(self.keyboard_status_name)
         kb_row.append(self.keyboard_summary)
+        self.add_invisible_click(
+            kb_row,
+            self.show_keyboard,
+        )
         input_devices.append(kb_row)
 
         left.append(input_devices)
