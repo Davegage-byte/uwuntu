@@ -65,6 +65,36 @@ uwuntu_set_dock_autohide() {
 
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
+# ------------------------------------------------------------
+# Hardware Benchmark: eigene GNOME-/Taskleisten-Identität
+# ------------------------------------------------------------
+# Der untere linke Tile-Slot kann weiterhin über den historischen Audio-
+# Launcher gestartet werden. Das sichtbare Benchmark-Fenster erhält aber eine
+# eigene App-ID, einen eigenen Taskleisten-Namen und ein passendes Icon.
+if [ "${UWUNTU_BENCHMARK_WINDOW:-0}" = "1" ]; then
+    BENCHMARK_DESKTOP_DIR="$HOME/.local/share/applications"
+    BENCHMARK_DESKTOP_FILE="$BENCHMARK_DESKTOP_DIR/com.david.UwuntuHardwareBenchmark.desktop"
+
+    mkdir -p "$BENCHMARK_DESKTOP_DIR"
+    cat > "$BENCHMARK_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Hardware Benchmark
+Comment=Uwuntu CPU/RAM/GPU Hardware Benchmark
+Exec=env UWUNTU_BENCHMARK_WINDOW=1 $HOME/.local/bin/hardware-check.sh
+Icon=utilities-system-monitor
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+StartupWMClass=com.david.UwuntuHardwareBenchmark
+EOF
+    chmod 0644 "$BENCHMARK_DESKTOP_FILE"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$BENCHMARK_DESKTOP_DIR" >/dev/null 2>&1 || true
+    fi
+fi
+
 TMP_PY="$(mktemp /tmp/hardware-check.XXXXXX.py)"
 trap 'rm -f "$TMP_PY"' EXIT
 cat > "$TMP_PY" <<'PY'
@@ -94,12 +124,12 @@ import select
 
 BENCHMARK_WINDOW_MODE = os.environ.get("UWUNTU_BENCHMARK_WINDOW") == "1"
 APP_ID = (
-    "com.david.UwuntuAudioTest"
+    "com.david.UwuntuHardwareBenchmark"
     if BENCHMARK_WINDOW_MODE
     else "com.david.HardwareCheck"
 )
 AUDIO_ACTION_APP_ID = "com.david.UwuntuAudioEngineExperiment"
-BENCHMARK_ACTION_APP_ID = "com.david.UwuntuAudioTest"
+BENCHMARK_ACTION_APP_ID = "com.david.UwuntuHardwareBenchmark"
 LOG_FILE = Path.home() / "hardware_check.log"
 
 SYS_USB = Path("/sys/bus/usb/devices")
@@ -3141,9 +3171,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark EXP"
+            "Hardware Benchmark v4.5.139"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.138"
+            else "Hardware Check v4.5.139"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3154,9 +3184,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark EXP"
+                "Hardware Benchmark v4.5.139"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.138"
+                else "Hardware Check v4.5.139"
             )
         )
         title_label.add_css_class("title")
@@ -3204,8 +3234,8 @@ class App(Gtk.Application):
             # Zweite HC-Instanz nur für die dauerhaft sichtbare Benchmark-Seite.
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
-            GLib.timeout_add(1200, self.start_experimental_benchmark)
-            log("Hardware Benchmark EXP gestartet")
+            GLib.timeout_add(1200, self.start_benchmark_window)
+            log("Hardware Benchmark v4.5.139 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -9266,13 +9296,13 @@ except Exception:
         if hasattr(self, "cancel_test_button"):
             self.cancel_test_button.set_sensitive(running)
 
-    def start_experimental_benchmark(self):
+    def start_benchmark_window(self):
         if not BENCHMARK_WINDOW_MODE:
             return False
         if self.test_proc is not None and self.test_proc.poll() is None:
             return False
         self.start_test(None, "all-short", 30.0)
-        log("Benchmark EXP: ALLE Kurztests automatisch gestartet")
+        log("Hardware Benchmark: ALLE Kurztests automatisch gestartet")
         return False
 
     def show_benchmarks(self, *_):

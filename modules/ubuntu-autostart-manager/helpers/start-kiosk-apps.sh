@@ -470,9 +470,9 @@ fi
 # 4) Tiling-Assistant-Layout EINMAL starten
 #
 # Das Layout selbst startet:
-#   oben links   Network Check + Wipe Auto
+#   oben links   Network Check + Wipe Auto + Audio Test
 #   oben rechts  Uwuntu Kamera Test
-#   unten links  Uwuntu Audio Test
+#   unten links  Hardware Benchmark
 #   unten rechts Hardware Check
 #
 # Firefox ist vollständig aus dem Kiosk entfernt.
