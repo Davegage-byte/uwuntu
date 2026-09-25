@@ -3143,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.132"
+            else "Hardware Check v4.5.133"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3156,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.132"
+                else "Hardware Check v4.5.133"
             )
         )
         title_label.add_css_class("title")
@@ -8041,6 +8041,26 @@ except Exception:
             return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
         return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
 
+    @staticmethod
+    def benchmark_growing_bar_value(raw_value, progress):
+        """Lebendige Balken, deren Grundhöhe zugleich den Fortschritt zeigt."""
+        raw = max(0.0, min(1.0, float(raw_value)))
+        p = max(0.0, min(1.0, float(progress)))
+
+        # Kurz vor Schluss sind alle Balken bewusst vollständig gefüllt.
+        if p >= 0.95:
+            return 1.0
+
+        # Smoothstep: am Anfang sehr flach, in der Mitte klar wachsend und
+        # gegen Ende schnell nahe 100 %. Das bisherige Springen bleibt als
+        # kleine Abweichung um diese Fortschritts-Grundhöhe erhalten.
+        eased = p * p * (3.0 - 2.0 * p)
+        base = 0.04 + 0.92 * eased
+        jitter_span = 0.20 - 0.10 * p
+        jitter = (raw - 0.5) * jitter_span
+
+        return max(0.025, min(0.985, base + jitter))
+
     def draw_cpu_activity(self, area, cr, width, height):
         """Technische CPU-Telemetrie mit responsiver Kernmatrix."""
         background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
@@ -8215,7 +8235,12 @@ except Exception:
             x = padding + col * (bar_w + bar_gap)
             y = activity_top + row * row_h
             bar_h = max(18.0, row_h - 15.0)
-            value = max(0.06, min(1.0, values[index]))
+            raw_value = max(0.0, min(1.0, values[index]))
+            value = (
+                self.benchmark_growing_bar_value(raw_value, progress)
+                if running
+                else max(0.06, raw_value)
+            )
 
             # Äußerer Slot-Rahmen.
             cr.set_source_rgb(*panel)
@@ -8319,7 +8344,7 @@ except Exception:
     def reset_cpu_activity_field(self):
         count = max(1, min(24, os.cpu_count() or 1))
         self.cpu_thread_values = [
-            random.uniform(0.35, 0.72)
+            random.uniform(0.05, 0.95)
             for _ in range(count)
         ]
         self.cpu_activity_progress = 0.0
@@ -8532,9 +8557,16 @@ except Exception:
         if running and count:
             scan_index = int(time.monotonic() * 7.0) % count
 
+        progress = max(0.0, min(1.0, self.gpu_activity_progress))
+
         for index, raw in enumerate(values):
             x = padding + index * (bar_w + bar_gap)
-            value = max(0.05, min(1.0, raw))
+            raw_value = max(0.0, min(1.0, raw))
+            value = (
+                self.benchmark_growing_bar_value(raw_value, progress)
+                if running
+                else max(0.05, raw_value)
+            )
             cr.set_source_rgba(track[0], track[1], track[2], 0.65)
             cr.rectangle(x, top, bar_w, bar_h)
             cr.fill()
@@ -8550,7 +8582,6 @@ except Exception:
             cr.rectangle(x, top + bar_h - active_h, bar_w, active_h)
             cr.fill()
 
-        progress = max(0.0, min(1.0, self.gpu_activity_progress))
         cr.set_source_rgb(*(green if complete else accent))
         cr.rectangle(
             padding,
@@ -8573,7 +8604,7 @@ except Exception:
         self.gpu_usage_prev_snapshot = None
         self.gpu_usage_prev_ts_ns = None
         self.gpu_frame_values = [
-            random.uniform(0.18, 0.48)
+            random.uniform(0.05, 0.95)
             for _ in range(24)
         ]
 
