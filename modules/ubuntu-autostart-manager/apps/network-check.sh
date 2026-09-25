@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.52"
+VERSION = "2.53"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1008,7 +1008,7 @@ class WipeCompactPanel:
         # In allen Wipe-Zuständen dieselbe Zeilenhöhe reservieren:
         # LÖSCHEN, Bestätigung und leere Aktionsfläche nach Erfolg dürfen
         # die DATENTRÄGER-Karte nicht mehr in der Höhe verändern.
-        self.action_area.set_size_request(-1, 42)
+        self.action_area.set_size_request(-1, 36)
 
         self.wipe_button = Gtk.Button(label="LÖSCHEN")
         self.wipe_button.add_css_class("danger-action")
@@ -1016,8 +1016,8 @@ class WipeCompactPanel:
         # werden dauerhaft reserviert, ohne das bewährte Fokus-CSS zu ändern.
         self.wipe_button.set_margin_start(5)
         self.wipe_button.set_margin_end(5)
-        self.wipe_button.set_margin_top(5)
-        self.wipe_button.set_margin_bottom(5)
+        self.wipe_button.set_margin_top(3)
+        self.wipe_button.set_margin_bottom(3)
         self.wipe_button.connect("clicked", self.on_wipe_clicked)
         self.wipe_button.connect(
             "notify::has-focus",
@@ -1721,14 +1721,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.52 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.53 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.52 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.53 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2061,9 +2061,9 @@ class NetworkCheckApp(Gtk.Application):
         }
 
         button.danger-action {
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 800;
-            padding: 0px 10px;
+            padding: 0px 9px;
             border-radius: 8px;
         }
 
