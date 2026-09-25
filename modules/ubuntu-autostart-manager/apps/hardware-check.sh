@@ -66,33 +66,52 @@ uwuntu_set_dock_autohide() {
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------
-# Hardware Benchmark: eigene GNOME-/Taskleisten-Identität
+# GNOME-/Taskleisten-Identitäten für Hardware Check und Benchmark
 # ------------------------------------------------------------
-# Der untere linke Tile-Slot kann weiterhin über den historischen Audio-
-# Launcher gestartet werden. Das sichtbare Benchmark-Fenster erhält aber eine
-# eigene App-ID, einen eigenen Taskleisten-Namen und ein passendes Icon.
-if [ "${UWUNTU_BENCHMARK_WINDOW:-0}" = "1" ]; then
-    BENCHMARK_DESKTOP_DIR="$HOME/.local/share/applications"
-    BENCHMARK_DESKTOP_FILE="$BENCHMARK_DESKTOP_DIR/com.david.UwuntuHardwareBenchmark.desktop"
+# Benchmark übernimmt bewusst das bisherige Hardware-Check-Icon. Der normale
+# Hardware Check bekommt ein eigenes schlichtes Computer-Symbol, passend zu
+# den übrigen Uwuntu-Diagnose-Apps.
+DESKTOP_DIR="$HOME/.local/share/applications"
+mkdir -p "$DESKTOP_DIR"
 
-    mkdir -p "$BENCHMARK_DESKTOP_DIR"
+if [ "${UWUNTU_BENCHMARK_WINDOW:-0}" = "1" ]; then
+    BENCHMARK_DESKTOP_FILE="$DESKTOP_DIR/com.david.UwuntuHardwareBenchmark.desktop"
+
     cat > "$BENCHMARK_DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Hardware Benchmark
 Comment=Uwuntu CPU/RAM/GPU Hardware Benchmark
 Exec=env UWUNTU_BENCHMARK_WINDOW=1 $HOME/.local/bin/hardware-check.sh
-Icon=utilities-system-monitor
+Icon=utilities-system-monitor-symbolic
 Terminal=false
 NoDisplay=true
 StartupNotify=true
 StartupWMClass=com.david.UwuntuHardwareBenchmark
 EOF
     chmod 0644 "$BENCHMARK_DESKTOP_FILE"
+else
+    HARDWARE_DESKTOP_FILE="$DESKTOP_DIR/com.david.HardwareCheck.desktop"
 
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "$BENCHMARK_DESKTOP_DIR" >/dev/null 2>&1 || true
-    fi
+    cat > "$HARDWARE_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Hardware Check
+Comment=Uwuntu Hardware-Diagnose
+Exec=$HOME/.local/bin/hardware-check.sh
+Icon=computer-symbolic
+Terminal=false
+StartupNotify=false
+X-GNOME-UsesNotifications=false
+StartupWMClass=com.david.HardwareCheck
+Categories=Utility;System;
+NoDisplay=false
+EOF
+    chmod 0644 "$HARDWARE_DESKTOP_FILE"
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 fi
 
 TMP_PY="$(mktemp /tmp/hardware-check.XXXXXX.py)"
@@ -3171,9 +3190,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.139"
+            "Hardware Benchmark v4.5.140"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.139"
+            else "Hardware Check v4.5.140"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3184,9 +3203,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.139"
+                "Hardware Benchmark v4.5.140"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.139"
+                else "Hardware Check v4.5.140"
             )
         )
         title_label.add_css_class("title")
@@ -3235,7 +3254,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.139 gestartet")
+            log("Hardware Benchmark v4.5.140 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
