@@ -3143,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.131"
+            else "Hardware Check v4.5.132"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3156,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.131"
+                else "Hardware Check v4.5.132"
             )
         )
         title_label.add_css_class("title")
@@ -9032,17 +9032,21 @@ except Exception:
         self.clear_benchmark_button_results()
         self.test_sequence_active = True
         self.test_sequence_mode = "ALLE ERW." if extended else "ALLE"
+        # CPU absichtlich zuletzt: Beim automatischen Start laufen parallel
+        # noch LAN/WLAN-Tests. Der CPU-Benchmark belastet Scheduling und
+        # Netzwerk-Userspace deutlich stärker als RAM/GPU und soll deren
+        # Messergebnisse deshalb nicht mehr direkt beim Start beeinflussen.
         self.test_sequence = (
             [
-                ("cpu-long", 600.0),
                 ("ram-long", 600.0),
                 ("gpu-long", 600.0),
+                ("cpu-long", 600.0),
             ]
             if extended
             else [
-                ("cpu-short", 10.0),
                 ("ram-short", 10.0),
                 ("gpu-short", 10.0),
+                ("cpu-short", 10.0),
             ]
         )
         self.test_sequence_index = 0
@@ -9139,8 +9143,20 @@ except Exception:
             for item in results
         )
 
+        # Ausführungsreihenfolge ist RAM → GPU → CPU, die gewohnte
+        # Ergebnisdarstellung bleibt trotzdem CPU · RAM · GPU.
+        display_order = {
+            "CPU": 0,
+            "RAM": 1,
+            "GPU": 2,
+        }
+        display_results = sorted(
+            results,
+            key=lambda item: display_order.get(item.get("name"), 99),
+        )
+
         parts = []
-        for item in results:
+        for item in display_results:
             mark = "✓" if item.get("ok") else "✕"
             summary = item.get("summary") or ""
             text = item.get("name", "TEST")
