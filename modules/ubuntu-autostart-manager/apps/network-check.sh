@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.51"
+VERSION = "2.52"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1004,6 +1004,11 @@ class WipeCompactPanel:
             spacing=4,
         )
         self.action_area.set_halign(Gtk.Align.END)
+        self.action_area.set_valign(Gtk.Align.CENTER)
+        # In allen Wipe-Zuständen dieselbe Zeilenhöhe reservieren:
+        # LÖSCHEN, Bestätigung und leere Aktionsfläche nach Erfolg dürfen
+        # die DATENTRÄGER-Karte nicht mehr in der Höhe verändern.
+        self.action_area.set_size_request(-1, 42)
 
         self.wipe_button = Gtk.Button(label="LÖSCHEN")
         self.wipe_button.add_css_class("danger-action")
@@ -1716,14 +1721,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.51 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.52 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.51 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.52 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
