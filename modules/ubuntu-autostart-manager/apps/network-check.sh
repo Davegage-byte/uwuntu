@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.49"
+VERSION = "2.50"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1007,6 +1007,12 @@ class WipeCompactPanel:
 
         self.wipe_button = Gtk.Button(label="LÖSCHEN")
         self.wipe_button.add_css_class("danger-action")
+        # Der Fokus-Outline liegt 3 px außen plus 2 px Offset. Diese 5 px
+        # werden dauerhaft reserviert, ohne das bewährte Fokus-CSS zu ändern.
+        self.wipe_button.set_margin_start(5)
+        self.wipe_button.set_margin_end(5)
+        self.wipe_button.set_margin_top(5)
+        self.wipe_button.set_margin_bottom(5)
         self.wipe_button.connect("clicked", self.on_wipe_clicked)
         self.wipe_button.connect(
             "notify::has-focus",
@@ -1710,14 +1716,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.49 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.50 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.49 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.50 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
