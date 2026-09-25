@@ -3143,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.134"
+            else "Hardware Check v4.5.135"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3156,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.134"
+                else "Hardware Check v4.5.135"
             )
         )
         title_label.add_css_class("title")
@@ -8312,14 +8312,11 @@ except Exception:
                         ):
                             seg_color = orange
                         elif (
-                            value >= 0.90
-                            and segment == segment_count - 1
-                        ):
-                            seg_color = red
-                        elif (
                             value >= 0.70
                             and segment >= segment_count - 2
                         ):
+                            # Hohe Auslastung bleibt nur orange. Rot ist
+                            # ausschließlich für echte Übertemperatur reserviert.
                             seg_color = orange
                     alpha = 1.0 if segment < active_segments - 1 else 0.78
                     cr.set_source_rgba(
