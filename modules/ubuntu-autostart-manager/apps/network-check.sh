@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.42"
+VERSION = "2.43"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -431,7 +431,8 @@ class ConnectionCard:
         # "NICHT VERBUNDEN" trotz rechnerisch ausreichender Zeichenanzahl.
         self.state_label.set_size_request(132, -1)
         self.state_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self.state_label.set_xalign(0.5)
+        self.state_label.set_xalign(1.0)
+        self.state_label.set_halign(Gtk.Align.END)
         self.state_label.add_css_class("badge")
         self.set_widget_class(self.state_label, "warn")
 
@@ -1709,14 +1710,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.42 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.43 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.42 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.43 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
