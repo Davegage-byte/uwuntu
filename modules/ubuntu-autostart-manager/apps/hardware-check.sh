@@ -3143,7 +3143,7 @@ class App(Gtk.Application):
         window_title = (
             "Hardware Benchmark EXP"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.133"
+            else "Hardware Check v4.5.134"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3156,7 +3156,7 @@ class App(Gtk.Application):
             label=(
                 "Hardware Benchmark EXP"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.133"
+                else "Hardware Check v4.5.134"
             )
         )
         title_label.add_css_class("title")
@@ -8070,6 +8070,8 @@ except Exception:
         muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
         green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
         blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+        orange = (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
+        red = (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
@@ -8241,6 +8243,12 @@ except Exception:
                 if running
                 else max(0.06, raw_value)
             )
+            if running and progress < 0.95:
+                # CPU bewusst lebendiger als GPU: Fortschritt bleibt die
+                # Grundhöhe, die Kerne dürfen aber sichtbar auf/ab springen.
+                extra_span = 0.28 - 0.10 * progress
+                value += (raw_value - 0.5) * extra_span
+                value = max(0.025, min(0.985, value))
 
             # Äußerer Slot-Rahmen.
             cr.set_source_rgb(*panel)
@@ -8286,15 +8294,33 @@ except Exception:
                     - segment * segment_gap
                 )
                 if segment < active_segments:
-                    if (
-                        not complete
-                        and temp_c is not None
-                        and temp_c >= 88.0
-                        and segment >= segment_count - 2
-                    ):
-                        seg_color = accent
-                    else:
-                        seg_color = active_color
+                    seg_color = active_color
+                    if not complete:
+                        # Hohe Balken bekommen wieder die frühere heiße Spitze:
+                        # obere Segmente orange, die letzte Spitze bei sehr
+                        # hohem Füllstand rot. Temperaturwarnungen haben Vorrang.
+                        if (
+                            temp_c is not None
+                            and temp_c >= 95.0
+                            and segment >= segment_count - 2
+                        ):
+                            seg_color = red
+                        elif (
+                            temp_c is not None
+                            and temp_c >= 88.0
+                            and segment >= segment_count - 2
+                        ):
+                            seg_color = orange
+                        elif (
+                            value >= 0.90
+                            and segment == segment_count - 1
+                        ):
+                            seg_color = red
+                        elif (
+                            value >= 0.70
+                            and segment >= segment_count - 2
+                        ):
+                            seg_color = orange
                     alpha = 1.0 if segment < active_segments - 1 else 0.78
                     cr.set_source_rgba(
                         seg_color[0],
@@ -8356,8 +8382,8 @@ except Exception:
         if not self.cpu_thread_values:
             self.reset_cpu_activity_field()
         for index, current in enumerate(self.cpu_thread_values):
-            target = random.uniform(0.62, 1.0)
-            blend = 0.34 if target > current else 0.18
+            target = random.uniform(0.08, 1.0)
+            blend = 0.58 if target > current else 0.46
             self.cpu_thread_values[index] += (target - current) * blend
 
     def update_cpu_activity(
