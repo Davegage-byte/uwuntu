@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.48"
+VERSION = "2.49"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1007,8 +1007,11 @@ class WipeCompactPanel:
 
         self.wipe_button = Gtk.Button(label="LÖSCHEN")
         self.wipe_button.add_css_class("danger-action")
-        self.wipe_button.set_focusable(False)
         self.wipe_button.connect("clicked", self.on_wipe_clicked)
+        self.wipe_button.connect(
+            "notify::has-focus",
+            self.on_action_focus_changed,
+        )
         self.action_area.append(self.wipe_button)
         disk_action_row.append(self.action_area)
         disk.append(disk_action_row)
@@ -1188,8 +1191,7 @@ class WipeCompactPanel:
         self.action_area.set_hexpand(False)
         self.action_area.append(self.wipe_button)
         self.wipe_button.set_sensitive(bool(self.disk and self.disk_info))
-        if not self.wipe_button.get_sensitive():
-            self.wipe_button.remove_css_class("keyboard-focus")
+        self.window.set_default_widget(self.wipe_button)
 
     def on_wipe_clicked(self, button):
         if self.wiping or self.confirming or not self.disk or not self.disk_info:
@@ -1199,7 +1201,6 @@ class WipeCompactPanel:
         self.confirmed_disk = self.disk
         self.confirmed_identity = wipe_device_identity(self.disk_info)
         self.confirming = True
-        self.wipe_button.remove_css_class("keyboard-focus")
         if self.refresh_button is not None:
             self.refresh_button.set_sensitive(False)
 
@@ -1356,18 +1357,13 @@ class WipeCompactPanel:
             widget.remove_css_class("keyboard-focus")
 
     def focus_wipe_button(self):
-        # LÖSCHEN bewusst ohne echten GTK-Fokus markieren. Der frühere
-        # :focus-Outline veränderte die Fensterbreite und CSS-Gegenmaßnahmen
-        # waren auf der Zielumgebung nicht robust. ENTER wird separat im
-        # Fenster-Keycontroller verarbeitet.
-        if (
-            not self.wiping
-            and not self.confirming
-            and self.wipe_button.get_sensitive()
-        ):
-            self.wipe_button.add_css_class("keyboard-focus")
-        else:
-            self.wipe_button.remove_css_class("keyboard-focus")
+        if not self.wiping and self.wipe_button.get_sensitive():
+            self.window.set_default_widget(self.wipe_button)
+            try:
+                self.window.set_focus(self.wipe_button)
+            except Exception:
+                pass
+            self.wipe_button.grab_focus()
         return False
 
 
@@ -1714,14 +1710,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.48 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.49 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.48 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.49 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1734,9 +1730,10 @@ class NetworkCheckApp(Gtk.Application):
 
         self.window.set_titlebar(self.header_bar)
 
-        # Das kombinierte Fenster enthält WIPE SSD. Sobald es aktiv wird,
-        # markieren wir LÖSCHEN rein visuell blau. ENTER wird im Fenster-
-        # Keycontroller direkt verarbeitet; echter GTK-Fokus ist nicht nötig.
+        # Das kombinierte Fenster enthält jetzt WIPE SSD. Sobald es vom
+        # Kiosk/Benutzer in den Vordergrund geholt wird, bekommt WIPE SSD
+        # wieder automatisch den Tastaturfokus, damit ENTER wie früher direkt
+        # den Wipe-Dialog startet.
         self.window.connect("notify::is-active", self.on_window_active_changed)
 
         key_controller = Gtk.EventControllerKey.new()
@@ -1827,12 +1824,8 @@ class NetworkCheckApp(Gtk.Application):
             active = bool(window.get_property("is-active"))
         except Exception:
             active = False
-        if not hasattr(self, "wipe_panel"):
-            return
-        if active:
+        if active and hasattr(self, "wipe_panel"):
             GLib.idle_add(self.wipe_panel.focus_wipe_button)
-        else:
-            self.wipe_panel.wipe_button.remove_css_class("keyboard-focus")
 
     def ensure_wipe_focus_after_start(self):
         if self.window is None or not hasattr(self, "wipe_panel"):
@@ -1840,17 +1833,28 @@ class NetworkCheckApp(Gtk.Application):
 
         self._wipe_focus_attempts = getattr(self, "_wipe_focus_attempts", 0) + 1
 
+        # Fokus bei jedem Versuch setzen. Das funktioniert auch dann, wenn
+        # das Fenster bereits aktiv war und deshalb kein is-active-Signal
+        # mehr ausgelöst wurde.
+        self.wipe_panel.focus_wipe_button()
+
         try:
             active = bool(self.window.get_property("is-active"))
         except Exception:
             active = False
 
-        if active:
-            self.wipe_panel.focus_wipe_button()
+        try:
+            focused = bool(
+                self.wipe_panel.wipe_button.get_property("has-focus")
+            )
+        except Exception:
+            focused = False
+
+        if active and focused:
             return False
 
-        # Bis ca. 5,4 Sekunden auf die echte Fensteraktivierung warten.
-        # Sobald NC aktiv ist, reicht die rein visuelle Markierung.
+        # Bis ca. 5,4 Sekunden nachfassen. Zusätzlich aktiviert der Kiosk
+        # das Fenster am Ende noch einmal per gapplication + AT-SPI.
         return self._wipe_focus_attempts < 45
 
     def install_css(self):
@@ -2052,12 +2056,14 @@ class NetworkCheckApp(Gtk.Application):
             border-radius: 8px;
         }
 
-        /* LÖSCHEN nutzt nur eine eigene visuelle Aktivmarkierung.
-           Kein GTK-:focus und damit kein äußerer Fokusrahmen. */
-        button.danger-action.keyboard-focus {
+        /* Clear keyboard focus, matching the old standalone Wipe Auto. */
+        button.danger-action.keyboard-focus,
+        button.danger-action:focus {
             background: #5aa2ff;
             color: #f4f4f5;
             border-color: #5aa2ff;
+            outline: 3px solid #5aa2ff;
+            outline-offset: 2px;
         }
 
         .confirm-warning {
@@ -3073,19 +3079,6 @@ class NetworkCheckApp(Gtk.Application):
                 except Exception as exc:
                     log(f"Strg+Q Fehler: {exc}")
                 return True
-
-        if name in ("Return", "KP_Enter"):
-            if (
-                hasattr(self, "wipe_panel")
-                and not self.wipe_panel.wiping
-                and not self.wipe_panel.confirming
-                and self.wipe_panel.wipe_button.get_sensitive()
-            ):
-                self.wipe_panel.on_wipe_clicked(
-                    self.wipe_panel.wipe_button
-                )
-                return True
-
         return False
 
     def do_shutdown(self):
