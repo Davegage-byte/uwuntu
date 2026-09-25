@@ -85,9 +85,10 @@ Comment=Uwuntu CPU/RAM/GPU Hardware Benchmark
 Exec=env UWUNTU_BENCHMARK_WINDOW=1 $HOME/.local/bin/hardware-check.sh
 Icon=utilities-system-monitor-symbolic
 Terminal=false
-NoDisplay=true
+NoDisplay=false
 StartupNotify=true
 StartupWMClass=com.david.UwuntuHardwareBenchmark
+Categories=Utility;System;
 EOF
     chmod 0644 "$BENCHMARK_DESKTOP_FILE"
 else
@@ -150,6 +151,27 @@ APP_ID = (
 AUDIO_ACTION_APP_ID = "com.david.UwuntuAudioEngineExperiment"
 BENCHMARK_ACTION_APP_ID = "com.david.UwuntuHardwareBenchmark"
 LOG_FILE = Path.home() / "hardware_check.log"
+
+# Einheitliche Uwuntu-Statuspalette.
+UWUNTU_STATUS_HEX = {
+    "blue": "#5aa2ff",
+    "green": "#61d36b",
+    "orange": "#f5a623",
+    "red": "#ff4c4c",
+}
+UWUNTU_STATUS_RGB = {
+    "blue": (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0),
+    "green": (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0),
+    "orange": (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0),
+    "red": (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0),
+}
+
+# CPU und GPU verwenden dieselben thermischen Statusgrenzen.
+TEMP_WARN_C = 85.0
+TEMP_CRITICAL_C = 95.0
+# SSDs haben bewusst eigene niedrigere Grenzwerte.
+SSD_TEMP_WARN_C = 60.0
+SSD_TEMP_CRITICAL_C = 70.0
 
 SYS_USB = Path("/sys/bus/usb/devices")
 SYS_TYPEC = Path("/sys/class/typec")
@@ -257,6 +279,25 @@ label.benchmark-status.status-green {
 label.benchmark-result.status-red,
 label.benchmark-status.status-red {
     color: #ff4c4c;
+}
+
+progressbar.benchmark-progress trough {
+    background: #34343c;
+    min-height: 6px;
+    border-radius: 4px;
+}
+progressbar.benchmark-progress progress {
+    background: #5aa2ff;
+    border-radius: 4px;
+}
+progressbar.benchmark-progress.progress-complete progress {
+    background: #61d36b;
+}
+progressbar.benchmark-progress.progress-failed progress {
+    background: #ff4c4c;
+}
+progressbar.benchmark-progress.progress-cancelled progress {
+    background: #f5a623;
 }
 
 .usb-row {
@@ -3190,9 +3231,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.140"
+            "Hardware Benchmark v4.5.141"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.140"
+            else "Hardware Check v4.5.141"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3203,9 +3244,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.140"
+                "Hardware Benchmark v4.5.141"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.140"
+                else "Hardware Check v4.5.141"
             )
         )
         title_label.add_css_class("title")
@@ -3254,7 +3295,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.140 gestartet")
+            log("Hardware Benchmark v4.5.141 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -3889,9 +3930,9 @@ class App(Gtk.Application):
                 "NICHT GEFUNDEN",
             )
         else:
-            if cpu_temp >= 95.0:
+            if cpu_temp >= TEMP_CRITICAL_C:
                 color = "red"
-            elif cpu_temp >= 85.0:
+            elif cpu_temp >= TEMP_WARN_C:
                 color = "orange"
             else:
                 color = "blue"
@@ -3960,9 +4001,9 @@ class App(Gtk.Application):
                 "NICHT GEFUNDEN",
             )
         else:
-            if ssd_temp >= 70.0:
+            if ssd_temp >= SSD_TEMP_CRITICAL_C:
                 color = "red"
-            elif ssd_temp >= 60.0:
+            elif ssd_temp >= SSD_TEMP_WARN_C:
                 color = "orange"
             else:
                 color = "blue"
@@ -7936,6 +7977,7 @@ except Exception:
         body.append(status_row)
 
         self.benchmark_progress = Gtk.ProgressBar()
+        self.benchmark_progress.add_css_class("benchmark-progress")
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_progress.set_show_text(False)
         body.append(self.benchmark_progress)
@@ -8013,6 +8055,24 @@ except Exception:
         root.append(body)
         return root
 
+    def set_benchmark_progress_state(self, state=None):
+        if not hasattr(self, "benchmark_progress"):
+            return
+        for css_class in (
+            "progress-complete",
+            "progress-failed",
+            "progress-cancelled",
+        ):
+            self.benchmark_progress.remove_css_class(css_class)
+
+        css_class = {
+            "complete": "progress-complete",
+            "failed": "progress-failed",
+            "cancelled": "progress-cancelled",
+        }.get(state)
+        if css_class:
+            self.benchmark_progress.add_css_class(css_class)
+
     def set_benchmark_result_class(self, color):
         for cls in ("status-green", "status-orange", "status-red"):
             self.benchmark_result.remove_css_class(cls)
@@ -8024,11 +8084,7 @@ except Exception:
         Ergebnistext setzen und Erfolgs-/Fehlerfarbe zusätzlich über Pango
         erzwingen. So bleibt die Farbe unabhängig von GTK-Theme-Prioritäten.
         """
-        palette = {
-            "green": "#61d36b",
-            "orange": "#f5a623",
-            "red": "#ff4c4c",
-        }
+        palette = UWUNTU_STATUS_HEX
         self.set_benchmark_result_class(color)
         if color in palette:
             escaped = GLib.markup_escape_text(str(text))
@@ -8050,10 +8106,10 @@ except Exception:
 
         background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
         base = (0x23 / 255.0, 0x23 / 255.0, 0x29 / 255.0)
-        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
-        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        orange = (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        red = (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        blue = UWUNTU_STATUS_RGB["blue"]
+        green = UWUNTU_STATUS_RGB["green"]
+        orange = UWUNTU_STATUS_RGB["orange"]
+        red = UWUNTU_STATUS_RGB["red"]
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
@@ -8100,20 +8156,16 @@ except Exception:
 
     def _cpu_visual_color(self, temp_c):
         if self.cpu_visual_state == "complete":
-            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+            return UWUNTU_STATUS_RGB["green"]
         if self.cpu_visual_state == "error":
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+            return UWUNTU_STATUS_RGB["red"]
         if self.cpu_visual_state == "cancelled":
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        if temp_c is None:
-            return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
-        if temp_c >= 95.0:
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
-        if temp_c >= 88.0:
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        if temp_c >= 72.0:
-            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+            return UWUNTU_STATUS_RGB["orange"]
+        if temp_c is not None and temp_c >= TEMP_CRITICAL_C:
+            return UWUNTU_STATUS_RGB["red"]
+        if temp_c is not None and temp_c >= TEMP_WARN_C:
+            return UWUNTU_STATUS_RGB["orange"]
+        return UWUNTU_STATUS_RGB["blue"]
 
     @staticmethod
     def benchmark_growing_bar_value(raw_value, progress):
@@ -8142,10 +8194,10 @@ except Exception:
         track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
         text = (0xF4 / 255.0, 0xF4 / 255.0, 0xF5 / 255.0)
         muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
-        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
-        orange = (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        red = (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        green = UWUNTU_STATUS_RGB["green"]
+        blue = UWUNTU_STATUS_RGB["blue"]
+        orange = UWUNTU_STATUS_RGB["orange"]
+        red = UWUNTU_STATUS_RGB["red"]
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
@@ -8358,13 +8410,13 @@ except Exception:
                         # hohem Füllstand rot. Temperaturwarnungen haben Vorrang.
                         if (
                             temp_c is not None
-                            and temp_c >= 95.0
+                            and temp_c >= TEMP_CRITICAL_C
                             and segment >= segment_count - 2
                         ):
                             seg_color = red
                         elif (
                             temp_c is not None
-                            and temp_c >= 88.0
+                            and temp_c >= TEMP_WARN_C
                             and segment >= segment_count - 2
                         ):
                             seg_color = orange
@@ -8472,16 +8524,16 @@ except Exception:
 
     def _gpu_visual_color(self, temp_c):
         if self.gpu_visual_state == "complete":
-            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+            return UWUNTU_STATUS_RGB["green"]
         if self.gpu_visual_state == "error":
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+            return UWUNTU_STATUS_RGB["red"]
         if self.gpu_visual_state == "cancelled":
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        if temp_c is not None and temp_c >= 95.0:
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
-        if temp_c is not None and temp_c >= 85.0:
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+            return UWUNTU_STATUS_RGB["orange"]
+        if temp_c is not None and temp_c >= TEMP_CRITICAL_C:
+            return UWUNTU_STATUS_RGB["red"]
+        if temp_c is not None and temp_c >= TEMP_WARN_C:
+            return UWUNTU_STATUS_RGB["orange"]
+        return UWUNTU_STATUS_RGB["blue"]
 
     def draw_gpu_activity(self, area, cr, width, height):
         """GPU-Telemetrie mit Render-Pipeline und Frame-Historie."""
@@ -8490,8 +8542,8 @@ except Exception:
         track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
         text = (0xF4 / 255.0, 0xF4 / 255.0, 0xF5 / 255.0)
         muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
-        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+        green = UWUNTU_STATUS_RGB["green"]
+        blue = UWUNTU_STATUS_RGB["blue"]
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
@@ -8629,7 +8681,13 @@ except Exception:
             cr.rectangle(x, top, bar_w, bar_h)
             cr.fill()
 
-            active_color = green if complete else accent if temp_c is not None and temp_c >= 85.0 else blue
+            active_color = (
+                green
+                if complete
+                else accent
+                if temp_c is not None and temp_c >= TEMP_WARN_C
+                else blue
+            )
             active_h = bar_h if complete else max(3.0, bar_h * value)
             cr.set_source_rgba(
                 active_color[0],
@@ -8938,6 +8996,7 @@ except Exception:
         if hasattr(self, "benchmark_status"):
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("Bereit")
+            self.set_benchmark_progress_state(None)
             self.benchmark_progress.set_fraction(0.0)
             self.benchmark_time.set_text("00:00 / 00:00")
             self.benchmark_result.set_text("")
@@ -8954,9 +9013,9 @@ except Exception:
         if temp_c is None:
             return
 
-        if temp_c >= 97.0:
+        if temp_c >= TEMP_CRITICAL_C:
             self.benchmark_status.add_css_class("status-red")
-        elif temp_c >= 90.0:
+        elif temp_c >= TEMP_WARN_C:
             self.benchmark_status.add_css_class("status-yellow")
     def update_cpu_benchmark_status(self):
         cores = os.cpu_count() or 1
@@ -9268,6 +9327,9 @@ except Exception:
         self.test_sequence_total_duration = 0.0
         self.test_sequence_completed_duration = 0.0
         self.set_benchmark_controls(False)
+        self.set_benchmark_progress_state(
+            "complete" if all_ok else "failed"
+        )
         self.benchmark_progress.set_fraction(1.0)
         total_duration = (
             1800.0
@@ -9367,6 +9429,7 @@ except Exception:
         self.test_hard_deadline = self.test_started + float(duration) + grace
         self.test_cancelled = False
         self.test_output_lines = []
+        self.set_benchmark_progress_state(None)
         if self.test_sequence_active:
             base_fraction = (
                 self.test_sequence_completed_duration
@@ -9654,9 +9717,13 @@ except Exception:
             elif not sequence_was_active:
                 # Einzeltests erhalten nach Abschluss denselben sichtbaren
                 # Grün/Rot-Zustand wie die Schritte einer ALLE-Sequenz.
+                single_ok = bool(outcome and outcome.get("ok"))
                 self.set_benchmark_button_result(
                     completed_kind,
-                    bool(outcome and outcome.get("ok")),
+                    single_ok,
+                )
+                self.set_benchmark_progress_state(
+                    "complete" if single_ok else "failed"
                 )
                 self.set_benchmark_controls(False)
 
@@ -9939,6 +10006,7 @@ except Exception:
 
         self.set_benchmark_status_temp_class(None)
         self.benchmark_status.set_text("Test abgebrochen")
+        self.set_benchmark_progress_state("cancelled")
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class("orange")
