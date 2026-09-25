@@ -140,7 +140,7 @@ import time
 import queue
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.39"
+VERSION = "2.40"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1584,8 +1584,26 @@ class CompactAudioPanel:
         plot_height = max(2.0, y1 - y0)
         mid = y0 + plot_height / 2.0
 
-        cr.set_source_rgb(0.24, 0.24, 0.28)
+        # Testweise wieder das dezente Gitter des früheren
+        # Audio-Renderers hinter die Waveform legen.
+        cr.set_source_rgb(0.16, 0.16, 0.19)
         cr.set_line_width(1.0)
+
+        for index in range(1, 10):
+            x = x0 + plot_width * index / 10.0
+            cr.move_to(x, y0)
+            cr.line_to(x, y1)
+            cr.stroke()
+
+        for fraction in (0.25, 0.75):
+            y = y0 + plot_height * fraction
+            cr.move_to(x0, y)
+            cr.line_to(x1, y)
+            cr.stroke()
+
+        # Die Nulllinie bleibt etwas heller/stärker als das restliche Gitter.
+        cr.set_source_rgb(0.24, 0.24, 0.28)
+        cr.set_line_width(1.2)
         cr.move_to(x0, mid)
         cr.line_to(x1, mid)
         cr.stroke()
@@ -1689,14 +1707,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.39 + Wipe Auto v3.33 + Audio EXP")
+        self.window.set_title("Network Check v2.40 + Wipe Auto v3.33 + Audio EXP")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.39 + Wipe Auto v3.33 + Audio EXP")
+        title_label = Gtk.Label(label="Network Check v2.40 + Wipe Auto v3.33 + Audio EXP")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
