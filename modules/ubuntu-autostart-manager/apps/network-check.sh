@@ -119,6 +119,34 @@ for cmd in curl nmcli ip ping; do
     fi
 done
 
+# ------------------------------------------------------------
+# GNOME-/Taskleisten-Identität des kombinierten Fensters
+# ------------------------------------------------------------
+# Die sichtbare Fenstertitelleiste enthält weiterhin Versionsnummern.
+# Im Dock/Favoriten-Hover bleibt der App-Name bewusst kurz und ohne Versionen.
+NETWORK_DESKTOP_DIR="$HOME/.local/share/applications"
+NETWORK_DESKTOP_FILE="$NETWORK_DESKTOP_DIR/com.david.NetworkCheck.desktop"
+
+mkdir -p "$NETWORK_DESKTOP_DIR"
+cat > "$NETWORK_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Network Check + Wipe Auto + Audio Test
+Comment=Uwuntu Netzwerk-, Wipe- und Audio-Diagnose
+Exec=$HOME/.local/bin/network-check.sh
+Icon=network-transmit-receive-symbolic
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.david.NetworkCheck
+Categories=Utility;System;
+NoDisplay=false
+EOF
+chmod 0644 "$NETWORK_DESKTOP_FILE"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$NETWORK_DESKTOP_DIR" >/dev/null 2>&1 || true
+fi
+
 TMP_PY="$(mktemp /tmp/network-check-XXXXXX.py)"
 trap 'rm -f "$TMP_PY"' EXIT
 
@@ -141,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.56"
+VERSION = "2.57"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -1752,14 +1780,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.56 + Wipe Auto v3.33 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.57 + Wipe Auto v3.33 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.56 + Wipe Auto v3.33 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.57 + Wipe Auto v3.33 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
