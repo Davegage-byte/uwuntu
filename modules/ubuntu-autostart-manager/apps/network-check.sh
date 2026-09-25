@@ -119,6 +119,34 @@ for cmd in curl nmcli ip ping; do
     fi
 done
 
+# ------------------------------------------------------------
+# GNOME-/Taskleisten-Identität des kombinierten Fensters
+# ------------------------------------------------------------
+# Die sichtbare Fenstertitelleiste enthält weiterhin Versionsnummern.
+# Im Dock/Favoriten-Hover bleibt der App-Name bewusst kurz und ohne Versionen.
+NETWORK_DESKTOP_DIR="$HOME/.local/share/applications"
+NETWORK_DESKTOP_FILE="$NETWORK_DESKTOP_DIR/com.david.NetworkCheck.desktop"
+
+mkdir -p "$NETWORK_DESKTOP_DIR"
+cat > "$NETWORK_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Network Check + Wipe Auto + Audio Test
+Comment=Uwuntu Netzwerk-, Wipe- und Audio-Diagnose
+Exec=$HOME/.local/bin/network-check.sh
+Icon=network-transmit-receive-symbolic
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.david.NetworkCheck
+Categories=Utility;System;
+NoDisplay=false
+EOF
+chmod 0644 "$NETWORK_DESKTOP_FILE"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$NETWORK_DESKTOP_DIR" >/dev/null 2>&1 || true
+fi
+
 TMP_PY="$(mktemp /tmp/network-check-XXXXXX.py)"
 trap 'rm -f "$TMP_PY"' EXIT
 
@@ -132,14 +160,16 @@ from gi.repository import Gtk, GLib, Gdk, Pango
 
 import os
 import re
+import json
 import signal
 import subprocess
 import threading
 import time
 import queue
+import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.30"
+VERSION = "2.57"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -251,6 +281,18 @@ def format_mbps(value, decimals=0):
     if decimals:
         return f"{value:.1f} Mbps"
     return f"{value:,.0f}".replace(",", ".") + " Mbps"
+
+
+def format_link_speed(value):
+    """LAN/WLAN-Link kompakt anzeigen: ab 1000 Mbps in Gbps."""
+    if value is None:
+        return "--"
+    if value >= 1000.0:
+        gbps = value / 1000.0
+        if abs(gbps - round(gbps)) < 0.01:
+            return f"{int(round(gbps))} Gbps"
+        return f"{gbps:.1f} Gbps"
+    return format_mbps(value, decimals=0)
 
 def get_devices():
     """
@@ -405,13 +447,21 @@ class ConnectionCard:
         self.interface_label.add_css_class("interface")
 
         identity.append(self.title_label)
-        identity.append(self.interface_label)
+        # Interface-Name wird intern weiter gepflegt, aber nicht mehr sichtbar
+        # angezeigt. Im kompakten LAN/WLAN-Zweispaltenlayout zählt jeder Pixel.
+        self.interface_label.set_visible(False)
 
         self.state_label = Gtk.Label(label="CHECKING")
-        # Nach dem kompakten Horizontal-Layout ist genug Platz vorhanden:
-        # Statusmeldungen wieder vollständig ausschreiben, ohne Ellipse.
-        self.state_label.set_ellipsize(Pango.EllipsizeMode.NONE)
-        self.state_label.set_max_width_chars(24)
+        # Wechselnde Texte wie CHECKING/DOWNLOAD/UPLOAD dürfen die Kartenbreite
+        # nicht verändern. Breite bleibt stabil, bei sehr kleinem Fenster wird
+        # nur der Text selbst gekürzt.
+        # Feste Pixelbreite statt Zeichenbreite: Pango bemisst
+        # width_chars nicht exakt nach dem tatsächlichen Text und kürzte
+        # "NICHT VERBUNDEN" trotz rechnerisch ausreichender Zeichenanzahl.
+        self.state_label.set_size_request(132, -1)
+        self.state_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.state_label.set_xalign(1.0)
+        self.state_label.set_halign(Gtk.Align.END)
         self.state_label.add_css_class("badge")
         self.set_widget_class(self.state_label, "warn")
 
@@ -421,6 +471,7 @@ class ConnectionCard:
 
         metrics = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
         metrics.set_homogeneous(True)
+        self.metric_boxes = {}
 
         self.link_value = self.metric(metrics, "LINK")
         self.ping_value = self.metric(metrics, "PING")
@@ -441,8 +492,9 @@ class ConnectionCard:
         self.note_label = Gtk.Label(label="")
         self.note_label.set_xalign(0)
         self.note_label.set_wrap(False)
+        self.note_label.set_hexpand(True)
         self.note_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self.note_label.set_max_width_chars(80)
+        self.note_label.set_max_width_chars(1)
         self.note_label.add_css_class("note")
         self.root.append(self.note_label)
 
@@ -453,12 +505,17 @@ class ConnectionCard:
         cap = Gtk.Label(label=caption)
         cap.add_css_class("metric-caption")
         value = Gtk.Label(label="--")
+        value.set_width_chars(8)
+        value.set_max_width_chars(8)
+        value.set_ellipsize(Pango.EllipsizeMode.END)
+        value.set_xalign(0.5)
         value.add_css_class("metric-value")
         value.add_css_class("neutral")
 
         box.append(cap)
         box.append(value)
         parent.append(box)
+        self.metric_boxes[caption.lower()] = box
         return value
 
     def set_widget_class(self, widget, klass):
@@ -778,15 +835,16 @@ def wipe_format_battery_power(power_w, state):
 def wipe_battery_info():
     rc, out, _ = wipe_run(["upower", "-e"])
     if rc != 0:
-        return None, None, None, None
+        return None, None, None, None, None
     bat = next((line.strip() for line in out.splitlines() if "BAT" in line), None)
     if not bat:
-        return None, None, None, None
+        return None, None, None, None, None
     rc, info, _ = wipe_run(["upower", "-i", bat])
     if rc != 0:
-        return None, None, None, None
+        return None, None, None, None, None
 
     health = None
+    percentage = None
     state = None
     time_to_empty = None
     time_to_full = None
@@ -799,6 +857,13 @@ def wipe_battery_info():
                 health = float(m.group(1).replace(",", "."))
             except Exception:
                 health = None
+
+        m = re.match(r"\s*percentage:\s*([0-9.,]+)%", line, re.I)
+        if m:
+            try:
+                percentage = float(m.group(1).replace(",", "."))
+            except Exception:
+                percentage = None
 
         m = re.match(r"\s*state:\s*(.+?)\s*$", line, re.I)
         if m:
@@ -831,7 +896,13 @@ def wipe_battery_info():
     elif state in {"charging", "pending-charge"}:
         remaining = time_to_full
 
-    return health, state, wipe_compact_battery_time(remaining), power_w
+    return (
+        health,
+        percentage,
+        state,
+        wipe_compact_battery_time(remaining),
+        power_w,
+    )
 
 def wipe_disk_details(disk):
     if not disk or not Path(disk).exists():
@@ -898,10 +969,18 @@ class WipeCompactPanel:
 
         self.battery_value = Gtk.Label(label="--")
         self.battery_value.set_xalign(0.5)
-        self.battery_value.set_size_request(245, -1)
+        self.battery_value.set_size_request(190, -1)
         self.battery_value.set_hexpand(False)
         self.battery_value.add_css_class("wipe-big")
         battery_metrics.append(self.battery_value)
+
+        self.battery_soc = Gtk.Label(label="-- SoC")
+        self.battery_soc.set_xalign(0.5)
+        self.battery_soc.set_size_request(135, -1)
+        self.battery_soc.set_hexpand(False)
+        self.battery_soc.add_css_class("wipe-big")
+        self.battery_soc.add_css_class("neutral")
+        battery_metrics.append(self.battery_soc)
 
         self.battery_state = Gtk.Label(label="--")
         self.battery_state.set_xalign(0.5)
@@ -956,9 +1035,20 @@ class WipeCompactPanel:
             spacing=4,
         )
         self.action_area.set_halign(Gtk.Align.END)
+        self.action_area.set_valign(Gtk.Align.CENTER)
+        # In allen Wipe-Zuständen dieselbe Zeilenhöhe reservieren:
+        # LÖSCHEN, Bestätigung und leere Aktionsfläche nach Erfolg dürfen
+        # die DATENTRÄGER-Karte nicht mehr in der Höhe verändern.
+        self.action_area.set_size_request(-1, 36)
 
         self.wipe_button = Gtk.Button(label="LÖSCHEN")
         self.wipe_button.add_css_class("danger-action")
+        # Der Fokus-Outline liegt 3 px außen plus 2 px Offset. Diese 5 px
+        # werden dauerhaft reserviert, ohne das bewährte Fokus-CSS zu ändern.
+        self.wipe_button.set_margin_start(5)
+        self.wipe_button.set_margin_end(5)
+        self.wipe_button.set_margin_top(3)
+        self.wipe_button.set_margin_bottom(3)
         self.wipe_button.connect("clicked", self.on_wipe_clicked)
         self.wipe_button.connect(
             "notify::has-focus",
@@ -988,7 +1078,7 @@ class WipeCompactPanel:
         widget.add_css_class(klass)
 
     def refresh_battery(self):
-        health, state, remaining, power_w = wipe_battery_info()
+        health, percentage, state, remaining, power_w = wipe_battery_info()
         power_text = wipe_format_battery_power(power_w, state)
 
         self.set_soh_alert(
@@ -1013,6 +1103,13 @@ class WipeCompactPanel:
             self.battery_note.set_text(
                 "Battery Health innerhalb der Prüfgrenze."
             )
+
+        if percentage is None:
+            self.battery_soc.set_text("-- SoC")
+            self.set_class(self.battery_soc, "warn")
+        else:
+            self.battery_soc.set_text(f"{percentage:.0f} % SoC")
+            self.set_class(self.battery_soc, "neutral")
 
         # Dieselben deutschen UPower-Zustände wie im Standalone-Wipe.
         if state == "fully-charged":
@@ -1312,6 +1409,316 @@ class WipeCompactPanel:
         return False
 
 
+
+# ============================================================
+# Audio – kompakte Experiment-Leiste im Network/Wipe-Fenster
+# ============================================================
+AUDIO_ENGINE_APP_ID = "com.david.UwuntuAudioEngineExperiment"
+AUDIO_UI_STATE_FILE = (
+    Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp")
+    / "uwuntu_audio_engine_ui.json"
+)
+
+class CompactAudioPanel:
+    def __init__(self):
+        self.waveform = []
+        self.wave_color = "orange"
+        self.last_engine_start = 0.0
+        self.created_at = time.monotonic()
+        self.button_states = {
+            "left": "orange",
+            "both": "orange",
+            "right": "orange",
+            "auto": "orange",
+        }
+
+        self.root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+        )
+        self.root.set_hexpand(True)
+        self.root.set_vexpand(False)
+        self.root.add_css_class("card")
+
+        title = Gtk.Label(label="AUDIO")
+        title.set_xalign(0)
+        title.add_css_class("card-title")
+        self.root.append(title)
+
+        audio_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=5,
+        )
+        audio_row.set_hexpand(True)
+        audio_row.set_vexpand(False)
+
+        self.wave = Gtk.DrawingArea()
+        self.wave.set_content_width(210)
+        self.wave.set_content_height(88)
+        self.wave.set_hexpand(True)
+        self.wave.set_vexpand(False)
+        self.wave.set_draw_func(self.draw_wave)
+        audio_row.append(self.wave)
+
+        self.buttons = {}
+        button_grid = Gtk.Grid()
+        button_grid.set_row_spacing(4)
+        button_grid.set_column_spacing(4)
+        button_grid.set_row_homogeneous(True)
+        button_grid.set_column_homogeneous(True)
+        button_grid.set_hexpand(False)
+        button_grid.set_vexpand(True)
+
+        specs = (
+            ("left", "← LINKS", 0, 0),
+            ("right", "RECHTS →", 1, 0),
+            ("both", "↑ MITTE", 0, 1),
+            ("auto", "AUTO ↓", 1, 1),
+        )
+        for action, label, column, row in specs:
+            button = Gtk.Button(label=label)
+            button.set_focusable(False)
+            button.set_hexpand(True)
+            button.set_vexpand(True)
+            button.add_css_class("audio-mini")
+            button.add_css_class("audio-orange")
+            button.connect(
+                "clicked",
+                lambda _button, value=action: self.trigger(value),
+            )
+            self.buttons[action] = button
+            button_grid.attach(button, column, row, 1, 1)
+
+        audio_row.append(button_grid)
+
+        # Der normale Tiling-Slot startet die Engine parallel. NC wartet
+        # zunächst kurz darauf und startet sie nur selbst, falls der Slot
+        # nicht läuft (z. B. bei einzeln geöffnetem Network Check).
+        self.root.append(audio_row)
+
+        GLib.timeout_add(16, self.poll_state)
+
+    def ensure_engine(self):
+        try:
+            if AUDIO_UI_STATE_FILE.exists():
+                if time.time() - AUDIO_UI_STATE_FILE.stat().st_mtime <= 2.5:
+                    return
+        except Exception:
+            pass
+
+        now = time.monotonic()
+        if now - self.last_engine_start < 2.0:
+            return
+        self.last_engine_start = now
+
+        script = Path.home() / ".local/bin/uwuntu-audio-test.sh"
+        if not script.exists():
+            return
+
+        env = os.environ.copy()
+        env["UWUNTU_AUDIO_ENGINE"] = "1"
+        try:
+            subprocess.Popen(
+                [str(script)],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def trigger(self, action):
+        self.ensure_engine()
+        try:
+            subprocess.Popen(
+                [
+                    "gapplication",
+                    "action",
+                    AUDIO_ENGINE_APP_ID,
+                    action,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def set_button_state(self, action, state):
+        button = self.buttons.get(action)
+        if button is None:
+            return
+        if state not in {"orange", "blue", "green", "red"}:
+            state = "orange"
+        if self.button_states.get(action) == state:
+            return
+        for css_class in (
+            "audio-orange",
+            "audio-blue",
+            "audio-green",
+            "audio-red",
+        ):
+            button.remove_css_class(css_class)
+        button.add_css_class("audio-" + state)
+        self.button_states[action] = state
+
+    def poll_state(self):
+        data = None
+        try:
+            if AUDIO_UI_STATE_FILE.exists():
+                age = time.time() - AUDIO_UI_STATE_FILE.stat().st_mtime
+                if age <= 2.5:
+                    data = json.loads(
+                        AUDIO_UI_STATE_FILE.read_text(encoding="utf-8")
+                    )
+        except Exception:
+            data = None
+
+        if not isinstance(data, dict):
+            self.waveform = []
+            self.wave_color = "orange"
+            if time.monotonic() - self.created_at >= 1.5:
+                self.ensure_engine()
+            self.wave.queue_draw()
+            return True
+
+        states = data.get("buttons") or {}
+        for action in self.buttons:
+            self.set_button_state(
+                action,
+                str(states.get(action, "orange")),
+            )
+
+        values = data.get("waveform")
+        if isinstance(values, list):
+            cleaned = []
+            for value in values[:512]:
+                try:
+                    cleaned.append(max(-1.0, min(1.0, float(value))))
+                except Exception:
+                    pass
+            self.waveform = cleaned
+        else:
+            self.waveform = []
+
+        self.wave_color = str(data.get("color") or "orange")
+        self.wave.queue_draw()
+        return True
+
+    def draw_wave(self, _area, cr, width, height):
+        colors = {
+            "green": (0.38, 0.83, 0.42),
+            "blue": (0.35, 0.64, 1.0),
+            "red": (1.0, 0.30, 0.30),
+            "orange": (0.96, 0.65, 0.14),
+        }
+
+        # Dunklen Waveform-Bereich wie die übrigen Karten abrunden und
+        # sämtliche Zeichenoperationen auf diese Fläche begrenzen.
+        radius = min(8.0, width / 2.0, height / 2.0)
+        cr.new_sub_path()
+        cr.arc(width - radius, radius, radius, -math.pi / 2.0, 0.0)
+        cr.arc(
+            width - radius,
+            height - radius,
+            radius,
+            0.0,
+            math.pi / 2.0,
+        )
+        cr.arc(
+            radius,
+            height - radius,
+            radius,
+            math.pi / 2.0,
+            math.pi,
+        )
+        cr.arc(
+            radius,
+            radius,
+            radius,
+            math.pi,
+            3.0 * math.pi / 2.0,
+        )
+        cr.close_path()
+        cr.set_source_rgb(0.09, 0.09, 0.11)
+        cr.fill_preserve()
+        cr.clip()
+
+        # Horizontal die komplette dunkle Fläche nutzen. Nur oben/unten bleibt
+        # der kleine Abstand für die maximale Waveform-Amplitude erhalten.
+        x0 = 0.0
+        x1 = float(width)
+        y0 = height * 0.05
+        y1 = height - y0
+        plot_width = max(2.0, x1 - x0)
+        plot_height = max(2.0, y1 - y0)
+        mid = y0 + plot_height / 2.0
+
+        # Testweise wieder das dezente Gitter des früheren
+        # Audio-Renderers hinter die Waveform legen.
+        cr.set_source_rgb(0.16, 0.16, 0.19)
+        cr.set_line_width(1.0)
+
+        for index in range(1, 10):
+            x = x0 + plot_width * index / 10.0
+            cr.move_to(x, y0)
+            cr.line_to(x, y1)
+            cr.stroke()
+
+        for fraction in (0.25, 0.75):
+            y = y0 + plot_height * fraction
+            cr.move_to(x0, y)
+            cr.line_to(x1, y)
+            cr.stroke()
+
+        # Die Nulllinie bleibt etwas heller/stärker als das restliche Gitter.
+        cr.set_source_rgb(0.24, 0.24, 0.28)
+        cr.set_line_width(1.2)
+        cr.move_to(x0, mid)
+        cr.line_to(x1, mid)
+        cr.stroke()
+
+        values = self.waveform
+        if len(values) < 2:
+            return
+
+        # Wie vorher etwa ein Stützpunkt je 1,5 Pixel. Die Engine liefert
+        # genügend Samples, sodass die Kurve auch bei breiter Audio-Leiste
+        # nicht zu einem spitzen Polygon mit wenigen Ecken wird.
+        point_count = min(
+            len(values),
+            max(2, int(plot_width / 1.5)),
+        )
+        if point_count < len(values):
+            last = len(values) - 1
+            indices = [
+                round(index * last / max(1, point_count - 1))
+                for index in range(point_count)
+            ]
+            draw_values = [values[index] for index in indices]
+        else:
+            draw_values = values
+
+        color = colors.get(self.wave_color, colors["orange"])
+        cr.set_source_rgb(*color)
+        cr.set_line_width(2.5)
+        cr.set_line_join(1)  # cairo.LINE_JOIN_ROUND
+        cr.set_line_cap(1)   # cairo.LINE_CAP_ROUND
+
+        step = plot_width / max(1, len(draw_values) - 1)
+        amplitude = plot_height * 0.45
+        for index, value in enumerate(draw_values):
+            x = x0 + index * step
+            y = max(y0 + 1.5, min(y1 - 1.5, mid - value * amplitude))
+            if index == 0:
+                cr.move_to(x, y)
+            else:
+                cr.line_to(x, y)
+        cr.stroke()
+
 class NetworkCheckApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="com.david.NetworkCheck")
@@ -1373,14 +1780,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.30 + Wipe Auto v3.33")
+        self.window.set_title("Network Check v2.57 + Wipe Auto v3.33 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.30 + Wipe Auto v3.33")
+        title_label = Gtk.Label(label="Network Check v2.57 + Wipe Auto v3.33 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -1426,13 +1833,26 @@ class NetworkCheckApp(Gtk.Application):
 
         self.cards["lan"] = ConnectionCard("LAN")
         self.cards["wifi"] = ConnectionCard("WLAN")
+        self.attach_network_metric_clicks()
 
         for key in ("lan", "wifi"):
             self.cards[key].root.set_hexpand(True)
             self.cards[key].root.set_vexpand(False)
 
-        content.append(self.cards["lan"].root)
-        content.append(self.cards["wifi"].root)
+        # LAN und WLAN teilen sich im Experiment eine Zeile. Dadurch wird
+        # genau der Platz frei, den die schmale Audio-Leiste unten benötigt.
+        network_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=3,
+        )
+        network_row.set_hexpand(True)
+        network_row.set_vexpand(False)
+        # LAN und WLAN bleiben bei jeder Live-Anzeige exakt gleich breit.
+        # Die Aufteilung folgt weiter der verfügbaren Fensterbreite.
+        network_row.set_homogeneous(True)
+        network_row.append(self.cards["lan"].root)
+        network_row.append(self.cards["wifi"].root)
+        content.append(network_row)
 
         self.wipe_panel = WipeCompactPanel(self.window)
         self.wipe_panel.refresh_button = self.header_refresh_button
@@ -1440,6 +1860,11 @@ class NetworkCheckApp(Gtk.Application):
         self.wipe_panel.root.set_hexpand(True)
         self.wipe_panel.root.set_vexpand(False)
         content.append(self.wipe_panel.root)
+
+        # Audio bleibt dauerhaft sichtbar: Überschrift oben, darunter
+        # Waveform ab ganz links und die vier Testbuttons.
+        self.audio_panel = CompactAudioPanel()
+        content.append(self.audio_panel.root)
 
         shell.append(content)
 
@@ -1531,6 +1956,35 @@ class NetworkCheckApp(Gtk.Application):
             font-weight: 800;
         }
 
+        button.audio-mini {
+            min-height: 34px;
+            min-width: 82px;
+            padding: 2px 7px;
+            border-radius: 7px;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        button.audio-mini.audio-orange {
+            background: #232329;
+            color: #f5a623;
+            border: 1px solid #f5a623;
+        }
+        button.audio-mini.audio-blue {
+            background: #232329;
+            color: #5aa2ff;
+            border: 1px solid #5aa2ff;
+        }
+        button.audio-mini.audio-green {
+            background: #232329;
+            color: #61d36b;
+            border: 1px solid #61d36b;
+        }
+        button.audio-mini.audio-red {
+            background: #232329;
+            color: #ff4c4c;
+            border: 1px solid #ff4c4c;
+        }
+
         window {
             background: #101216;
             color: #f4f4f5;
@@ -1595,16 +2049,16 @@ class NetworkCheckApp(Gtk.Application):
         .metric {
             background: #111318;
             border-radius: 8px;
-            padding: 4px 6px;
+            padding: 3px 4px;
         }
         .metric-caption {
             color: #9d9da7;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 600;
         }
 
         .metric-value {
-            font-size: 17px;
+            font-size: 14px;
             font-weight: 800;
         }
 
@@ -1667,9 +2121,9 @@ class NetworkCheckApp(Gtk.Application):
         }
 
         button.danger-action {
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 800;
-            padding: 4px 10px;
+            padding: 0px 9px;
             border-radius: 8px;
         }
 
@@ -1717,6 +2171,77 @@ class NetworkCheckApp(Gtk.Application):
     # --------------------------------------------------------
     # Netzwerkzustand
     # --------------------------------------------------------
+
+    def attach_network_metric_clicks(self):
+        """Bestehende Messfelder unsichtbar für Maus und Touch aktivieren."""
+        phase_map = {
+            "link": "link",
+            "ping": "ping",
+            "download": "down",
+            "upload": "up",
+        }
+        for kind, card in self.cards.items():
+            for box_name, phase in phase_map.items():
+                box = card.metric_boxes.get(box_name)
+                if box is None:
+                    continue
+                gesture = Gtk.GestureClick.new()
+                gesture.set_button(1)
+                gesture.connect(
+                    "released",
+                    self.on_network_metric_clicked,
+                    kind,
+                    phase,
+                )
+                box.add_controller(gesture)
+
+    def connected_iface_for_kind(self, kind):
+        devices = get_devices()
+        device_type = "ethernet" if kind == "lan" else "wifi"
+        preferred = self.results[kind].get("iface")
+
+        for dev in devices[device_type]:
+            if dev["connected"] and dev["iface"] == preferred:
+                return preferred
+        for dev in devices[device_type]:
+            if dev["connected"]:
+                return dev["iface"]
+        return None
+
+    def on_network_metric_clicked(
+        self,
+        _gesture,
+        n_press,
+        _x,
+        _y,
+        kind,
+        phase,
+    ):
+        if n_press != 1:
+            return
+
+        iface = self.connected_iface_for_kind(kind)
+        if not iface:
+            card = self.cards[kind]
+            card.set_state("NICHT VERBUNDEN", "warn")
+            card.note_label.set_text(
+                "Einzeltest nicht möglich: keine aktive Verbindung."
+            )
+            return
+
+        if kind in self.testing_kinds:
+            log(
+                f"Einzeltest ignoriert: {kind.upper()} läuft bereits "
+                f"({phase.upper()})"
+            )
+            return
+
+        self.enqueue_test(
+            iface,
+            kind,
+            f"manual click {phase}",
+            phase=phase,
+        )
 
     def best_device(self, device_list):
         if not device_list:
@@ -1834,7 +2359,7 @@ class NetworkCheckApp(Gtk.Application):
                 else:
                     klass = "good" if speed >= WIFI_LINK_MIN else "bad"
 
-                card.set_metric("link", format_mbps(speed), klass)
+                card.set_metric("link", format_link_speed(speed), klass)
         # Wenn gerade nicht getestet wird, vorheriges Testergebnis erhalten.
         if kind not in self.testing_kinds:
             if result["tested"]:
@@ -1863,7 +2388,7 @@ class NetworkCheckApp(Gtk.Application):
             )
 
         return self.max_wifi_link[iface]
-    def enqueue_test(self, iface, kind, reason):
+    def enqueue_test(self, iface, kind, reason, phase="full"):
         key = (iface, kind)
 
         if key in self.pending:
@@ -1872,8 +2397,11 @@ class NetworkCheckApp(Gtk.Application):
             return
 
         self.pending.add(key)
-        self.test_queue.put((iface, kind, reason))
-        log(f"Test eingeplant: {kind.upper()} {iface} ({reason})")
+        self.test_queue.put((iface, kind, reason, phase))
+        log(
+            f"Test eingeplant: {kind.upper()} {iface} "
+            f"({reason}, phase={phase})"
+        )
 
     def reset_refresh_values(self, devices):
         """Alle sichtbaren und internen Speedtest-Werte sofort verwerfen.
@@ -1957,7 +2485,7 @@ class NetworkCheckApp(Gtk.Application):
     def worker(self):
         while not self.stop_event.is_set():
             try:
-                iface, kind, reason = self.test_queue.get(timeout=0.5)
+                iface, kind, reason, phase = self.test_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
 
@@ -1983,13 +2511,109 @@ class NetworkCheckApp(Gtk.Application):
             self.testing_kinds.add(kind)
             self.testing_ifaces[kind] = iface
             try:
-                self.run_full_test(iface, kind, reason)
+                if phase == "full":
+                    self.run_full_test(iface, kind, reason)
+                else:
+                    self.run_single_metric_test(
+                        iface,
+                        kind,
+                        phase,
+                        reason,
+                    )
             except Exception as e:
                 log(f"Testfehler {iface}: {e!r}")
                 GLib.idle_add(self.mark_test_error, kind, iface, str(e))
             finally:
                 self.testing_kinds.discard(kind)
                 self.testing_ifaces.pop(kind, None)
+    def run_single_metric_test(self, iface, kind, phase, reason):
+        log(
+            f"START EINZEL {kind.upper()} {iface}: "
+            f"{phase.upper()} ({reason})"
+        )
+
+        result = self.results[kind]
+        result["iface"] = iface
+
+        if phase == "link":
+            GLib.idle_add(
+                self.mark_testing,
+                kind,
+                iface,
+                "LINK",
+            )
+            current_link = link_speed(iface, kind)
+            if kind == "wifi":
+                # Manueller LINK-Klick soll den aktuellen Wert neu lesen und
+                # nicht das Maximum eines früheren Speedtests konservieren.
+                self.max_wifi_link.pop(iface, None)
+                if current_link is not None:
+                    self.max_wifi_link[iface] = current_link
+            result["link"] = current_link
+            GLib.idle_add(
+                self.update_link_result,
+                kind,
+                current_link,
+            )
+
+        elif phase == "ping":
+            GLib.idle_add(
+                self.mark_ping_testing,
+                kind,
+                iface,
+            )
+            latency = self.measure_ping(iface)
+            result["ping"] = latency
+            result["ping_ok"] = latency is not None
+            GLib.idle_add(
+                self.update_ping_result,
+                kind,
+                latency,
+            )
+
+        elif phase in ("down", "up"):
+            direction = "download" if phase == "down" else "upload"
+            label = "DOWNLOAD" if phase == "down" else "UPLOAD"
+            GLib.idle_add(
+                self.mark_testing,
+                kind,
+                iface,
+                label,
+            )
+            speed = self.measure_phase(
+                iface,
+                kind,
+                direction,
+            )
+            result[phase] = speed
+            GLib.idle_add(
+                self.update_phase_final_value,
+                kind,
+                phase,
+                speed,
+            )
+        else:
+            raise ValueError(f"Unbekannte Einzeltest-Phase: {phase}")
+
+        all_measured = (
+            result["link"] is not None
+            and result["ping_ok"] is not None
+            and result["down"] is not None
+            and result["up"] is not None
+        )
+        if all_measured:
+            result["tested"] = True
+            result["passed"] = self.result_passes(kind)
+        else:
+            result["tested"] = False
+            result["passed"] = None
+
+        GLib.idle_add(
+            self.finish_single_metric_ui,
+            kind,
+            phase,
+        )
+
     def run_full_test(self, iface, kind, reason):
         log(f"START {kind.upper()} {iface} ({reason})")
 
@@ -2516,9 +3140,9 @@ class NetworkCheckApp(Gtk.Application):
         # Laufender Test = Blau. Bereits abgeschlossene Werte behalten
         # ihre fertige Grün/Orange/Rot-Bewertung.
         if phase == "DOWNLOAD":
-            card.set_metric("down", "0.0 Mbps", "live")
+            card.set_metric("down", "0 Mbps", "live")
         elif phase == "UPLOAD":
-            card.set_metric("up", "0.0 Mbps", "live")
+            card.set_metric("up", "0 Mbps", "live")
 
         self.global_status.set_text(f"{kind.upper()} {iface}: {phase}")
         return False
@@ -2526,8 +3150,41 @@ class NetworkCheckApp(Gtk.Application):
         card = self.cards[kind]
         card.set_metric(
             "link",
-            format_mbps(speed),
+            format_link_speed(speed),
             self.metric_class(kind, "link", speed),
+        )
+        return False
+
+    def update_link_result(self, kind, speed):
+        if speed is None:
+            self.cards[kind].set_metric("link", "--", "warn")
+            return False
+        return self.update_link(kind, speed)
+
+    def finish_single_metric_ui(self, kind, phase):
+        result = self.results[kind]
+        all_measured = (
+            result["link"] is not None
+            and result["ping_ok"] is not None
+            and result["down"] is not None
+            and result["up"] is not None
+        )
+        if all_measured:
+            return self.apply_result_to_ui(kind)
+
+        card = self.cards[kind]
+        card.set_state("VERBUNDEN", "neutral")
+        labels = {
+            "link": "LINK",
+            "ping": "PING",
+            "down": "DOWNLOAD",
+            "up": "UPLOAD",
+        }
+        card.note_label.set_text(
+            f"{labels.get(phase, phase.upper())} neu gemessen."
+        )
+        self.global_status.set_text(
+            f"{kind.upper()} {labels.get(phase, phase.upper())} abgeschlossen"
         )
         return False
 
@@ -2570,7 +3227,7 @@ class NetworkCheckApp(Gtk.Application):
         # Erst der fertige Messwert wird Grün/Orange/Rot bewertet.
         card.set_metric(
             metric,
-            format_mbps(speed, decimals=1),
+            format_mbps(speed, decimals=0),
             "live",
         )
         return False
@@ -2597,7 +3254,7 @@ class NetworkCheckApp(Gtk.Application):
         card = self.cards[kind]
         card.set_metric(
             "link",
-            format_mbps(r["link"]),
+            format_link_speed(r["link"]),
             self.metric_class(kind, "link", r["link"]),
         )
 

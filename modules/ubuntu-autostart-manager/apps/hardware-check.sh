@@ -65,6 +65,56 @@ uwuntu_set_dock_autohide() {
 
 uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 
+# ------------------------------------------------------------
+# GNOME-/Taskleisten-Identitäten für Hardware Check und Benchmark
+# ------------------------------------------------------------
+# Benchmark übernimmt bewusst das bisherige Hardware-Check-Icon. Der normale
+# Hardware Check bekommt ein eigenes schlichtes Computer-Symbol, passend zu
+# den übrigen Uwuntu-Diagnose-Apps.
+DESKTOP_DIR="$HOME/.local/share/applications"
+mkdir -p "$DESKTOP_DIR"
+
+if [ "${UWUNTU_BENCHMARK_WINDOW:-0}" = "1" ]; then
+    BENCHMARK_DESKTOP_FILE="$DESKTOP_DIR/com.david.UwuntuHardwareBenchmark.desktop"
+
+    cat > "$BENCHMARK_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Hardware Benchmark
+Comment=Uwuntu CPU/RAM/GPU Hardware Benchmark
+Exec=env UWUNTU_BENCHMARK_WINDOW=1 $HOME/.local/bin/hardware-check.sh
+Icon=utilities-system-monitor-symbolic
+Terminal=false
+NoDisplay=false
+StartupNotify=true
+StartupWMClass=com.david.UwuntuHardwareBenchmark
+Categories=Utility;System;
+EOF
+    chmod 0644 "$BENCHMARK_DESKTOP_FILE"
+else
+    HARDWARE_DESKTOP_FILE="$DESKTOP_DIR/com.david.HardwareCheck.desktop"
+
+    cat > "$HARDWARE_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Hardware Check
+Comment=Uwuntu Hardware-Diagnose
+Exec=$HOME/.local/bin/hardware-check.sh
+Icon=computer-symbolic
+Terminal=false
+StartupNotify=false
+X-GNOME-UsesNotifications=false
+StartupWMClass=com.david.HardwareCheck
+Categories=Utility;System;
+NoDisplay=false
+EOF
+    chmod 0644 "$HARDWARE_DESKTOP_FILE"
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+fi
+
 TMP_PY="$(mktemp /tmp/hardware-check.XXXXXX.py)"
 trap 'rm -f "$TMP_PY"' EXIT
 cat > "$TMP_PY" <<'PY'
@@ -92,8 +142,36 @@ import threading
 import time
 import select
 
-APP_ID = "com.david.HardwareCheck"
+BENCHMARK_WINDOW_MODE = os.environ.get("UWUNTU_BENCHMARK_WINDOW") == "1"
+APP_ID = (
+    "com.david.UwuntuHardwareBenchmark"
+    if BENCHMARK_WINDOW_MODE
+    else "com.david.HardwareCheck"
+)
+AUDIO_ACTION_APP_ID = "com.david.UwuntuAudioEngineExperiment"
+BENCHMARK_ACTION_APP_ID = "com.david.UwuntuHardwareBenchmark"
 LOG_FILE = Path.home() / "hardware_check.log"
+
+# Einheitliche Uwuntu-Statuspalette.
+UWUNTU_STATUS_HEX = {
+    "blue": "#5aa2ff",
+    "green": "#61d36b",
+    "orange": "#f5a623",
+    "red": "#ff4c4c",
+}
+UWUNTU_STATUS_RGB = {
+    "blue": (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0),
+    "green": (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0),
+    "orange": (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0),
+    "red": (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0),
+}
+
+# CPU und GPU verwenden dieselben thermischen Statusgrenzen.
+TEMP_WARN_C = 85.0
+TEMP_CRITICAL_C = 95.0
+# SSDs haben bewusst eigene niedrigere Grenzwerte.
+SSD_TEMP_WARN_C = 60.0
+SSD_TEMP_CRITICAL_C = 70.0
 
 SYS_USB = Path("/sys/bus/usb/devices")
 SYS_TYPEC = Path("/sys/class/typec")
@@ -201,6 +279,25 @@ label.benchmark-status.status-green {
 label.benchmark-result.status-red,
 label.benchmark-status.status-red {
     color: #ff4c4c;
+}
+
+progressbar.benchmark-progress trough {
+    background: #34343c;
+    min-height: 6px;
+    border-radius: 4px;
+}
+progressbar.benchmark-progress progress {
+    background: #5aa2ff;
+    border-radius: 4px;
+}
+progressbar.benchmark-progress.progress-complete progress {
+    background: #61d36b;
+}
+progressbar.benchmark-progress.progress-failed progress {
+    background: #ff4c4c;
+}
+progressbar.benchmark-progress.progress-cancelled progress {
+    background: #f5a623;
 }
 
 .usb-row {
@@ -3108,27 +3205,63 @@ class App(Gtk.Application):
         }
 
         self.keyboard_focus_widget = None
+
+        # Die separate Benchmark-Instanz wird von der normalen HC-Instanz
+        # über GApplication angesprochen. Dadurch funktionieren B/R/A global,
+        # auch wenn Network, Kamera oder ein anderes Diagnosefenster Fokus hat.
+        self.last_benchmark_shortcut_at = {
+            "cpu": 0.0,
+            "ram": 0.0,
+            "all": 0.0,
+        }
+        if BENCHMARK_WINDOW_MODE:
+            for action_name in ("cpu", "ram", "all"):
+                app_action = Gio.SimpleAction.new(action_name, None)
+                app_action.connect(
+                    "activate",
+                    self.on_benchmark_app_action,
+                    action_name,
+                )
+                self.add_action(app_action)
+
     def do_activate(self):
         if self.window:
             self.window.present()
             return
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Hardware Check v4.5.126")
+        window_title = (
+            "Hardware Benchmark v4.5.142"
+            if BENCHMARK_WINDOW_MODE
+            else "Hardware Check v4.5.142"
+        )
+        self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
 
         # Einheitliche Titelleiste wie Network/Wipe und Audio.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Hardware Check v4.5.126")
+        title_label = Gtk.Label(
+            label=(
+                "Hardware Benchmark v4.5.142"
+                if BENCHMARK_WINDOW_MODE
+                else "Hardware Check v4.5.142"
+            )
+        )
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
         self.header_refresh_button = Gtk.Button(label="REFRESH")
         self.header_refresh_button.add_css_class("refresh-button")
         self.header_refresh_button.set_focusable(False)
-        self.header_refresh_button.connect("clicked", self.reset_all)
+        if BENCHMARK_WINDOW_MODE:
+            self.header_refresh_button.connect(
+                "clicked",
+                lambda *_: self.reset_benchmark_ui(),
+            )
+        else:
+            self.header_refresh_button.connect("clicked", self.reset_all)
         self.header_bar.pack_end(self.header_refresh_button)
 
         self.window.set_titlebar(self.header_bar)
@@ -3143,9 +3276,13 @@ class App(Gtk.Application):
 
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.stack.add_named(self.build_overview(), "overview")
-        self.stack.add_named(self.build_keyboard(), "keyboard")
-        self.stack.add_named(self.build_benchmarks(), "benchmarks")
+        if BENCHMARK_WINDOW_MODE:
+            self.stack.add_named(self.build_benchmarks(), "benchmarks")
+            self.stack.set_visible_child_name("benchmarks")
+        else:
+            self.stack.add_named(self.build_overview(), "overview")
+            self.stack.add_named(self.build_keyboard(), "keyboard")
+            self.stack.add_named(self.build_benchmarks(), "benchmarks")
         # Die Hardware-Test-Buttons dürfen niemals Tastaturfokus bekommen.
         # Dadurch kann z.B. SPACE im Tastatur-Test nicht versehentlich
         # "ÜBERSICHT", "RESET" oder einen anderen Button auslösen.
@@ -3153,25 +3290,31 @@ class App(Gtk.Application):
 
         self.window.set_child(self.stack)
 
-        self.refresh_security()
-        self.refresh_hdmi_status()
-        self.reset_touchpad_test()
-        self.start_touchpad_click_monitors()
-        self.usb_rediscover(reset=True)
-        self.refresh_touch_status()
-        self.refresh_display_status()
-        self.refresh_media_status()
-        self.refresh_sensors()
-        GLib.timeout_add(300, self.poll_usb)
-        GLib.timeout_add(500, self.poll_hdmi_status)
-        GLib.timeout_add(500, self.poll_touch_status)
-        GLib.timeout_add(500, self.poll_display_status)
-        GLib.timeout_add(400, self.poll_media_status)
-        GLib.timeout_add(1000, self.poll_sensors)
-        self.start_power_dialog_helper()
-        self.start_global_input_listener()
-
-        log("Hardware Check gestartet")
+        if BENCHMARK_WINDOW_MODE:
+            # Zweite HC-Instanz nur für die dauerhaft sichtbare Benchmark-Seite.
+            # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
+            # doppelt starten.
+            GLib.timeout_add(1200, self.start_benchmark_window)
+            log("Hardware Benchmark v4.5.142 gestartet")
+        else:
+            self.refresh_security()
+            self.refresh_hdmi_status()
+            self.reset_touchpad_test()
+            self.start_touchpad_click_monitors()
+            self.usb_rediscover(reset=True)
+            self.refresh_touch_status()
+            self.refresh_display_status()
+            self.refresh_media_status()
+            self.refresh_sensors()
+            GLib.timeout_add(300, self.poll_usb)
+            GLib.timeout_add(500, self.poll_hdmi_status)
+            GLib.timeout_add(500, self.poll_touch_status)
+            GLib.timeout_add(500, self.poll_display_status)
+            GLib.timeout_add(400, self.poll_media_status)
+            GLib.timeout_add(1000, self.poll_sensors)
+            self.start_power_dialog_helper()
+            self.start_global_input_listener()
+            log("Hardware Check gestartet")
         # Beim ersten Start nur sichtbar mappen, ohne eine Fokus-/Aktivierungs-
         # Anforderung an GNOME zu senden. Dadurch soll die Shell keinen
         # "Hardware Check ... ist bereit"-Hinweis mehr erzeugen.
@@ -3225,6 +3368,19 @@ class App(Gtk.Application):
             self.disable_button_focus(child)
             child = child.get_next_sibling()
 
+    def add_invisible_click(self, widget, callback):
+        """Maus/Touch-Aktion ohne optische Änderung des bestehenden Widgets."""
+        gesture = Gtk.GestureClick.new()
+        gesture.set_button(1)
+        gesture.connect(
+            "released",
+            lambda _gesture, n_press, _x, _y: (
+                callback() if n_press == 1 else None
+            ),
+        )
+        widget.add_controller(gesture)
+        return gesture
+
     def card(self, title):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         box.add_css_class("card"); box.set_hexpand(True)
@@ -3238,13 +3394,15 @@ class App(Gtk.Application):
         content.set_margin_start(8)
         content.set_margin_end(8)
         content.set_margin_bottom(4)
+        # Beide Übersichtsseiten teilen sich die verfügbare Breite exakt 50/50.
+        # Dadurch liegt die optische Trennung unabhängig vom Inhalt mittig.
+        content.set_homogeneous(True)
         # =====================================================
         # LINKE SPALTE
         # Security -> Webcam/Mic -> Eingabegeräte
         # =====================================================
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        left.set_size_request(285, -1)
-        left.set_hexpand(False)
+        left.set_hexpand(True)
 
         # TPM und Secure Boot bleiben in EINER Karte, bekommen aber – genau
         # wie HDMI und Touchpad – jeweils eine eigene dunkle Status-Kapsel.
@@ -3350,6 +3508,10 @@ class App(Gtk.Application):
         display_row.append(self.display_status_name)
         display_row.append(self.display_status_text)
         display.append(display_row)
+        self.add_invisible_click(
+            display_row,
+            self.start_display_test,
+        )
         left.append(display)
 
         # =====================================================
@@ -3406,6 +3568,10 @@ class App(Gtk.Application):
         # Notebook kein ID_INPUT_TOUCHSCREEN=1 Gerät erkannt wird.
         self.touchscreen_row = touch_row
         self.touchscreen_row.set_visible(False)
+        self.add_invisible_click(
+            touch_row,
+            self.start_touch_test,
+        )
         input_devices.append(touch_row)
 
         # Keyboard wie die übrigen Eingabegeräte.
@@ -3435,6 +3601,10 @@ class App(Gtk.Application):
         kb_row.append(self.keyboard_status_dot)
         kb_row.append(self.keyboard_status_name)
         kb_row.append(self.keyboard_summary)
+        self.add_invisible_click(
+            kb_row,
+            self.show_keyboard,
+        )
         input_devices.append(kb_row)
 
         left.append(input_devices)
@@ -3531,12 +3701,6 @@ class App(Gtk.Application):
             self.sensor_rows[key] = (dot, name, state)
 
         right.append(sensors)
-
-        benchmark_btn = Gtk.Button(label="Benchmark (B)")
-        benchmark_btn.add_css_class("benchmark-open")
-        benchmark_btn.set_hexpand(True)
-        benchmark_btn.connect("clicked", self.show_benchmarks)
-        right.append(benchmark_btn)
 
         content.append(left)
         content.append(right)
@@ -3766,9 +3930,9 @@ class App(Gtk.Application):
                 "NICHT GEFUNDEN",
             )
         else:
-            if cpu_temp >= 95.0:
+            if cpu_temp >= TEMP_CRITICAL_C:
                 color = "red"
-            elif cpu_temp >= 85.0:
+            elif cpu_temp >= TEMP_WARN_C:
                 color = "orange"
             else:
                 color = "blue"
@@ -3837,9 +4001,9 @@ class App(Gtk.Application):
                 "NICHT GEFUNDEN",
             )
         else:
-            if ssd_temp >= 70.0:
+            if ssd_temp >= SSD_TEMP_CRITICAL_C:
                 color = "red"
-            elif ssd_temp >= 60.0:
+            elif ssd_temp >= SSD_TEMP_WARN_C:
                 color = "orange"
             else:
                 color = "blue"
@@ -5721,10 +5885,10 @@ class App(Gtk.Application):
             ("↑", "Audio Test: beide Lautsprecher testen"),
             ("→", "Audio Test: rechten Lautsprecher testen"),
             ("↓", "Audio Test: kompletten Auto-Test starten"),
-            ("B", "Benchmark-Seite öffnen / CPU-Kurztest starten"),
+            ("B", "GLOBAL: CPU-Kurztest im Benchmark-Fenster starten"),
             ("K", "Keyboard-Test global öffnen"),
-            ("R", "RAM-Kurztest auf der Benchmark-Seite starten"),
-            ("A", "ALLE Kurztests auf der Benchmark-Seite starten"),
+            ("R", "GLOBAL: RAM-Kurztest im Benchmark-Fenster starten"),
+            ("A", "GLOBAL: ALLE Kurztests im Benchmark-Fenster starten"),
             ("I", "Systeminformationen anzeigen"),
             ("U", "Uwuntu-Update suchen und installieren"),
             ("G", "Garantieprüfung Dell / Lenovo"),
@@ -5877,10 +6041,10 @@ class App(Gtk.Application):
             color = "red"
         elif normalized.startswith("Suche") or normalized.startswith("Prüfe"):
             color = "orange"
-        elif normalized in {
-            "Bereits aktuell",
-            "GitHub-Version ist älter · kein Update",
-        }:
+        elif (
+            normalized.startswith("Bereits aktuell")
+            or normalized == "GitHub-Version ist älter · kein Update"
+        ):
             color = "green"
         elif normalized.startswith("Update erfolgreich"):
             color = "green"
@@ -5906,10 +6070,10 @@ class App(Gtk.Application):
         self.update_proc = None
 
         if returncode == 0:
-            if last_status in {
-                "Bereits aktuell",
-                "GitHub-Version ist älter · kein Update",
-            }:
+            if (
+                last_status.startswith("Bereits aktuell")
+                or last_status == "GitHub-Version ist älter · kein Update"
+            ):
                 GLib.timeout_add(2500, self.auto_close_update_window)
             return False
 
@@ -6283,6 +6447,65 @@ except Exception:
         """Den lokalen Power-Tasten-Schutz ohne Timer oder Polling abfragen."""
         return time.monotonic() < self.power_dialog_guard_until
 
+    def run_benchmark_shortcut(self, action_name):
+        """B/R/A in der separaten Benchmark-Instanz genau einmal ausführen."""
+        if not BENCHMARK_WINDOW_MODE or self.stack is None:
+            return False
+
+        specs = {
+            "cpu": ("cpu-short", 10.0, "B", "CPU"),
+            "ram": ("ram-short", 10.0, "R", "RAM"),
+            "all": ("all-short", 30.0, "A", "ALLE"),
+        }
+        spec = specs.get(action_name)
+        if spec is None:
+            return False
+
+        now = time.monotonic()
+        if now - self.last_benchmark_shortcut_at.get(action_name, 0.0) < 0.15:
+            return False
+        self.last_benchmark_shortcut_at[action_name] = now
+
+        kind, duration, key_name, label = spec
+        self.start_test(None, kind, duration)
+        log(f"Benchmark global {key_name}: {label} Kurztest gestartet")
+        return False
+
+    def on_benchmark_app_action(self, _action, _parameter, action_name):
+        return self.run_benchmark_shortcut(action_name)
+
+    def send_benchmark_action(self, action):
+        action_name = {
+            "benchmark": "cpu",
+            "ram": "ram",
+            "all": "all",
+        }.get(action)
+        if not action_name:
+            return False
+
+        gapplication = shutil.which("gapplication")
+        if not gapplication:
+            log("Benchmark-Hotkey ignoriert: gapplication fehlt")
+            return False
+
+        try:
+            subprocess.Popen(
+                [
+                    gapplication,
+                    "action",
+                    BENCHMARK_ACTION_APP_ID,
+                    action_name,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            log(f"Globaler Benchmark-Hotkey weitergereicht: {action_name}")
+        except Exception as exc:
+            log(f"Benchmark-Hotkey Fehler ({action_name}): {exc}")
+        return False
+
     def send_audio_action(self, action):
         action_name = {
             "audio-left": "left",
@@ -6303,7 +6526,7 @@ except Exception:
                 [
                     gapplication,
                     "action",
-                    "com.david.UwuntuAudioTest",
+                    AUDIO_ACTION_APP_ID,
                     action_name,
                 ],
                 stdin=subprocess.DEVNULL,
@@ -6416,28 +6639,20 @@ except Exception:
             self.start_display_test()
             return False
 
-        if action == "benchmark":
-            if visible == "benchmarks":
-                self.start_test(None, "cpu-short", 10.0)
-                log("Globaler Hotkey B: CPU Benchmark gestartet")
-            else:
-                self.show_benchmarks()
-                log("Globaler Hotkey B: Benchmark-Seite geöffnet")
+        if action in {"benchmark", "ram", "all"}:
+            benchmark_action = {
+                "benchmark": "cpu",
+                "ram": "ram",
+                "all": "all",
+            }[action]
+            if BENCHMARK_WINDOW_MODE:
+                return self.run_benchmark_shortcut(benchmark_action)
+            self.send_benchmark_action(action)
             return False
 
         if action == "keyboard":
             self.show_keyboard()
             log("Globaler Hotkey K: Tastatur-Test geöffnet")
-            return False
-
-        if action == "ram" and visible == "benchmarks":
-            self.start_test(None, "ram-short", 10.0)
-            log("Globaler Hotkey R: RAM Kurztest gestartet")
-            return False
-
-        if action == "all" and visible == "benchmarks":
-            self.start_test(None, "all-short", 30.0)
-            log("Globaler Hotkey A: ALLE Kurztests gestartet")
             return False
 
         return False
@@ -7687,7 +7902,7 @@ except Exception:
         root.append(
             self.header(
                 "BENCHMARKS",
-                back=True,
+                back=not BENCHMARK_WINDOW_MODE,
                 back_label="← ÜBERSICHT (ESC)",
                 compact_back=True,
             )
@@ -7762,6 +7977,7 @@ except Exception:
         body.append(status_row)
 
         self.benchmark_progress = Gtk.ProgressBar()
+        self.benchmark_progress.add_css_class("benchmark-progress")
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_progress.set_show_text(False)
         body.append(self.benchmark_progress)
@@ -7839,6 +8055,24 @@ except Exception:
         root.append(body)
         return root
 
+    def set_benchmark_progress_state(self, state=None):
+        if not hasattr(self, "benchmark_progress"):
+            return
+        for css_class in (
+            "progress-complete",
+            "progress-failed",
+            "progress-cancelled",
+        ):
+            self.benchmark_progress.remove_css_class(css_class)
+
+        css_class = {
+            "complete": "progress-complete",
+            "failed": "progress-failed",
+            "cancelled": "progress-cancelled",
+        }.get(state)
+        if css_class:
+            self.benchmark_progress.add_css_class(css_class)
+
     def set_benchmark_result_class(self, color):
         for cls in ("status-green", "status-orange", "status-red"):
             self.benchmark_result.remove_css_class(cls)
@@ -7850,11 +8084,7 @@ except Exception:
         Ergebnistext setzen und Erfolgs-/Fehlerfarbe zusätzlich über Pango
         erzwingen. So bleibt die Farbe unabhängig von GTK-Theme-Prioritäten.
         """
-        palette = {
-            "green": "#61d36b",
-            "orange": "#f5a623",
-            "red": "#ff4c4c",
-        }
+        palette = UWUNTU_STATUS_HEX
         self.set_benchmark_result_class(color)
         if color in palette:
             escaped = GLib.markup_escape_text(str(text))
@@ -7876,10 +8106,10 @@ except Exception:
 
         background = (0x17 / 255.0, 0x17 / 255.0, 0x1C / 255.0)
         base = (0x23 / 255.0, 0x23 / 255.0, 0x29 / 255.0)
-        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
-        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        orange = (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        red = (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+        blue = UWUNTU_STATUS_RGB["blue"]
+        green = UWUNTU_STATUS_RGB["green"]
+        orange = UWUNTU_STATUS_RGB["orange"]
+        red = UWUNTU_STATUS_RGB["red"]
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
@@ -7926,20 +8156,36 @@ except Exception:
 
     def _cpu_visual_color(self, temp_c):
         if self.cpu_visual_state == "complete":
-            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+            return UWUNTU_STATUS_RGB["green"]
         if self.cpu_visual_state == "error":
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+            return UWUNTU_STATUS_RGB["red"]
         if self.cpu_visual_state == "cancelled":
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        if temp_c is None:
-            return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
-        if temp_c >= 95.0:
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
-        if temp_c >= 88.0:
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        if temp_c >= 72.0:
-            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+            return UWUNTU_STATUS_RGB["orange"]
+        if temp_c is not None and temp_c >= TEMP_CRITICAL_C:
+            return UWUNTU_STATUS_RGB["red"]
+        if temp_c is not None and temp_c >= TEMP_WARN_C:
+            return UWUNTU_STATUS_RGB["orange"]
+        return UWUNTU_STATUS_RGB["blue"]
+
+    @staticmethod
+    def benchmark_growing_bar_value(raw_value, progress):
+        """Lebendige Balken, deren Grundhöhe zugleich den Fortschritt zeigt."""
+        raw = max(0.0, min(1.0, float(raw_value)))
+        p = max(0.0, min(1.0, float(progress)))
+
+        # Kurz vor Schluss sind alle Balken bewusst vollständig gefüllt.
+        if p >= 0.95:
+            return 1.0
+
+        # Smoothstep: am Anfang sehr flach, in der Mitte klar wachsend und
+        # gegen Ende schnell nahe 100 %. Das bisherige Springen bleibt als
+        # kleine Abweichung um diese Fortschritts-Grundhöhe erhalten.
+        eased = p * p * (3.0 - 2.0 * p)
+        base = 0.04 + 0.92 * eased
+        jitter_span = 0.20 - 0.10 * p
+        jitter = (raw - 0.5) * jitter_span
+
+        return max(0.025, min(0.985, base + jitter))
 
     def draw_cpu_activity(self, area, cr, width, height):
         """Technische CPU-Telemetrie mit responsiver Kernmatrix."""
@@ -7948,29 +8194,14 @@ except Exception:
         track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
         text = (0xF4 / 255.0, 0xF4 / 255.0, 0xF5 / 255.0)
         muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
-        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+        green = UWUNTU_STATUS_RGB["green"]
+        blue = UWUNTU_STATUS_RGB["blue"]
+        orange = UWUNTU_STATUS_RGB["orange"]
+        red = UWUNTU_STATUS_RGB["red"]
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
         cr.fill()
-
-        # Dezentes technisches Raster. Es skaliert mit der Zeichenfläche und
-        # bleibt bewusst im Hintergrund, damit die Werte gut lesbar bleiben.
-        cr.set_line_width(1.0)
-        cr.set_source_rgba(track[0], track[1], track[2], 0.28)
-        grid_step = 24.0
-        x = grid_step
-        while x < width:
-            cr.move_to(x, 0)
-            cr.line_to(x, height)
-            x += grid_step
-        y = grid_step
-        while y < height:
-            cr.move_to(0, y)
-            cr.line_to(width, y)
-            y += grid_step
-        cr.stroke()
 
         progress = max(0.0, min(1.0, self.cpu_activity_progress))
         cores = os.cpu_count() or 1
@@ -8115,7 +8346,18 @@ except Exception:
             x = padding + col * (bar_w + bar_gap)
             y = activity_top + row * row_h
             bar_h = max(18.0, row_h - 15.0)
-            value = max(0.06, min(1.0, values[index]))
+            raw_value = max(0.0, min(1.0, values[index]))
+            value = (
+                self.benchmark_growing_bar_value(raw_value, progress)
+                if running
+                else max(0.06, raw_value)
+            )
+            if running and progress < 0.95:
+                # CPU bewusst lebendiger als GPU: Fortschritt bleibt die
+                # Grundhöhe, die Kerne dürfen aber sichtbar auf/ab springen.
+                extra_span = 0.28 - 0.10 * progress
+                value += (raw_value - 0.5) * extra_span
+                value = max(0.025, min(0.985, value))
 
             # Äußerer Slot-Rahmen.
             cr.set_source_rgb(*panel)
@@ -8161,15 +8403,23 @@ except Exception:
                     - segment * segment_gap
                 )
                 if segment < active_segments:
-                    if (
-                        not complete
-                        and temp_c is not None
-                        and temp_c >= 88.0
-                        and segment >= segment_count - 2
-                    ):
-                        seg_color = accent
-                    else:
-                        seg_color = active_color
+                    seg_color = active_color
+                    if not complete:
+                        # Hohe Balken bekommen wieder die frühere heiße Spitze:
+                        # obere Segmente orange, die letzte Spitze bei sehr
+                        # hohem Füllstand rot. Temperaturwarnungen haben Vorrang.
+                        if (
+                            temp_c is not None
+                            and temp_c >= TEMP_CRITICAL_C
+                            and segment >= segment_count - 2
+                        ):
+                            seg_color = red
+                        elif (
+                            temp_c is not None
+                            and temp_c >= TEMP_WARN_C
+                            and segment >= segment_count - 2
+                        ):
+                            seg_color = orange
                     alpha = 1.0 if segment < active_segments - 1 else 0.78
                     cr.set_source_rgba(
                         seg_color[0],
@@ -8219,7 +8469,7 @@ except Exception:
     def reset_cpu_activity_field(self):
         count = max(1, min(24, os.cpu_count() or 1))
         self.cpu_thread_values = [
-            random.uniform(0.35, 0.72)
+            random.uniform(0.05, 0.95)
             for _ in range(count)
         ]
         self.cpu_activity_progress = 0.0
@@ -8231,8 +8481,8 @@ except Exception:
         if not self.cpu_thread_values:
             self.reset_cpu_activity_field()
         for index, current in enumerate(self.cpu_thread_values):
-            target = random.uniform(0.62, 1.0)
-            blend = 0.34 if target > current else 0.18
+            target = random.uniform(0.08, 1.0)
+            blend = 0.58 if target > current else 0.46
             self.cpu_thread_values[index] += (target - current) * blend
 
     def update_cpu_activity(
@@ -8274,16 +8524,16 @@ except Exception:
 
     def _gpu_visual_color(self, temp_c):
         if self.gpu_visual_state == "complete":
-            return (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
+            return UWUNTU_STATUS_RGB["green"]
         if self.gpu_visual_state == "error":
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
+            return UWUNTU_STATUS_RGB["red"]
         if self.gpu_visual_state == "cancelled":
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        if temp_c is not None and temp_c >= 95.0:
-            return (0xFF / 255.0, 0x4C / 255.0, 0x4C / 255.0)
-        if temp_c is not None and temp_c >= 85.0:
-            return (0xF5 / 255.0, 0xA6 / 255.0, 0x23 / 255.0)
-        return (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+            return UWUNTU_STATUS_RGB["orange"]
+        if temp_c is not None and temp_c >= TEMP_CRITICAL_C:
+            return UWUNTU_STATUS_RGB["red"]
+        if temp_c is not None and temp_c >= TEMP_WARN_C:
+            return UWUNTU_STATUS_RGB["orange"]
+        return UWUNTU_STATUS_RGB["blue"]
 
     def draw_gpu_activity(self, area, cr, width, height):
         """GPU-Telemetrie mit Render-Pipeline und Frame-Historie."""
@@ -8292,27 +8542,12 @@ except Exception:
         track = (0x34 / 255.0, 0x34 / 255.0, 0x3C / 255.0)
         text = (0xF4 / 255.0, 0xF4 / 255.0, 0xF5 / 255.0)
         muted = (0x9D / 255.0, 0x9D / 255.0, 0xA7 / 255.0)
-        green = (0x61 / 255.0, 0xD3 / 255.0, 0x6B / 255.0)
-        blue = (0x5A / 255.0, 0xA2 / 255.0, 0xFF / 255.0)
+        green = UWUNTU_STATUS_RGB["green"]
+        blue = UWUNTU_STATUS_RGB["blue"]
 
         cr.set_source_rgb(*background)
         cr.rectangle(0, 0, width, height)
         cr.fill()
-
-        cr.set_source_rgba(track[0], track[1], track[2], 0.28)
-        cr.set_line_width(1.0)
-        step = 24.0
-        pos = step
-        while pos < width:
-            cr.move_to(pos, 0)
-            cr.line_to(pos, height)
-            pos += step
-        pos = step
-        while pos < height:
-            cr.move_to(0, pos)
-            cr.line_to(width, pos)
-            pos += step
-        cr.stroke()
 
         temp_c = self.gpu_visual_temp
         accent = self._gpu_visual_color(temp_c)
@@ -8432,14 +8667,27 @@ except Exception:
         if running and count:
             scan_index = int(time.monotonic() * 7.0) % count
 
+        progress = max(0.0, min(1.0, self.gpu_activity_progress))
+
         for index, raw in enumerate(values):
             x = padding + index * (bar_w + bar_gap)
-            value = max(0.05, min(1.0, raw))
+            raw_value = max(0.0, min(1.0, raw))
+            value = (
+                self.benchmark_growing_bar_value(raw_value, progress)
+                if running
+                else max(0.05, raw_value)
+            )
             cr.set_source_rgba(track[0], track[1], track[2], 0.65)
             cr.rectangle(x, top, bar_w, bar_h)
             cr.fill()
 
-            active_color = green if complete else accent if temp_c is not None and temp_c >= 85.0 else blue
+            active_color = (
+                green
+                if complete
+                else accent
+                if temp_c is not None and temp_c >= TEMP_WARN_C
+                else blue
+            )
             active_h = bar_h if complete else max(3.0, bar_h * value)
             cr.set_source_rgba(
                 active_color[0],
@@ -8450,7 +8698,6 @@ except Exception:
             cr.rectangle(x, top + bar_h - active_h, bar_w, active_h)
             cr.fill()
 
-        progress = max(0.0, min(1.0, self.gpu_activity_progress))
         cr.set_source_rgb(*(green if complete else accent))
         cr.rectangle(
             padding,
@@ -8473,7 +8720,7 @@ except Exception:
         self.gpu_usage_prev_snapshot = None
         self.gpu_usage_prev_ts_ns = None
         self.gpu_frame_values = [
-            random.uniform(0.18, 0.48)
+            random.uniform(0.05, 0.95)
             for _ in range(24)
         ]
 
@@ -8749,6 +8996,7 @@ except Exception:
         if hasattr(self, "benchmark_status"):
             self.set_benchmark_status_temp_class(None)
             self.benchmark_status.set_text("Bereit")
+            self.set_benchmark_progress_state(None)
             self.benchmark_progress.set_fraction(0.0)
             self.benchmark_time.set_text("00:00 / 00:00")
             self.benchmark_result.set_text("")
@@ -8765,9 +9013,9 @@ except Exception:
         if temp_c is None:
             return
 
-        if temp_c >= 97.0:
+        if temp_c >= TEMP_CRITICAL_C:
             self.benchmark_status.add_css_class("status-red")
-        elif temp_c >= 90.0:
+        elif temp_c >= TEMP_WARN_C:
             self.benchmark_status.add_css_class("status-yellow")
     def update_cpu_benchmark_status(self):
         cores = os.cpu_count() or 1
@@ -8905,13 +9153,27 @@ except Exception:
         for button in self.benchmark_buttons:
             button.remove_css_class("benchmark-running")
 
-        button = self.benchmark_button_by_kind.get(kind)
-        if button is None:
-            return
+        running_kinds = [kind]
 
-        button.remove_css_class("benchmark-passed")
-        button.remove_css_class("benchmark-failed")
-        button.add_css_class("benchmark-running")
+        # Während ALLE / ALLE ERW. läuft, ist nicht nur der aktuelle
+        # Einzeltest aktiv. Auch der übergeordnete Sequenz-Button bleibt
+        # durchgehend Blau, bis die komplette Sequenz abgeschlossen ist.
+        if self.test_sequence_active:
+            overall_kind = (
+                "all-long"
+                if self.test_sequence_mode == "ALLE ERW."
+                else "all-short"
+            )
+            running_kinds.append(overall_kind)
+
+        for running_kind in running_kinds:
+            button = self.benchmark_button_by_kind.get(running_kind)
+            if button is None:
+                continue
+
+            button.remove_css_class("benchmark-passed")
+            button.remove_css_class("benchmark-failed")
+            button.add_css_class("benchmark-running")
 
     def set_benchmark_button_result(self, kind, ok):
         button = self.benchmark_button_by_kind.get(kind)
@@ -8932,17 +9194,21 @@ except Exception:
         self.clear_benchmark_button_results()
         self.test_sequence_active = True
         self.test_sequence_mode = "ALLE ERW." if extended else "ALLE"
+        # CPU absichtlich zuletzt: Beim automatischen Start laufen parallel
+        # noch LAN/WLAN-Tests. Der CPU-Benchmark belastet Scheduling und
+        # Netzwerk-Userspace deutlich stärker als RAM/GPU und soll deren
+        # Messergebnisse deshalb nicht mehr direkt beim Start beeinflussen.
         self.test_sequence = (
             [
-                ("cpu-long", 600.0),
                 ("ram-long", 600.0),
                 ("gpu-long", 600.0),
+                ("cpu-long", 600.0),
             ]
             if extended
             else [
-                ("cpu-short", 10.0),
                 ("ram-short", 10.0),
                 ("gpu-short", 10.0),
+                ("cpu-short", 10.0),
             ]
         )
         self.test_sequence_index = 0
@@ -9039,8 +9305,20 @@ except Exception:
             for item in results
         )
 
+        # Ausführungsreihenfolge ist RAM → GPU → CPU, die gewohnte
+        # Ergebnisdarstellung bleibt trotzdem CPU · RAM · GPU.
+        display_order = {
+            "CPU": 0,
+            "RAM": 1,
+            "GPU": 2,
+        }
+        display_results = sorted(
+            results,
+            key=lambda item: display_order.get(item.get("name"), 99),
+        )
+
         parts = []
-        for item in results:
+        for item in display_results:
             mark = "✓" if item.get("ok") else "✕"
             summary = item.get("summary") or ""
             text = item.get("name", "TEST")
@@ -9063,6 +9341,9 @@ except Exception:
         self.test_sequence_total_duration = 0.0
         self.test_sequence_completed_duration = 0.0
         self.set_benchmark_controls(False)
+        self.set_benchmark_progress_state(
+            "complete" if all_ok else "failed"
+        )
         self.benchmark_progress.set_fraction(1.0)
         total_duration = (
             1800.0
@@ -9110,6 +9391,15 @@ except Exception:
         if hasattr(self, "cancel_test_button"):
             self.cancel_test_button.set_sensitive(running)
 
+    def start_benchmark_window(self):
+        if not BENCHMARK_WINDOW_MODE:
+            return False
+        if self.test_proc is not None and self.test_proc.poll() is None:
+            return False
+        self.start_test(None, "all-short", 30.0)
+        log("Hardware Benchmark: ALLE Kurztests automatisch gestartet")
+        return False
+
     def show_benchmarks(self, *_):
         # Die Benchmark-Seite übernimmt exakt die bestehende Fenstergröße.
         # Kein set_default_size: weder Seitenwechsel noch Teststart dürfen das
@@ -9153,6 +9443,7 @@ except Exception:
         self.test_hard_deadline = self.test_started + float(duration) + grace
         self.test_cancelled = False
         self.test_output_lines = []
+        self.set_benchmark_progress_state(None)
         if self.test_sequence_active:
             base_fraction = (
                 self.test_sequence_completed_duration
@@ -9440,9 +9731,13 @@ except Exception:
             elif not sequence_was_active:
                 # Einzeltests erhalten nach Abschluss denselben sichtbaren
                 # Grün/Rot-Zustand wie die Schritte einer ALLE-Sequenz.
+                single_ok = bool(outcome and outcome.get("ok"))
                 self.set_benchmark_button_result(
                     completed_kind,
-                    bool(outcome and outcome.get("ok")),
+                    single_ok,
+                )
+                self.set_benchmark_progress_state(
+                    "complete" if single_ok else "failed"
                 )
                 self.set_benchmark_controls(False)
 
@@ -9725,6 +10020,7 @@ except Exception:
 
         self.set_benchmark_status_temp_class(None)
         self.benchmark_status.set_text("Test abgebrochen")
+        self.set_benchmark_progress_state("cancelled")
         self.benchmark_progress.set_fraction(0.0)
         self.benchmark_result.set_text("")
         self.set_benchmark_result_class("orange")
@@ -11035,12 +11331,45 @@ except Exception:
 
         visible = self.stack.get_visible_child_name()
 
+        # Das zweite Benchmark-Fenster bleibt bewusst auf seine Aufgabe
+        # beschränkt. Es darf keine Keyboard-/Info-/Update-Dialoge der
+        # normalen Hardware-Check-Instanz öffnen.
+        if BENCHMARK_WINDOW_MODE:
+            if name == "Escape":
+                if self.test_proc is not None and self.test_proc.poll() is None:
+                    self.cancel_test()
+                return True
+
+            audio_shortcuts = {
+                "Left": "audio-left",
+                "Up": "audio-both",
+                "Right": "audio-right",
+                "Down": "audio-auto",
+            }
+            action = audio_shortcuts.get(name)
+            if action:
+                self.handle_global_hotkey(action)
+                return True
+
+            lower_name = name.lower()
+            benchmark_shortcuts = {
+                "b": "benchmark",
+                "r": "ram",
+                "a": "all",
+            }
+            action = benchmark_shortcuts.get(lower_name)
+            if action:
+                self.handle_global_hotkey(action)
+                return True
+            return False
+
         # ESC auf der Benchmark-Seite bricht einen laufenden CPU-/RAM-Test ab
         # und geht danach zurück zur Übersicht.
         if name == "Escape" and visible == "benchmarks":
             if self.test_proc is not None and self.test_proc.poll() is None:
                 self.cancel_test()
-            self.show_overview()
+            if not BENCHMARK_WINDOW_MODE:
+                self.show_overview()
             return True
 
         # Im Tastatur-Test übernimmt bei aktivem /dev/input-Monitor dieser
@@ -11071,23 +11400,23 @@ except Exception:
                 self.handle_global_hotkey(action)
                 return True
 
-        # A/B/K/R/I/U/G/F1 auch über GTK behandeln, wenn Hardware Check den Fokus hat.
-        # B = CPU/Benchmark, R = RAM, A = ALLE, K = Tastatur-Test.
-        # Innerhalb des Tastatur-Tests
-        # bleiben beide selbstverständlich normale Prüftasten.
-        # Der Hotkey-Handler entprellt das parallele /dev/input-Ereignis.
+        # B/R/A sind globale Benchmark-Hotkeys und werden auch dann
+        # an das separate Benchmark-Fenster gereicht, wenn der normale HC
+        # selbst Fokus hat. Der /dev/input-Pfad deckt alle anderen Fenster ab.
+        # Im aktiven Tastatur-Test bleiben Buchstaben reine Prüftasten.
         lower_name = name.lower()
-        if lower_name == "b" and visible != "keyboard":
-            self.handle_global_hotkey("benchmark")
+        benchmark_shortcuts = {
+            "b": "benchmark",
+            "r": "ram",
+            "a": "all",
+        }
+        benchmark_action = benchmark_shortcuts.get(lower_name)
+        if benchmark_action and visible != "keyboard":
+            self.handle_global_hotkey(benchmark_action)
             return True
+
         if lower_name == "k" and visible != "keyboard":
             self.handle_global_hotkey("keyboard")
-            return True
-        if lower_name == "r" and visible == "benchmarks":
-            self.handle_global_hotkey("ram")
-            return True
-        if lower_name == "a" and visible == "benchmarks":
-            self.handle_global_hotkey("all")
             return True
         if lower_name == "i" and visible != "keyboard":
             self.handle_global_hotkey("info")

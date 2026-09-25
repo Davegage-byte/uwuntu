@@ -22,8 +22,8 @@ else
     DOWNLOAD_MAX_TIME=45
 fi
 
-RAW_URL="https://raw.githubusercontent.com/Davegage-byte/uwuntu/refs/heads/main/Ubuntu%20Autostart%20Manager.sh"
-REF_API_URL="https://api.github.com/repos/Davegage-byte/uwuntu/git/ref/heads/main"
+TEST_BRANCH="experiment/benchmark-audio-4tile-20260924"
+REF_API_URL="https://api.github.com/repos/Davegage-byte/uwuntu/git/ref/heads/${TEST_BRANCH}"
 RAW_COMMIT_BASE="https://raw.githubusercontent.com/Davegage-byte/uwuntu"
 RAW_MANAGER_PATH="Ubuntu%20Autostart%20Manager.sh"
 RAW_MANIFEST_PATH="modules/ubuntu-autostart-manager/manifest.json"
@@ -78,9 +78,9 @@ printf '%s\n' "$TARGET" > "$PATH_FILE" 2>/dev/null || true
 command -v curl >/dev/null 2>&1 || fail "curl ist nicht installiert." 13
 
 if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-    status "Prüfe GitHub vor dem Programmstart …"
+    status "Prüfe Test-Branch vor dem Programmstart …"
 else
-    status "Suche frisch auf GitHub nach Update …"
+    status "Suche im Uwuntu Test-Branch nach Update …"
 fi
 
 TMP="$(mktemp /tmp/uwuntu-manager-update.XXXXXX.sh)" || fail "Temporäre Datei konnte nicht erstellt werden." 14
@@ -89,15 +89,17 @@ MANIFEST_TMP="$(mktemp /tmp/uwuntu-runtime-manifest.XXXXXX.json)" || fail "Tempo
 BACKUP="${TARGET}.update-backup"
 trap 'rm -f "$TMP" "$REF_TMP" "$MANIFEST_TMP" "${TARGET}.new" 2>/dev/null || true' EXIT
 
-# Jeder Druck auf U muss GitHub wirklich neu abfragen.
-# Zuerst wird der aktuelle Commit-SHA von main über die GitHub-API ermittelt.
-# Anschließend laden wir die Manager-Datei an GENAU diesem Commit. Damit
-# umgehen wir zusätzlich eine mögliche kurze Verzögerung bei der beweglichen
-# main-RAW-Weitergabe. Wenn die API einmal nicht verfügbar/rate-limited ist,
-# bleibt der bisherige main-RAW-Weg als Fallback erhalten.
+# TESTPHASE:
+# Jeder Druck auf U fragt ausschließlich den Experiment-Branch ab. Zuerst wird
+# dessen aktueller Commit-SHA über die GitHub-API aufgelöst. Manager, Manifest
+# und Runtime-Module werden danach commitgenau von exakt diesem Stand geladen.
+#
+# Absichtlich KEIN main-/RAW-Fallback:
+# Kann der Test-Branch nicht eindeutig aufgelöst werden, bleibt der lokale
+# Teststand erhalten. So kann U niemals versehentlich auf main zurückspringen.
 CACHE_BUST="$(date +%s%N)-$$"
-DOWNLOAD_URL="$RAW_URL"
-MANIFEST_DOWNLOAD_URL="${RAW_COMMIT_BASE}/main/${RAW_MANIFEST_PATH}"
+DOWNLOAD_URL=""
+MANIFEST_DOWNLOAD_URL=""
 latest_sha=""
 
 if curl \
@@ -130,35 +132,26 @@ except Exception:
     pass
 PY
     )"
+fi
 
-    if [ -n "$latest_sha" ]; then
-        DOWNLOAD_URL="${RAW_COMMIT_BASE}/${latest_sha}/${RAW_MANAGER_PATH}"
-        MANIFEST_DOWNLOAD_URL="${RAW_COMMIT_BASE}/${latest_sha}/${RAW_MANIFEST_PATH}"
-        printf '%s  GitHub main Commit: %s\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$latest_sha" >> "$LOG" 2>/dev/null || true
-
-        if [ "$STARTUP_CHECK_MODE" -eq 1 ] \
-            && [ -f "$LOCAL_SOURCE_REF" ] \
-            && [ "$(cat "$LOCAL_SOURCE_REF" 2>/dev/null || true)" = "$latest_sha" ]
-        then
-            status "Bereits aktuell"
-            exit 0
-        fi
-    else
-        if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-            startup_skip "GitHub-Antwort nicht eindeutig · starte lokalen Stand"
-        fi
-
-        printf '%s  GitHub-Ref konnte nicht ausgewertet werden · RAW-main-Fallback\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
-    fi
-else
+if [ -z "$latest_sha" ]; then
     if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-        startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
+        startup_skip "Test-Branch nicht erreichbar · starte lokalen Teststand"
     fi
+    fail "Test-Branch konnte nicht eindeutig aufgelöst werden. Lokaler Teststand bleibt unverändert." 18
+fi
 
-    printf '%s  GitHub-Ref-API nicht verfügbar · RAW-main-Fallback\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
+DOWNLOAD_URL="${RAW_COMMIT_BASE}/${latest_sha}/${RAW_MANAGER_PATH}"
+MANIFEST_DOWNLOAD_URL="${RAW_COMMIT_BASE}/${latest_sha}/${RAW_MANIFEST_PATH}"
+printf '%s  GitHub Test-Branch %s · Commit: %s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$TEST_BRANCH" "$latest_sha" >> "$LOG" 2>/dev/null || true
+
+if [ "$STARTUP_CHECK_MODE" -eq 1 ] \
+    && [ -f "$LOCAL_SOURCE_REF" ] \
+    && [ "$(cat "$LOCAL_SOURCE_REF" 2>/dev/null || true)" = "$latest_sha" ]
+then
+    status "Bereits aktuell · Test-Branch"
+    exit 0
 fi
 
 download_runtime_manifest() {
@@ -333,10 +326,9 @@ fi
 
 status "Installiere Uwuntu-Komponenten …"
 
-# Manager und Module muessen aus exakt demselben Stand stammen. Wenn die
-# Ref-API nicht ausgewertet werden konnte, wird der bereits protokollierte
-# RAW-main-Fallback konsistent auch fuer alle Module verwendet.
-if ! UWUNTU_SOURCE_REF="${latest_sha:-main}" "$TARGET" --apply-update >> "$LOG" 2>&1; then
+# Manager und Module stammen im Experiment immer aus exakt demselben
+# commitgenauen Test-Branch-Stand. latest_sha ist oben zwingend validiert.
+if ! UWUNTU_SOURCE_REF="$latest_sha" "$TARGET" --apply-update >> "$LOG" 2>&1; then
     if [ "$manager_update_needed" -eq 1 ]; then
         cp -a "$BACKUP" "$TARGET" 2>/dev/null || true
         chmod +x "$TARGET" 2>/dev/null || true
