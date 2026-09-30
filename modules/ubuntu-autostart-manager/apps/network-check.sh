@@ -156,7 +156,7 @@ cat > "$TMP_PY" <<'PY'
 import gi
 gi.require_version("Gtk", "4.0")
 
-from gi.repository import Gtk, GLib, Gdk, Pango
+from gi.repository import Gtk, GLib, Gdk, Pango, Gio
 
 import os
 import re
@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.58"
+VERSION = "2.59"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -563,7 +563,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.34"
+WIPE_VERSION = "3.35"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -955,7 +955,7 @@ def smart_format_minutes(value):
     minutes = smart_number(value)
     if minutes < 60:
         return f"{minutes} min"
-    return f"{minutes / 60.0:.1f} h".replace(".", ",")
+    return f"{minutes / 60.0:.1f} h"
 
 def smart_temp_state(temp):
     if temp is None:
@@ -1078,7 +1078,7 @@ def smart_collect(disk):
                 else "warn" if used >= SMART_WEAR_WARN_PERCENT
                 else "good"
             )
-            add("Verschleiß / Lebensdauer verbraucht", f"{used} %",
+            add("Verschleiß", f"{used} %",
                 "Hersteller-Schätzwert der bereits verbrauchten SSD-Lebensdauer.",
                 state)
 
@@ -1688,14 +1688,6 @@ class WipeCompactPanel:
         summary.add_css_class(overall)
         outer.append(summary)
 
-        legend = Gtk.Label(
-            label="GRÜN = in Ordnung   •   ORANGE = auffällig / beobachten   •   ROT = Fehler / kritisch"
-        )
-        legend.set_xalign(0)
-        legend.set_wrap(True)
-        legend.add_css_class("smart-legend")
-        outer.append(legend)
-
         grid = Gtk.Grid()
         grid.set_row_spacing(5)
         grid.set_column_spacing(12)
@@ -2262,6 +2254,10 @@ class NetworkCheckApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="com.david.NetworkCheck")
 
+        smart_action = Gio.SimpleAction.new("smart", None)
+        smart_action.connect("activate", self.on_smart_app_action)
+        self.add_action(smart_action)
+
         self.window = None
         self.cards = {}
         self.stop_event = threading.Event()
@@ -2319,14 +2315,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.58 + Wipe Auto v3.34 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.59 + Wipe Auto v3.35 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.58 + Wipe Auto v3.34 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.59 + Wipe Auto v3.35 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -3909,6 +3905,13 @@ class NetworkCheckApp(Gtk.Application):
     # --------------------------------------------------------
     # Ende
     # --------------------------------------------------------
+
+    def on_smart_app_action(self, _action, _parameter):
+        if self.window is None:
+            self.activate()
+        if hasattr(self, "wipe_panel"):
+            GLib.idle_add(self.wipe_panel.show_smart_window)
+        return False
 
     def on_key_pressed(self, controller, keyval, keycode, state):
         name = Gdk.keyval_name(keyval) or ""
