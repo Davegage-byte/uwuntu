@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.34"
+VERSION = "3.35"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -531,7 +531,7 @@ def smart_format_minutes(value):
     minutes = smart_number(value)
     if minutes < 60:
         return f"{minutes} min"
-    return f"{minutes / 60.0:.1f} h".replace(".", ",")
+    return f"{minutes / 60.0:.1f} h"
 
 def smart_temp_state(temp):
     if temp is None:
@@ -653,7 +653,7 @@ def smart_collect(disk):
                 else "warn" if used >= SMART_WEAR_WARN_PERCENT
                 else "good"
             )
-            add("Verschleiß / Lebensdauer verbraucht", f"{used} %",
+            add("Verschleiß", f"{used} %",
                 "Hersteller-Schätzwert der bereits verbrauchten SSD-Lebensdauer.",
                 state)
 
@@ -1606,14 +1606,6 @@ class WipeAutoApp(Gtk.Application):
         summary.add_css_class("smart-summary")
         summary.add_css_class(overall)
         outer.append(summary)
-
-        legend = Gtk.Label(
-            label="GRÜN = in Ordnung   •   ORANGE = auffällig / beobachten   •   ROT = Fehler / kritisch"
-        )
-        legend.set_xalign(0)
-        legend.set_wrap(True)
-        legend.add_css_class("smart-legend")
-        outer.append(legend)
 
         grid = Gtk.Grid()
         grid.set_row_spacing(5)
