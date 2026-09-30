@@ -70,8 +70,8 @@ STAGED_RUNTIME_MANIFEST=""
 # Robuste Bootstrap-Werte fuer Installationen ohne Manifest. Sobald ein
 # gueltiges lokales oder gestagtes Manifest vorliegt, kommen sichtbare
 # Komponentenstaende ausschliesslich daraus.
-VERSION_NC="2.28"
-VERSION_WA="3.32"
+VERSION_NC="2.58"
+VERSION_WA="3.34"
 VERSION_HC="4.5.74"
 VERSION_CA="1.20"
 VERSION_AU="1.21"
@@ -1118,6 +1118,7 @@ install_all_dependencies() {
         udev
         mokutil
         dmidecode
+        smartmontools
         procps
         xdg-utils
         wl-clipboard
@@ -1285,6 +1286,22 @@ install_wipe_auto_app() {
         echo "FEHLER: python3 wurde nicht gefunden."
         return 1
     fi
+
+    if ! command -v smartctl >/dev/null 2>&1; then
+        echo "smartmontools fehlt. Installation wird versucht."
+        if sudo -n true 2>/dev/null; then
+            sudo -n apt-get update || return 1
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y smartmontools || return 1
+        else
+            sudo apt-get update || return 1
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y smartmontools || return 1
+        fi
+    fi
+    if ! command -v smartctl >/dev/null 2>&1; then
+        echo "FEHLER: smartctl ist nicht verfügbar."
+        return 1
+    fi
+
     if ! python3 -c 'import gi; gi.require_version("Gtk","4.0"); from gi.repository import Gtk' >/dev/null 2>&1; then
         echo "GTK4/Python fehlt. Installation wird versucht."
 
