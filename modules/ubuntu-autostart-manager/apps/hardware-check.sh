@@ -3233,9 +3233,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.144"
+            "Hardware Benchmark v4.5.145"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.144"
+            else "Hardware Check v4.5.145"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3246,9 +3246,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.144"
+                "Hardware Benchmark v4.5.145"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.144"
+                else "Hardware Check v4.5.145"
             )
         )
         title_label.add_css_class("title")
@@ -3297,7 +3297,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.144 gestartet")
+            log("Hardware Benchmark v4.5.145 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -5882,28 +5882,28 @@ class App(Gtk.Application):
 
         shortcuts = [
             # Allgemein
-            ("F1", "GLOBAL: Diese Shortcut-Übersicht öffnen"),
-            ("STRG+D", "GLOBAL: 4-Felder-Diagnose-Layout starten"),
+            ("F1", "Diese Shortcut-Übersicht öffnen"),
+            ("STRG+D", "4-Felder-Diagnose-Layout starten"),
 
             # Hardware / Diagnose
-            ("K", "GLOBAL: Keyboard-Test öffnen"),
-            ("T", "GLOBAL: Touchscreen-Test öffnen"),
-            ("D", "GLOBAL: Display-Test starten"),
-            ("S", "GLOBAL: SSD-/SMART-Werte anzeigen"),
-            ("I", "GLOBAL: Systeminformationen anzeigen"),
-            ("G", "GLOBAL: Garantieprüfung Dell / Lenovo öffnen"),
-            ("U", "GLOBAL: Uwuntu-Update suchen und installieren"),
+            ("K", "Keyboard-Test öffnen"),
+            ("T", "Touchscreen-Test öffnen"),
+            ("D", "Display-Test starten"),
+            ("S", "SSD-/SMART-Werte anzeigen"),
+            ("I", "Systeminformationen anzeigen"),
+            ("G", "Garantieprüfung Dell / Lenovo öffnen"),
+            ("U", "Uwuntu-Update suchen und installieren"),
 
             # Benchmark
-            ("B", "GLOBAL: CPU-Kurztest im Benchmark-Fenster starten"),
-            ("R", "GLOBAL: RAM-Kurztest im Benchmark-Fenster starten"),
-            ("A", "GLOBAL: ALLE Kurztests im Benchmark-Fenster starten"),
+            ("B", "CPU-Kurztest im Benchmark-Fenster starten"),
+            ("R", "RAM-Kurztest im Benchmark-Fenster starten"),
+            ("A", "ALLE Kurztests im Benchmark-Fenster starten"),
 
             # Audio
-            ("←", "GLOBAL: Audio Test – linken Lautsprecher testen"),
-            ("↑", "GLOBAL: Audio Test – beide Lautsprecher testen"),
-            ("→", "GLOBAL: Audio Test – rechten Lautsprecher testen"),
-            ("↓", "GLOBAL: Audio Test – kompletten Auto-Test starten"),
+            ("←", "Audio Test – linken Lautsprecher testen"),
+            ("↑", "Audio Test – beide Lautsprecher testen"),
+            ("→", "Audio Test – rechten Lautsprecher testen"),
+            ("↓", "Audio Test – kompletten Auto-Test starten"),
 
             # Bedienung / Schließen
             ("ENTER", "Wipe Auto: LÖSCHEN / danach JA bestätigen"),
@@ -5932,23 +5932,6 @@ class App(Gtk.Application):
             grid.attach(desc, 1, row, 1, 1)
 
         outer.append(grid)
-
-        note = Gtk.Label(
-            label=(
-                "Hinweis: Im KEYBOARD TEST sind F1, K, T, D, S, I, G, U, B, R, A,\n"
-                "SUPER und alle Pfeiltasten normale Prüftasten. ESC zählt ebenfalls\n"
-                "als Prüftaste; erst ESC x3 beendet den Tastatur-Test. SUPER allein,\n"
-                "SUPER+Pfeile und ALT+SPACE lösen während des Tests keine\n"
-                "GNOME-/Fensteraktion aus."
-            )
-        )
-        note.set_xalign(0)
-        note.set_halign(Gtk.Align.FILL)
-        note.set_hexpand(True)
-        note.set_wrap(False)
-        note.set_focusable(False)
-        note.add_css_class("hotkey-note")
-        outer.append(note)
 
         overlay = Gtk.Overlay()
         overlay.set_child(outer)
