@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.38"
+VERSION = "3.39"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -497,6 +497,8 @@ def disk_details(disk):
 
 SMART_TEMP_WARN_C = 60.0
 SMART_TEMP_BAD_C = 70.0
+SMART_SENSOR_TEMP_WARN_C = 70.0
+SMART_SENSOR_TEMP_BAD_C = 80.0
 SMART_WEAR_WARN_PERCENT = 80
 SMART_WEAR_BAD_PERCENT = 100
 SMART_UNSAFE_SHUTDOWN_WARN = 50
@@ -568,6 +570,15 @@ def smart_temp_state(temp):
     if temp >= SMART_TEMP_BAD_C:
         return "bad"
     if temp >= SMART_TEMP_WARN_C:
+        return "warn"
+    return "good"
+
+def smart_sensor_temp_state(temp):
+    if temp is None:
+        return "warn"
+    if temp >= SMART_SENSOR_TEMP_BAD_C:
+        return "bad"
+    if temp >= SMART_SENSOR_TEMP_WARN_C:
         return "warn"
     return "good"
 
@@ -739,8 +750,8 @@ def smart_collect(disk):
                 if temp is None:
                     continue
                 add(f"Temperatursensor {index}", f"{temp:.0f} °C",
-                    "Zusätzlicher interner Temperatursensor der SSD.",
-                    smart_temp_state(temp))
+                    "Zusätzlicher interner Temperatursensor: unter 70 °C grün, ab 70 °C orange, ab 80 °C rot.",
+                    smart_sensor_temp_state(temp))
 
         for key, label in (
             ("thermal_management_t1_trans_count", "Thermische Regelung Stufe 1 – Ereignisse"),
