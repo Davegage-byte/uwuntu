@@ -2488,6 +2488,7 @@ def run_global_arrow_monitor(parent_pid):
         30: "all",          # KEY_A
         37: "keyboard",     # KEY_K
         19: "ram",          # KEY_R
+        31: "smart",        # KEY_S
         23: "info",         # KEY_I
         22: "update",       # KEY_U
         34: "warranty",     # KEY_G
@@ -3067,6 +3068,7 @@ class App(Gtk.Application):
             "all": 0.0,
             "keyboard": 0.0,
             "ram": 0.0,
+            "smart": 0.0,
             "info": 0.0,
             "update": 0.0,
             "warranty": 0.0,
@@ -3231,9 +3233,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.142"
+            "Hardware Benchmark v4.5.143"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.142"
+            else "Hardware Check v4.5.143"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3244,9 +3246,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.142"
+                "Hardware Benchmark v4.5.143"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.142"
+                else "Hardware Check v4.5.143"
             )
         )
         title_label.add_css_class("title")
@@ -3295,7 +3297,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.142 gestartet")
+            log("Hardware Benchmark v4.5.143 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -4853,7 +4855,7 @@ class App(Gtk.Application):
                         token.startswith("keycode:")
                         or token in {
                             "escape", "benchmark", "all", "keyboard", "ram",
-                            "info", "update", "warranty",
+                            "smart", "info", "update", "warranty",
                             "hotkeys", "touch", "display",
                             "audio-left", "audio-both", "audio-right", "audio-auto",
                         }
@@ -5889,6 +5891,7 @@ class App(Gtk.Application):
             ("K", "Keyboard-Test global öffnen"),
             ("R", "GLOBAL: RAM-Kurztest im Benchmark-Fenster starten"),
             ("A", "GLOBAL: ALLE Kurztests im Benchmark-Fenster starten"),
+            ("S", "GLOBAL: SSD-/SMART-Werte anzeigen"),
             ("I", "Systeminformationen anzeigen"),
             ("U", "Uwuntu-Update suchen und installieren"),
             ("G", "Garantieprüfung Dell / Lenovo"),
@@ -5923,7 +5926,7 @@ class App(Gtk.Application):
 
         note = Gtk.Label(
             label=(
-                "Hinweis: Im KEYBOARD TEST sind F1, A, B, K, R, I, U, G, T, D,\n"
+                "Hinweis: Im KEYBOARD TEST sind F1, A, B, K, R, S, I, U, G, T, D,\n"
                 "SUPER und alle Pfeiltasten normale Prüftasten. ESC zählt ebenfalls\n"
                 "als Prüftaste; erst ESC x3 beendet den Tastatur-Test. SUPER allein,\n"
                 "SUPER+Pfeile und ALT+SPACE lösen während des Tests keine\n"
@@ -6539,6 +6542,32 @@ except Exception:
             log(f"Audio-Hotkey Fehler ({action_name}): {exc}")
         return False
 
+
+    def send_smart_action(self):
+        """Globales S an das kombinierte Network/Wipe-Fenster weiterreichen."""
+        gapplication = shutil.which("gapplication")
+        if not gapplication:
+            log("SMART-Hotkey ignoriert: gapplication fehlt")
+            return False
+
+        try:
+            subprocess.Popen(
+                [
+                    gapplication,
+                    "action",
+                    "com.david.NetworkCheck",
+                    "smart",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            log("Globaler SMART-Hotkey S an Network/Wipe weitergereicht")
+        except Exception as exc:
+            log(f"SMART-Hotkey Fehler: {exc}")
+        return False
+
     def handle_global_hotkey(self, action):
 
 
@@ -6613,6 +6642,10 @@ except Exception:
                 log("Globaler Hotkey ESC: Benchmark/RAM abgebrochen bzw. Übersicht geöffnet")
                 return False
 
+            return False
+
+        if action == "smart":
+            self.send_smart_action()
             return False
 
         if action == "info":
@@ -11417,6 +11450,9 @@ except Exception:
 
         if lower_name == "k" and visible != "keyboard":
             self.handle_global_hotkey("keyboard")
+            return True
+        if lower_name == "s" and visible != "keyboard":
+            self.handle_global_hotkey("smart")
             return True
         if lower_name == "i" and visible != "keyboard":
             self.handle_global_hotkey("info")
