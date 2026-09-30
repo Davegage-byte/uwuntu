@@ -2,11 +2,17 @@
 set -u
 
 STARTUP_CHECK_MODE=0
-if [ "${1:-}" = "--startup-check" ]; then
-    STARTUP_CHECK_MODE=1
-fi
+STARTUP_OFFLINE_MODE=0
+case "${1:-}" in
+    --startup-check)
+        STARTUP_CHECK_MODE=1
+        ;;
+    --startup-offline)
+        STARTUP_OFFLINE_MODE=1
+        ;;
+esac
 
-if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+if [ "$STARTUP_CHECK_MODE" -eq 1 ] || [ "$STARTUP_OFFLINE_MODE" -eq 1 ]; then
     REF_RETRY=0
     REF_CONNECT_TIMEOUT=2
     REF_MAX_TIME=3
@@ -35,6 +41,10 @@ KIOSK="$HOME/.local/bin/start-kiosk-apps.sh"
 CLOSE_APPS="$HOME/.local/bin/close-diagnostic-apps.sh"
 LOCAL_MANIFEST="$HOME/.local/share/uwuntu/runtime-manifest.json"
 LOCAL_SOURCE_REF="$HOME/.local/share/uwuntu/source-ref"
+LEASE_FILE="$HOME/.local/share/uwuntu/online-lease.json"
+LEASE_MAX_AGE_SECONDS=2592000
+LEASE_ERROR_CODE="E9017"
+RUNTIME_LOCK_MARKER="$HOME/.local/share/uwuntu/runtime-offline.lock"
 STATUS_PIPE_ACTIVE=1
 
 status() {
@@ -58,6 +68,150 @@ startup_skip() {
     exit 0
 }
 
+lease_state() {
+    python3 - "$LEASE_FILE" "$LEASE_MAX_AGE_SECONDS" <<'PY'
+import json
+import os
+import sys
+import time
+
+path = sys.argv[1]
+max_age = int(sys.argv[2])
+now = int(time.time())
+
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if data.get("schema") != 1:
+        raise ValueError
+    last_active = data.get("last_active_unix")
+    if isinstance(last_active, bool) or not isinstance(last_active, int) or last_active <= 0:
+        raise ValueError
+except FileNotFoundError:
+    print("missing")
+    raise SystemExit(0)
+except Exception:
+    print("invalid")
+    raise SystemExit(0)
+
+# Mehr als fünf Minuten Rücksprung wird nicht als neue Offline-Zeit gewertet.
+# So schenkt ein deutlich zurückgestelltes Systemdatum keine neue Lease.
+if now + 300 < last_active:
+    print("clock_rollback")
+elif now - last_active <= max_age:
+    print("valid")
+else:
+    print("expired")
+PY
+}
+
+record_active_lease() {
+    local source_ref="${1:-unknown}"
+    mkdir -p "$(dirname "$LEASE_FILE")" 2>/dev/null || return 1
+
+    python3 - "$LEASE_FILE" "$source_ref" <<'PY'
+import datetime
+import json
+import os
+import sys
+import tempfile
+import time
+
+path = sys.argv[1]
+source_ref = sys.argv[2]
+directory = os.path.dirname(path)
+os.makedirs(directory, exist_ok=True)
+
+now = int(time.time())
+data = {
+    "schema": 1,
+    "last_active_unix": now,
+    "last_active_utc": datetime.datetime.fromtimestamp(
+        now, datetime.timezone.utc
+    ).isoformat().replace("+00:00", "Z"),
+    "source_ref": source_ref,
+}
+
+fd, tmp = tempfile.mkstemp(prefix=".online-lease.", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+finally:
+    try:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    except OSError:
+        pass
+PY
+}
+
+set_runtime_offline_lock() {
+    mkdir -p "$(dirname "$RUNTIME_LOCK_MARKER")" 2>/dev/null || true
+    printf '%s\n' "lease_expired" > "$RUNTIME_LOCK_MARKER" 2>/dev/null || true
+
+    # Nur die eigentlichen Diagnoseprogramme sperren. Updater und Kiosk-
+    # Helper bleiben ausführbar, damit ein späterer ACTIVE-Kontakt die
+    # Installation selbständig wieder freigeben kann.
+    local app
+    for app in \
+        "$HOME/.local/bin/network-check.sh" \
+        "$HOME/.local/bin/wipe-auto-app.sh" \
+        "$HOME/.local/bin/uwuntu-audio-test.sh" \
+        "$HOME/.local/bin/hardware-check.sh" \
+        "$HOME/.local/bin/uwuntu-camera-test.sh" \
+        "$HOME/.local/bin/uwuntu-touch-tester.sh" \
+        "$HOME/.local/bin/uwuntu-display-test.sh"
+    do
+        [ -e "$app" ] || continue
+        chmod u-x "$app" 2>/dev/null || true
+    done
+}
+
+clear_runtime_offline_lock() {
+    rm -f "$RUNTIME_LOCK_MARKER" 2>/dev/null || true
+
+    local app
+    for app in \
+        "$HOME/.local/bin/network-check.sh" \
+        "$HOME/.local/bin/wipe-auto-app.sh" \
+        "$HOME/.local/bin/uwuntu-audio-test.sh" \
+        "$HOME/.local/bin/hardware-check.sh" \
+        "$HOME/.local/bin/uwuntu-camera-test.sh" \
+        "$HOME/.local/bin/uwuntu-touch-tester.sh" \
+        "$HOME/.local/bin/uwuntu-display-test.sh"
+    do
+        [ -e "$app" ] || continue
+        chmod u+x "$app" 2>/dev/null || true
+    done
+}
+
+lease_guard_or_lock() {
+    local reason="${1:-unknown}"
+    local state
+    state="$(lease_state 2>/dev/null || printf '%s' invalid)"
+
+    if [ "$state" = "valid" ]; then
+        printf '%s  Lease gültig · Offline-Fallback erlaubt (%s)\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$reason" >> "$LOG" 2>/dev/null || true
+        return 0
+    fi
+
+    printf '%s  INTERN|LEASE_LOCK|state=%s|reason=%s|code=%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$state" "$reason" "$LEASE_ERROR_CODE" \
+        >> "$LOG" 2>/dev/null || true
+
+    set_runtime_offline_lock
+
+    # Absichtlich wie eine zähe Update-/Netzwerkprüfung wirken lassen.
+    sleep 7
+    status "FEHLER: Update konnte nicht abgeschlossen werden · $LEASE_ERROR_CODE"
+    exit 43
+}
+
 remember_source_ref() {
     [ -n "${latest_sha:-}" ] || return 0
     mkdir -p "$(dirname "$LOCAL_SOURCE_REF")" 2>/dev/null || true
@@ -76,6 +230,14 @@ fi
 
 [ -f "$TARGET" ] || fail "Ubuntu Autostart Manager wurde nicht gefunden." 12
 printf '%s\n' "$TARGET" > "$PATH_FILE" 2>/dev/null || true
+
+if [ "$STARTUP_OFFLINE_MODE" -eq 1 ]; then
+    status "Prüfe GitHub vor dem Programmstart …"
+    lease_guard_or_lock "network_offline"
+    status "GitHub nicht erreichbar · starte lokalen Stand"
+    exit 0
+fi
+
 command -v curl >/dev/null 2>&1 || fail "curl ist nicht installiert." 13
 
 if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
@@ -183,15 +345,23 @@ PY
                         exit 42
                         ;;
                     active)
-                        printf '%s  Remote-Status: active @ %s\n' \
-                            "$(date '+%Y-%m-%d %H:%M:%S')" "$latest_sha" >> "$LOG" 2>/dev/null || true
+                        if record_active_lease "$latest_sha"; then
+                            clear_runtime_offline_lock
+                            printf '%s  Remote-Status: active @ %s · Lease erneuert\n' \
+                                "$(date '+%Y-%m-%d %H:%M:%S')" "$latest_sha" >> "$LOG" 2>/dev/null || true
+                        else
+                            printf '%s  WARNUNG: ACTIVE bestätigt, Lease konnte nicht gespeichert werden.\n' \
+                                "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
+                        fi
                         ;;
                     *)
-                        status "Remote-Status ungültig · Sperrprüfung übersprungen"
+                        lease_guard_or_lock "remote_status_invalid"
+                        status "Remote-Status ungültig · lokale Lease verwendet"
                         ;;
                 esac
             else
-                status "Remote-Status nicht schnell erreichbar · Sperrprüfung übersprungen"
+                lease_guard_or_lock "remote_status_unreachable"
+                status "Remote-Status nicht schnell erreichbar · lokale Lease verwendet"
             fi
         fi
 
@@ -204,6 +374,7 @@ PY
         fi
     else
         if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+            lease_guard_or_lock "github_ref_invalid"
             startup_skip "GitHub-Antwort nicht eindeutig · starte lokalen Stand"
         fi
 
@@ -212,6 +383,7 @@ PY
     fi
 else
     if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+        lease_guard_or_lock "github_ref_unreachable"
         startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
     fi
 
