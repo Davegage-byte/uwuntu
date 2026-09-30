@@ -44,8 +44,11 @@ startup_network_may_reach_github() {
 run_startup_update_preflight() {
     if [ "${UWUNTU_SKIP_STARTUP_UPDATE:-0}" = "1" ]; then
         unset UWUNTU_SKIP_STARTUP_UPDATE
-        echo "Update-Preflight nach erfolgreichem Update einmal übersprungen."
-        return 0
+        # Nach einem frisch installierten Runtime-Update wird trotzdem genau
+        # eine kurze Statusprüfung durchgeführt. So wird die neue Lease sofort
+        # initialisiert und der Stick kann nicht mit fehlender Lease in den
+        # nächsten Offline-Boot gehen.
+        echo "Update installiert; bestätige Remote-Status und initialisiere Freigabe."
     fi
 
     if [ ! -x "$FORCE_UPDATE_SCRIPT" ]; then
