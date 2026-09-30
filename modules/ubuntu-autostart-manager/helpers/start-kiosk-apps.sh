@@ -173,7 +173,7 @@ class StartupUpdate(Gtk.Application):
             self.status_label.remove_css_class(css_class)
 
         normalized = (text or "").strip()
-        if normalized.startswith("FEHLER:"):
+        if normalized.startswith("FEHLER:") or "TEST-SPERRE" in normalized:
             color = "red"
         elif (
             normalized.startswith("Update gefunden")
@@ -246,7 +246,108 @@ PY
 run_startup_update_preflight
 STARTUP_UPDATE_RC=$?
 
-if [ "$STARTUP_UPDATE_RC" -eq 10 ]; then
+show_test_revoked_screen() {
+    python3 <<'PY'
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gdk, Gtk
+
+CSS = b"""
+window {
+    background: #17171c;
+    color: #f4f4f5;
+}
+.lock-box {
+    background: #241719;
+    border: 2px solid #ff4c4c;
+    border-radius: 18px;
+    padding: 34px 42px;
+}
+.lock-title {
+    color: #ff4c4c;
+    font-size: 34px;
+    font-weight: 900;
+}
+.lock-subtitle {
+    color: #f4f4f5;
+    font-size: 18px;
+    font-weight: 800;
+}
+.lock-info {
+    color: #d6d6da;
+    font-size: 15px;
+}
+button {
+    margin-top: 18px;
+    padding: 10px 18px;
+    font-weight: 800;
+}
+"""
+
+class RevokedTest(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="com.david.UwuntuRevokedTest")
+
+    def do_activate(self):
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display,
+                provider,
+                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+        window = Gtk.ApplicationWindow(application=self)
+        window.set_title("Uwuntu Test-Sperre")
+        window.set_default_size(900, 520)
+        try:
+            window.fullscreen()
+        except Exception:
+            pass
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        outer.set_halign(Gtk.Align.CENTER)
+        outer.set_valign(Gtk.Align.CENTER)
+        outer.add_css_class("lock-box")
+
+        title = Gtk.Label(label="UWUNTU TEST-SPERRE AKTIV")
+        title.add_css_class("lock-title")
+        outer.append(title)
+
+        subtitle = Gtk.Label(label="Remote-Status: TEST_REVOKED")
+        subtitle.add_css_class("lock-subtitle")
+        outer.append(subtitle)
+
+        info = Gtk.Label(
+            label=(
+                "Die Uwuntu-Diagnoseprogramme wurden absichtlich nicht gestartet.\n"
+                "Dieser Test verändert oder löscht keine Daten, Schlüssel oder Partitionen."
+            )
+        )
+        info.set_justify(Gtk.Justification.CENTER)
+        info.add_css_class("lock-info")
+        outer.append(info)
+
+        close_button = Gtk.Button(label="TEST BEENDEN")
+        close_button.connect("clicked", lambda *_: self.quit())
+        outer.append(close_button)
+
+        window.set_child(outer)
+        window.present()
+
+
+app = RevokedTest()
+app.run([])
+PY
+}
+
+if [ "$STARTUP_UPDATE_RC" -eq 42 ]; then
+    echo "Remote-Teststatus TEST_REVOKED erkannt; Diagnoseprogramme werden nicht gestartet."
+    show_test_revoked_screen
+    exit 42
+elif [ "$STARTUP_UPDATE_RC" -eq 10 ]; then
     echo "Update wurde vor dem App-Start installiert; starte den neuen Kiosk-Stand."
 
     if [ -x "$KIOSK_SELF" ]; then
