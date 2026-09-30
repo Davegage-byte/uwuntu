@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.61"
+VERSION = "2.62"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -563,7 +563,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.37"
+WIPE_VERSION = "3.38"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -921,6 +921,35 @@ SMART_TEMP_WARN_C = 60.0
 SMART_TEMP_BAD_C = 70.0
 SMART_WEAR_WARN_PERCENT = 80
 SMART_WEAR_BAD_PERCENT = 100
+SMART_UNSAFE_SHUTDOWN_WARN = 50
+KEYBOARD_TEST_STATE_FILE = (
+    Path.home() / ".local/state/uwuntu/keyboard_test_active"
+)
+
+def keyboard_test_active():
+    try:
+        pid = int(KEYBOARD_TEST_STATE_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+
+    if pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(
+            "utf-8",
+            errors="ignore",
+        ).lower()
+    except Exception:
+        return False
+
+    return "hardware-check" in cmdline
+
 
 def smart_number(value, default=0):
     if isinstance(value, dict):
@@ -1106,8 +1135,8 @@ def smart_collect(disk):
 
         unsafe = smart_number(nvme.get("unsafe_shutdowns"))
         add("Unsichere Abschaltungen", smart_format_count(unsafe),
-            "Stromverlust oder hartes Ausschalten ohne sauberes Herunterfahren.",
-            "good" if unsafe == 0 else "warn")
+            "Stromverlust oder hartes Ausschalten ohne sauberes Herunterfahren. Unter 50 unauffällig.",
+            "good" if unsafe < SMART_UNSAFE_SHUTDOWN_WARN else "warn")
 
         media_errors = smart_number(nvme.get("media_errors"))
         add("Medienfehler", smart_format_count(media_errors),
@@ -2386,14 +2415,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.61 + Wipe Auto v3.37 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.62 + Wipe Auto v3.38 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.61 + Wipe Auto v3.37 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.62 + Wipe Auto v3.38 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -3998,6 +4027,9 @@ class NetworkCheckApp(Gtk.Application):
             name.lower() == "s"
             and not (state & Gdk.ModifierType.CONTROL_MASK)
         ):
+            if keyboard_test_active():
+                log("SMART-Hotkey S ignoriert: Keyboard-Test aktiv")
+                return True
             self.wipe_panel.show_smart_window()
             return True
 
