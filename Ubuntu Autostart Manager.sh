@@ -70,8 +70,8 @@ STAGED_RUNTIME_MANIFEST=""
 # Robuste Bootstrap-Werte fuer Installationen ohne Manifest. Sobald ein
 # gueltiges lokales oder gestagtes Manifest vorliegt, kommen sichtbare
 # Komponentenstaende ausschliesslich daraus.
-VERSION_NC="2.62"
-VERSION_WA="3.38"
+VERSION_NC="2.63"
+VERSION_WA="3.39"
 VERSION_HC="4.5.148"
 VERSION_CA="1.20"
 VERSION_AU="1.21"
