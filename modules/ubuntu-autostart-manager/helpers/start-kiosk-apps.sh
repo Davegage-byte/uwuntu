@@ -53,14 +53,15 @@ run_startup_update_preflight() {
         return 0
     fi
 
+    local helper_mode="--startup-check"
     if ! startup_network_may_reach_github; then
-        echo "Kein voll nutzbares Netzwerk gemeldet; starte ohne Update-Wartezeit."
-        return 0
+        helper_mode="--startup-offline"
+        echo "Kein voll nutzbares Netzwerk gemeldet; prüfe lokale Update-Freigabe."
+    else
+        echo "Prüfe vor dem App-Start kurz auf Uwuntu-Updates ..."
     fi
 
-    echo "Prüfe vor dem App-Start kurz auf Uwuntu-Updates ..."
-
-    python3 - "$FORCE_UPDATE_SCRIPT" <<'PY'
+    python3 - "$FORCE_UPDATE_SCRIPT" "$helper_mode" <<'PY'
 import subprocess
 import sys
 import threading
@@ -70,6 +71,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, GLib, Gtk
 
 helper = sys.argv[1]
+helper_mode = sys.argv[2]
 
 CSS = b"""
 window {
@@ -205,7 +207,7 @@ class StartupUpdate(Gtk.Application):
     def worker(self):
         try:
             proc = subprocess.Popen(
-                [helper, "--startup-check"],
+                [helper, helper_mode],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -230,6 +232,8 @@ class StartupUpdate(Gtk.Application):
             delay_ms = 250
         elif self.result_code == 10:
             delay_ms = 550
+        elif self.result_code == 43:
+            delay_ms = 5000
         else:
             delay_ms = 1200
 
@@ -347,6 +351,9 @@ if [ "$STARTUP_UPDATE_RC" -eq 42 ]; then
     echo "Remote-Teststatus TEST_REVOKED erkannt; Diagnoseprogramme werden nicht gestartet."
     show_test_revoked_screen
     exit 42
+elif [ "$STARTUP_UPDATE_RC" -eq 43 ]; then
+    echo "Startup-Update konnte nicht abgeschlossen werden (E9017)."
+    exit 43
 elif [ "$STARTUP_UPDATE_RC" -eq 10 ]; then
     echo "Update wurde vor dem App-Start installiert; starte den neuen Kiosk-Stand."
 
