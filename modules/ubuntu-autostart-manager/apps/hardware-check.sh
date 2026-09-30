@@ -3233,9 +3233,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.143"
+            "Hardware Benchmark v4.5.144"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.143"
+            else "Hardware Check v4.5.144"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3246,9 +3246,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.143"
+                "Hardware Benchmark v4.5.144"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.143"
+                else "Hardware Check v4.5.144"
             )
         )
         title_label.add_css_class("title")
@@ -3297,7 +3297,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.143 gestartet")
+            log("Hardware Benchmark v4.5.144 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -5881,26 +5881,35 @@ class App(Gtk.Application):
         grid.add_css_class("hotkey-grid")
 
         shortcuts = [
-            ("F1", "Diese Übersicht öffnen"),
-            ("STRG+D", "4-Felder-Diagnose-Layout starten"),
-            ("←", "Audio Test: linken Lautsprecher testen"),
-            ("↑", "Audio Test: beide Lautsprecher testen"),
-            ("→", "Audio Test: rechten Lautsprecher testen"),
-            ("↓", "Audio Test: kompletten Auto-Test starten"),
+            # Allgemein
+            ("F1", "GLOBAL: Diese Shortcut-Übersicht öffnen"),
+            ("STRG+D", "GLOBAL: 4-Felder-Diagnose-Layout starten"),
+
+            # Hardware / Diagnose
+            ("K", "GLOBAL: Keyboard-Test öffnen"),
+            ("T", "GLOBAL: Touchscreen-Test öffnen"),
+            ("D", "GLOBAL: Display-Test starten"),
+            ("S", "GLOBAL: SSD-/SMART-Werte anzeigen"),
+            ("I", "GLOBAL: Systeminformationen anzeigen"),
+            ("G", "GLOBAL: Garantieprüfung Dell / Lenovo öffnen"),
+            ("U", "GLOBAL: Uwuntu-Update suchen und installieren"),
+
+            # Benchmark
             ("B", "GLOBAL: CPU-Kurztest im Benchmark-Fenster starten"),
-            ("K", "Keyboard-Test global öffnen"),
             ("R", "GLOBAL: RAM-Kurztest im Benchmark-Fenster starten"),
             ("A", "GLOBAL: ALLE Kurztests im Benchmark-Fenster starten"),
-            ("S", "GLOBAL: SSD-/SMART-Werte anzeigen"),
-            ("I", "Systeminformationen anzeigen"),
-            ("U", "Uwuntu-Update suchen und installieren"),
-            ("G", "Garantieprüfung Dell / Lenovo"),
-            ("T", "Touchscreen-Test manuell öffnen"),
-            ("D", "Display-Test starten"),
+
+            # Audio
+            ("←", "GLOBAL: Audio Test – linken Lautsprecher testen"),
+            ("↑", "GLOBAL: Audio Test – beide Lautsprecher testen"),
+            ("→", "GLOBAL: Audio Test – rechten Lautsprecher testen"),
+            ("↓", "GLOBAL: Audio Test – kompletten Auto-Test starten"),
+
+            # Bedienung / Schließen
             ("ENTER", "Wipe Auto: LÖSCHEN / danach JA bestätigen"),
+            ("ESC", "Benchmark/RAM abbrechen · Tastatur-Test mit ESC x3 beenden"),
             ("STRG+W", "Aktuelles Diagnosefenster schließen"),
             ("STRG+Q", "Alle Uwuntu-Diagnosefenster schließen"),
-            ("ESC", "Benchmark/RAM abbrechen · Tastatur-Test mit ESC x3 beenden"),
         ]
 
         for row, (key_text, desc_text) in enumerate(shortcuts):
@@ -5926,7 +5935,7 @@ class App(Gtk.Application):
 
         note = Gtk.Label(
             label=(
-                "Hinweis: Im KEYBOARD TEST sind F1, A, B, K, R, S, I, U, G, T, D,\n"
+                "Hinweis: Im KEYBOARD TEST sind F1, K, T, D, S, I, G, U, B, R, A,\n"
                 "SUPER und alle Pfeiltasten normale Prüftasten. ESC zählt ebenfalls\n"
                 "als Prüftaste; erst ESC x3 beendet den Tastatur-Test. SUPER allein,\n"
                 "SUPER+Pfeile und ALT+SPACE lösen während des Tests keine\n"
