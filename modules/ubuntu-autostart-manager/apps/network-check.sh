@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.60"
+VERSION = "2.61"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -563,7 +563,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.36"
+WIPE_VERSION = "3.37"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -1275,6 +1275,8 @@ class WipeCompactPanel:
         self.smart_window = None
         self.smart_disk_path = None
         self.smart_overall = None
+        self.smart_data = None
+        self.smart_check_disk = None
 
         # Batterie und Datenträger sind jetzt zwei eigenständige volle Zeilen.
         # Zusammen mit LAN und WLAN ergibt das exakt:
@@ -1430,6 +1432,51 @@ class WipeCompactPanel:
             klass = "neutral"
         self.set_class(self.disk_value, klass)
 
+    @staticmethod
+    def smart_overall_from_data(data):
+        states = [row[3] for row in (data or {}).get("rows", [])]
+        return "bad" if "bad" in states else "warn" if "warn" in states else "good"
+
+    def ensure_smart_check(self):
+        disk = self.disk
+        if not disk:
+            return False
+
+        if self.smart_disk_path == disk and self.smart_data is not None:
+            self.apply_disk_smart_color()
+            return False
+
+        if self.smart_check_disk == disk:
+            return False
+
+        self.smart_check_disk = disk
+        threading.Thread(
+            target=self._smart_check_worker,
+            args=(disk,),
+            daemon=True,
+            name="uwuntu-smart-check",
+        ).start()
+        return False
+
+    def _smart_check_worker(self, disk):
+        data = smart_collect(disk)
+        overall = self.smart_overall_from_data(data)
+        GLib.idle_add(self._finish_smart_check, disk, data, overall)
+
+    def _finish_smart_check(self, disk, data, overall):
+        if self.smart_check_disk == disk:
+            self.smart_check_disk = None
+
+        if self.disk != disk:
+            return False
+
+        self.smart_data = data
+        self.smart_disk_path = disk
+        self.smart_overall = overall
+        self.apply_disk_smart_color()
+        log(f"SMART-Startprüfung abgeschlossen: {disk} -> {overall}")
+        return False
+
     def refresh_battery(self):
         health, percentage, state, remaining, power_w = wipe_battery_info()
         power_text = wipe_format_battery_power(power_w, state)
@@ -1572,6 +1619,7 @@ class WipeCompactPanel:
             self.apply_disk_smart_color()
             self.disk_note.set_text(f"{self.disk} · Bereit zum Löschen.")
             self.wipe_button.set_sensitive(True)
+            self.ensure_smart_check()
 
 
     def close_smart_window(self, *_):
@@ -1649,7 +1697,16 @@ class WipeCompactPanel:
             except Exception:
                 self.smart_window = None
 
-        data = smart_collect(self.disk)
+        if self.smart_disk_path == self.disk and self.smart_data is not None:
+            data = self.smart_data
+        else:
+            data = smart_collect(self.disk)
+            if self.disk:
+                self.smart_data = data
+                self.smart_disk_path = self.disk
+                self.smart_overall = self.smart_overall_from_data(data)
+                self.apply_disk_smart_color()
+
         app = self.window.get_application()
         window = Gtk.ApplicationWindow(application=app)
         window.set_title("SSD / SMART-Werte")
@@ -1688,9 +1745,9 @@ class WipeCompactPanel:
         meta.add_css_class("smart-subtitle")
         outer.append(meta)
 
-        states = [row[3] for row in data["rows"]]
-        overall = "bad" if "bad" in states else "warn" if "warn" in states else "good"
+        overall = self.smart_overall_from_data(data)
         if self.disk:
+            self.smart_data = data
             self.smart_disk_path = self.disk
             self.smart_overall = overall
             self.apply_disk_smart_color()
@@ -2329,14 +2386,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.60 + Wipe Auto v3.36 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.61 + Wipe Auto v3.37 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.60 + Wipe Auto v3.36 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.61 + Wipe Auto v3.37 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
