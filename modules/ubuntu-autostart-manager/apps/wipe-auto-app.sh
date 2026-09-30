@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.35"
+VERSION = "3.36"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -860,6 +860,8 @@ class WipeAutoApp(Gtk.Application):
         self.confirmed_disk = None
         self.confirmed_identity = None
         self.smart_window = None
+        self.smart_disk_path = None
+        self.smart_overall = None
 
         # Letzte erkannte Größe + Modellbezeichnung der SSD.
         # Diese Information bleibt nach dem Wipe sichtbar.
@@ -1153,20 +1155,22 @@ class WipeAutoApp(Gtk.Application):
         }
 
         .smart-title {
+            color: #f4f4f5;
             font-size: 17px;
             font-weight: 800;
         }
         .smart-subtitle {
-            color: #9d9da7;
+            color: #f4f4f5;
             font-size: 10px;
             font-weight: 600;
         }
         .smart-summary {
+            color: #f4f4f5;
             font-size: 13px;
             font-weight: 800;
         }
         .smart-legend {
-            color: #9d9da7;
+            color: #f4f4f5;
             font-size: 10px;
             font-weight: 600;
         }
@@ -1177,11 +1181,16 @@ class WipeAutoApp(Gtk.Application):
             padding: 8px;
         }
         .smart-header {
-            color: #9d9da7;
+            color: #f4f4f5;
             font-size: 10px;
             font-weight: 800;
         }
-        .smart-label, .smart-value, .smart-help {
+        .smart-label, .smart-help {
+            color: #f4f4f5;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .smart-value {
             font-size: 11px;
             font-weight: 700;
         }
@@ -1299,6 +1308,18 @@ class WipeAutoApp(Gtk.Application):
         for c in ("good", "bad", "warn", "neutral", "live"):
             widget.remove_css_class(c)
         widget.add_css_class(klass)
+
+    def apply_disk_smart_color(self):
+        if (
+            self.disk
+            and self.smart_disk_path == self.disk
+            and self.smart_overall in {"good", "warn", "bad"}
+        ):
+            klass = self.smart_overall
+        else:
+            klass = "neutral"
+        self.set_class(self.disk_value, klass)
+
     def on_wipe_focus_changed(self, widget, pspec):
         try:
             focused = widget.get_property("has-focus")
@@ -1479,7 +1500,7 @@ class WipeAutoApp(Gtk.Application):
             )
 
             self.disk_value.set_text(self.last_disk_display)
-            self.set_class(self.disk_value, "warn")
+            self.apply_disk_smart_color()
             self.disk_note.set_text("Bereit zum Löschen.")
             self.wipe_button.set_sensitive(True)
 
@@ -1596,6 +1617,10 @@ class WipeAutoApp(Gtk.Application):
 
         states = [row[3] for row in data["rows"]]
         overall = "bad" if "bad" in states else "warn" if "warn" in states else "good"
+        if self.disk:
+            self.smart_disk_path = self.disk
+            self.smart_overall = overall
+            self.apply_disk_smart_color()
         overall_text = {
             "good": "GESAMTBEWERTUNG: IN ORDNUNG",
             "warn": "GESAMTBEWERTUNG: AUFFÄLLIGKEITEN",
@@ -1604,7 +1629,6 @@ class WipeAutoApp(Gtk.Application):
         summary = Gtk.Label(label=overall_text)
         summary.set_xalign(0)
         summary.add_css_class("smart-summary")
-        summary.add_css_class(overall)
         outer.append(summary)
 
         grid = Gtk.Grid()
@@ -1628,7 +1652,6 @@ class WipeAutoApp(Gtk.Application):
             label.set_wrap(True)
             label.set_max_width_chars(30)
             label.add_css_class("smart-label")
-            label.add_css_class(status)
 
             value = Gtk.Label(label=value_text)
             value.set_xalign(0)
@@ -1646,7 +1669,6 @@ class WipeAutoApp(Gtk.Application):
             help_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             help_label.set_max_width_chars(46)
             help_label.add_css_class("smart-help")
-            help_label.add_css_class(status)
 
             grid.attach(label, 0, row_index, 1, 1)
             grid.attach(value, 1, row_index, 1, 1)
@@ -1763,7 +1785,7 @@ class WipeAutoApp(Gtk.Application):
         else:
             self.disk_value.set_text("SSD WIRD GELÖSCHT …")
 
-        self.set_class(self.disk_value, "live")
+        self.apply_disk_smart_color()
         self.disk_note.set_text("Bitte warten.")
 
         thread = threading.Thread(
@@ -1843,7 +1865,7 @@ class WipeAutoApp(Gtk.Application):
         else:
             self.disk_value.set_text("Erfolgreich Gelöscht")
 
-        self.set_class(self.disk_value, "good")
+        self.apply_disk_smart_color()
 
         self.disk_note.set_text(
             f"{disk}: keine Signaturen und keine Partitionen mehr erkannt."
@@ -1869,7 +1891,7 @@ class WipeAutoApp(Gtk.Application):
         else:
             self.disk_value.set_text("Löschen Fehlgeschlagen")
 
-        self.set_class(self.disk_value, "bad")
+        self.apply_disk_smart_color()
 
         self.disk_note.set_text(message)
 
