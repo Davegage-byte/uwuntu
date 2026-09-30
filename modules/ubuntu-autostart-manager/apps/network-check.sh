@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.59"
+VERSION = "2.60"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -563,7 +563,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.35"
+WIPE_VERSION = "3.36"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -1273,6 +1273,8 @@ class WipeCompactPanel:
         self.soh_alert_active = False
         self.soh_blink_on = False
         self.smart_window = None
+        self.smart_disk_path = None
+        self.smart_overall = None
 
         # Batterie und Datenträger sind jetzt zwei eigenständige volle Zeilen.
         # Zusammen mit LAN und WLAN ergibt das exakt:
@@ -1417,6 +1419,17 @@ class WipeCompactPanel:
             widget.remove_css_class(c)
         widget.add_css_class(klass)
 
+    def apply_disk_smart_color(self):
+        if (
+            self.disk
+            and self.smart_disk_path == self.disk
+            and self.smart_overall in {"good", "warn", "bad"}
+        ):
+            klass = self.smart_overall
+        else:
+            klass = "neutral"
+        self.set_class(self.disk_value, klass)
+
     def refresh_battery(self):
         health, percentage, state, remaining, power_w = wipe_battery_info()
         power_text = wipe_format_battery_power(power_w, state)
@@ -1556,7 +1569,7 @@ class WipeCompactPanel:
             self.set_class(self.disk_badge, "neutral")
             self.last_disk_display = f"{details['size']} • {details['model']}"
             self.disk_value.set_text(self.last_disk_display)
-            self.set_class(self.disk_value, "warn")
+            self.apply_disk_smart_color()
             self.disk_note.set_text(f"{self.disk} · Bereit zum Löschen.")
             self.wipe_button.set_sensitive(True)
 
@@ -1677,6 +1690,10 @@ class WipeCompactPanel:
 
         states = [row[3] for row in data["rows"]]
         overall = "bad" if "bad" in states else "warn" if "warn" in states else "good"
+        if self.disk:
+            self.smart_disk_path = self.disk
+            self.smart_overall = overall
+            self.apply_disk_smart_color()
         overall_text = {
             "good": "GESAMTBEWERTUNG: IN ORDNUNG",
             "warn": "GESAMTBEWERTUNG: AUFFÄLLIGKEITEN",
@@ -1685,7 +1702,6 @@ class WipeCompactPanel:
         summary = Gtk.Label(label=overall_text)
         summary.set_xalign(0)
         summary.add_css_class("smart-summary")
-        summary.add_css_class(overall)
         outer.append(summary)
 
         grid = Gtk.Grid()
@@ -1709,7 +1725,6 @@ class WipeCompactPanel:
             label.set_wrap(True)
             label.set_max_width_chars(30)
             label.add_css_class("smart-label")
-            label.add_css_class(status)
 
             value = Gtk.Label(label=value_text)
             value.set_xalign(0)
@@ -1727,7 +1742,6 @@ class WipeCompactPanel:
             help_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             help_label.set_max_width_chars(46)
             help_label.add_css_class("smart-help")
-            help_label.add_css_class(status)
 
             grid.attach(label, 0, row_index, 1, 1)
             grid.attach(value, 1, row_index, 1, 1)
@@ -1834,7 +1848,7 @@ class WipeCompactPanel:
             (self.last_disk_display + " • Wird gelöscht …")
             if self.last_disk_display else "SSD WIRD GELÖSCHT …"
         )
-        self.set_class(self.disk_value, "live")
+        self.apply_disk_smart_color()
         self.disk_note.set_text("Bitte warten.")
         threading.Thread(
             target=self.wipe_worker,
@@ -1891,7 +1905,7 @@ class WipeCompactPanel:
             (self.last_disk_display + " • Erfolgreich gelöscht")
             if self.last_disk_display else "Erfolgreich gelöscht"
         )
-        self.set_class(self.disk_value, "good")
+        self.apply_disk_smart_color()
         self.disk_note.set_text(
             f"{disk}: keine Signaturen und keine Partitionen mehr erkannt."
         )
@@ -1913,7 +1927,7 @@ class WipeCompactPanel:
             )
         else:
             self.disk_value.set_text("Löschen fehlgeschlagen")
-        self.set_class(self.disk_value, "bad")
+        self.apply_disk_smart_color()
         self.disk_note.set_text(str(message))
         self.restore_wipe_button()
         self.wipe_button.set_sensitive(False)
@@ -2315,14 +2329,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.59 + Wipe Auto v3.35 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.60 + Wipe Auto v3.36 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.59 + Wipe Auto v3.35 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.60 + Wipe Auto v3.36 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2648,20 +2662,22 @@ class NetworkCheckApp(Gtk.Application):
 
 
         .smart-title {
+            color: #f4f4f5;
             font-size: 17px;
             font-weight: 800;
         }
         .smart-subtitle {
-            color: #9d9da7;
+            color: #f4f4f5;
             font-size: 10px;
             font-weight: 600;
         }
         .smart-summary {
+            color: #f4f4f5;
             font-size: 13px;
             font-weight: 800;
         }
         .smart-legend {
-            color: #9d9da7;
+            color: #f4f4f5;
             font-size: 10px;
             font-weight: 600;
         }
@@ -2672,11 +2688,16 @@ class NetworkCheckApp(Gtk.Application):
             padding: 8px;
         }
         .smart-header {
-            color: #9d9da7;
+            color: #f4f4f5;
             font-size: 10px;
             font-weight: 800;
         }
-        .smart-label, .smart-value, .smart-help {
+        .smart-label, .smart-help {
+            color: #f4f4f5;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .smart-value {
             font-size: 11px;
             font-weight: 700;
         }
