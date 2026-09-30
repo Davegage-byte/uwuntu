@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.40"
+VERSION = "3.41"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -1212,6 +1212,15 @@ class WipeAutoApp(Gtk.Application):
             font-size: 13px;
             font-weight: 800;
         }
+        .smart-summary.good {
+            color: #61d36b;
+        }
+        .smart-summary.warn {
+            color: #f5a623;
+        }
+        .smart-summary.bad {
+            color: #ff4c4c;
+        }
         .smart-legend {
             color: #f4f4f5;
             font-size: 10px;
@@ -1702,6 +1711,7 @@ class WipeAutoApp(Gtk.Application):
         summary = Gtk.Label(label=overall_text)
         summary.set_xalign(0)
         summary.add_css_class("smart-summary")
+        summary.add_css_class(overall)
         outer.append(summary)
 
         grid = Gtk.Grid()
