@@ -27,7 +27,7 @@ REF_API_URL="https://api.github.com/repos/Davegage-byte/uwuntu/git/ref/heads/mai
 RAW_COMMIT_BASE="https://raw.githubusercontent.com/Davegage-byte/uwuntu"
 RAW_MANAGER_PATH="Ubuntu%20Autostart%20Manager.sh"
 RAW_MANIFEST_PATH="modules/ubuntu-autostart-manager/manifest.json"
-REMOTE_STATUS_URL="https://raw.githubusercontent.com/Davegage-byte/uwuntu/refs/heads/main/modules/ubuntu-autostart-manager/remote-status.json"
+REMOTE_STATUS_PATH="modules/ubuntu-autostart-manager/remote-status.json"
 PATH_FILE="$HOME/.config/uwuntu-manager-path"
 DEFAULT_TARGET="$HOME/.local/bin/Ubuntu Autostart Manager.sh"
 LOG="$HOME/uwuntu_force_update.log"
@@ -91,51 +91,6 @@ REMOTE_STATUS_TMP="$(mktemp /tmp/uwuntu-remote-status.XXXXXX.json)" || fail "Tem
 BACKUP="${TARGET}.update-backup"
 trap 'rm -f "$TMP" "$REF_TMP" "$MANIFEST_TMP" "$REMOTE_STATUS_TMP" "${TARGET}.new" 2>/dev/null || true' EXIT
 
-# Sicherer Dry-Run für eine spätere Remote-Revocation: Beim Boot wird nur
-# entschieden, ob der Diagnose-Kiosk starten darf. Es werden ausdrücklich
-# keine Dateien, Schlüssel, Partitionen oder Datenträger verändert.
-if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-    REMOTE_STATUS_CACHE_BUST="$(date +%s%N)-$$"
-    if curl \
-        --fail \
-        --location \
-        --silent \
-        --show-error \
-        --retry 0 \
-        --connect-timeout "$REF_CONNECT_TIMEOUT" \
-        --max-time "$REF_MAX_TIME" \
-        --header 'Cache-Control: no-cache, no-store, max-age=0' \
-        --header 'Pragma: no-cache' \
-        --output "$REMOTE_STATUS_TMP" \
-        "${REMOTE_STATUS_URL}?uwuntu_cache_bust=${REMOTE_STATUS_CACHE_BUST}"
-    then
-        remote_mode="$(python3 - "$REMOTE_STATUS_TMP" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if data.get("schema") != 1:
-        raise ValueError
-    mode = data.get("mode")
-    if mode not in ("active", "test_revoked"):
-        raise ValueError
-    print(mode)
-except Exception:
-    raise SystemExit(1)
-PY
-        )" || startup_skip "Remote-Status ungültig · starte lokalen Stand"
-
-        if [ "$remote_mode" = "test_revoked" ]; then
-            status "UWUNTU TEST-SPERRE aktiv · Diagnoseprogramme bleiben gesperrt"
-            exit 42
-        fi
-    else
-        startup_skip "Remote-Status nicht schnell erreichbar · starte lokalen Stand"
-    fi
-fi
-
 # Jeder Druck auf U muss GitHub wirklich neu abfragen.
 # Zuerst wird der aktuelle Commit-SHA von main über die GitHub-API ermittelt.
 # Anschließend laden wir die Manager-Datei an GENAU diesem Commit. Damit
@@ -183,6 +138,62 @@ PY
         MANIFEST_DOWNLOAD_URL="${RAW_COMMIT_BASE}/${latest_sha}/${RAW_MANIFEST_PATH}"
         printf '%s  GitHub main Commit: %s\n' \
             "$(date '+%Y-%m-%d %H:%M:%S')" "$latest_sha" >> "$LOG" 2>/dev/null || true
+
+        # Remote-Status immer vom exakt aufgelösten main-Commit laden.
+        # Dadurch kann ein beweglicher raw/main-Cache niemals einen älteren
+        # test_revoked-Stand gegen einen bereits neueren main-Commit liefern.
+        # Fehler/ungültige Antworten sind fail-open und verhindern weder den
+        # normalen Start noch das Nachladen eines späteren Fixes.
+        if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
+            REMOTE_STATUS_URL="${RAW_COMMIT_BASE}/${latest_sha}/${REMOTE_STATUS_PATH}"
+            if curl \
+                --fail \
+                --location \
+                --silent \
+                --show-error \
+                --retry 0 \
+                --connect-timeout "$REF_CONNECT_TIMEOUT" \
+                --max-time "$REF_MAX_TIME" \
+                --header 'Cache-Control: no-cache, no-store, max-age=0' \
+                --header 'Pragma: no-cache' \
+                --output "$REMOTE_STATUS_TMP" \
+                "${REMOTE_STATUS_URL}?uwuntu_cache_bust=${CACHE_BUST}"
+            then
+                remote_mode="$(python3 - "$REMOTE_STATUS_TMP" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if data.get("schema") != 1:
+        raise ValueError
+    mode = data.get("mode")
+    if mode not in ("active", "test_revoked"):
+        raise ValueError
+    print(mode)
+except Exception:
+    raise SystemExit(1)
+PY
+                )" || remote_mode=""
+
+                case "$remote_mode" in
+                    test_revoked)
+                        status "UWUNTU TEST-SPERRE aktiv · Diagnoseprogramme bleiben gesperrt"
+                        exit 42
+                        ;;
+                    active)
+                        printf '%s  Remote-Status: active @ %s\n' \
+                            "$(date '+%Y-%m-%d %H:%M:%S')" "$latest_sha" >> "$LOG" 2>/dev/null || true
+                        ;;
+                    *)
+                        status "Remote-Status ungültig · Sperrprüfung übersprungen"
+                        ;;
+                esac
+            else
+                status "Remote-Status nicht schnell erreichbar · Sperrprüfung übersprungen"
+            fi
+        fi
 
         if [ "$STARTUP_CHECK_MODE" -eq 1 ] \
             && [ -f "$LOCAL_SOURCE_REF" ] \
