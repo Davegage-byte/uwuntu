@@ -3135,6 +3135,14 @@ class App(Gtk.Application):
         self.camera_state_file = Path.home() / ".local/state/uwuntu/camera_test_status.json"
         self.audio_state_file = Path.home() / ".local/state/uwuntu/audio_test_status.json"
         self.hardware_refresh_file = Path.home() / ".local/state/uwuntu/hardware_refresh.json"
+        self.keyboard_test_state_file = (
+            Path.home() / ".local/state/uwuntu/keyboard_test_active"
+        )
+        if not BENCHMARK_WINDOW_MODE:
+            try:
+                self.keyboard_test_state_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         # Während des Tastatur-Tests wird nur Mutters Overlay-Key (einzelne
         # SUPER-Taste) temporär deaktiviert. Der Originalwert wird beim
@@ -3233,9 +3241,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.145"
+            "Hardware Benchmark v4.5.146"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.145"
+            else "Hardware Check v4.5.146"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3246,9 +3254,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.145"
+                "Hardware Benchmark v4.5.146"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.145"
+                else "Hardware Check v4.5.146"
             )
         )
         title_label.add_css_class("title")
@@ -3297,7 +3305,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.145 gestartet")
+            log("Hardware Benchmark v4.5.146 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -11104,12 +11112,33 @@ except Exception:
         self.show_overview()
         return False
 
+    def set_shared_keyboard_test_state(self, active):
+        if BENCHMARK_WINDOW_MODE:
+            return False
+
+        try:
+            self.keyboard_test_state_file.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+            if active:
+                self.keyboard_test_state_file.write_text(
+                    str(os.getpid()),
+                    encoding="utf-8",
+                )
+            else:
+                self.keyboard_test_state_file.unlink(missing_ok=True)
+        except Exception as exc:
+            log(f"Keyboard-Test-Statusdatei Fehler: {exc}")
+        return False
+
     def show_keyboard(self, *_):
         if self.stack.get_visible_child_name() == "keyboard":
             return False
 
         self.keyboard_escape_count = 0
         self.keyboard_escape_last_at = 0.0
+        self.set_shared_keyboard_test_state(True)
 
         # Sofort anzeigen. /dev/input bleibt vollständig read-only:
         # Es wird unter keinen Umständen ein EVIOCGRAB ausgelöst.
@@ -11182,6 +11211,7 @@ except Exception:
         self.window.set_default_size(860, 360)
 
         if leaving_keyboard:
+            self.set_shared_keyboard_test_state(False)
             # Oberfläche ist bereits zurück. Restore läuft ohne sichtbare
             # Verzögerung im Hintergrund weiter.
             self.restore_keyboard_shortcuts_async()
@@ -11298,6 +11328,7 @@ except Exception:
         self.mark_keyboard_alias(name, pressed=False)
 
     def do_shutdown(self):
+        self.set_shared_keyboard_test_state(False)
         self.wlan_diag_stop.set()
         self.stop_power_dialog_helper()
         self.restore_keyboard_shortcuts_with_retries(force=True)
