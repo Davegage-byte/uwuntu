@@ -2493,7 +2493,7 @@ def run_global_arrow_monitor(parent_pid):
         22: "update",       # KEY_U
         34: "warranty",     # KEY_G
         59: "hotkeys",      # KEY_F1
-        2: "hotkeys",       # KEY_1
+        35: "hotkeys",      # KEY_H
         20: "touch",        # KEY_T
         32: "display",      # KEY_D
         105: "audio-left",  # KEY_LEFT
@@ -3242,9 +3242,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.147"
+            "Hardware Benchmark v4.5.148"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.147"
+            else "Hardware Check v4.5.148"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3255,9 +3255,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.147"
+                "Hardware Benchmark v4.5.148"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.147"
+                else "Hardware Check v4.5.148"
             )
         )
         title_label.add_css_class("title")
@@ -3306,7 +3306,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.147 gestartet")
+            log("Hardware Benchmark v4.5.148 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
@@ -5891,7 +5891,7 @@ class App(Gtk.Application):
 
         shortcuts = [
             # Allgemein
-            ("F1 / 1", "Diese Shortcut-Übersicht öffnen"),
+            ("F1 / H", "Diese Shortcut-Übersicht öffnen"),
             ("STRG+D", "4-Felder-Diagnose-Layout starten"),
 
             # Hardware / Diagnose
@@ -11497,7 +11497,7 @@ except Exception:
         ):
             self.handle_global_hotkey("display")
             return True
-        if name in {"F1", "1"} and visible != "keyboard":
+        if (name == "F1" or lower_name == "h") and visible != "keyboard":
             self.handle_global_hotkey("hotkeys")
             return True
 
