@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.64"
+VERSION = "2.65"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -563,7 +563,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.40"
+WIPE_VERSION = "3.41"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -1774,6 +1774,7 @@ class WipeCompactPanel:
         summary = Gtk.Label(label=overall_text)
         summary.set_xalign(0)
         summary.add_css_class("smart-summary")
+        summary.add_css_class(overall)
         outer.append(summary)
 
         grid = Gtk.Grid()
@@ -2486,14 +2487,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.64 + Wipe Auto v3.40 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.65 + Wipe Auto v3.41 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.64 + Wipe Auto v3.40 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.65 + Wipe Auto v3.41 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2832,6 +2833,15 @@ class NetworkCheckApp(Gtk.Application):
             color: #f4f4f5;
             font-size: 13px;
             font-weight: 800;
+        }
+        .smart-summary.good {
+            color: #61d36b;
+        }
+        .smart-summary.warn {
+            color: #f5a623;
+        }
+        .smart-summary.bad {
+            color: #ff4c4c;
         }
         .smart-legend {
             color: #f4f4f5;
