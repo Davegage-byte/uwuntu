@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.39"
+VERSION = "3.40"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -900,6 +900,7 @@ class WipeAutoApp(Gtk.Application):
         self.confirmed_disk = None
         self.confirmed_identity = None
         self.smart_window = None
+        self.smart_refresh_button = None
         self.smart_disk_path = None
         self.smart_overall = None
         self.smart_data = None
@@ -1595,6 +1596,7 @@ class WipeAutoApp(Gtk.Application):
     def close_smart_window(self, *_):
         window = self.smart_window
         self.smart_window = None
+        self.smart_refresh_button = None
         if window is not None:
             try:
                 window.destroy()
@@ -1659,33 +1661,18 @@ class WipeAutoApp(Gtk.Application):
             GLib.timeout_add(500, self._restore_center_new_windows, previous)
         GLib.timeout_add(650, self._bind_smart_window, window)
 
-    def show_smart_window(self, *_):
-        if self.smart_window is not None:
-            try:
-                self.smart_window.present()
-                return False
-            except Exception:
-                self.smart_window = None
-
-        if self.smart_disk_path == self.disk and self.smart_data is not None:
-            data = self.smart_data
-        else:
-            data = smart_collect(self.disk)
-            if self.disk:
-                self.smart_data = data
-                self.smart_disk_path = self.disk
-                self.smart_overall = self.smart_overall_from_data(data)
+    def _cache_smart_window_data(self, disk, data):
+        overall = self.smart_overall_from_data(data)
+        if disk:
+            self.smart_data = data
+            self.smart_disk_path = disk
+            self.smart_overall = overall
+            if self.disk == disk:
                 self.apply_disk_smart_color()
+        return overall
 
-        window = Gtk.ApplicationWindow(application=self)
-        window.set_title("SSD / SMART-Werte")
-        window.set_default_size(790, 620)
-        window.set_resizable(True)
-        window.connect("close-request", self.close_smart_window)
-
-        key_controller = Gtk.EventControllerKey.new()
-        key_controller.connect("key-pressed", self.on_smart_key)
-        window.add_controller(key_controller)
+    def _build_smart_window_content(self, data, disk):
+        overall = self.smart_overall_from_data(data)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         outer.set_margin_top(12)
@@ -1693,12 +1680,7 @@ class WipeAutoApp(Gtk.Application):
         outer.set_margin_start(14)
         outer.set_margin_end(14)
 
-        title = Gtk.Label(label="SSD / SMART-WERTE")
-        title.set_xalign(0)
-        title.add_css_class("smart-title")
-        outer.append(title)
-
-        model = Gtk.Label(label=f"{data['model']}  •  {self.disk or '--'}")
+        model = Gtk.Label(label=f"{data['model']}  •  {disk or '--'}")
         model.set_xalign(0)
         model.set_wrap(True)
         model.add_css_class("smart-subtitle")
@@ -1712,12 +1694,6 @@ class WipeAutoApp(Gtk.Application):
         meta.add_css_class("smart-subtitle")
         outer.append(meta)
 
-        overall = self.smart_overall_from_data(data)
-        if self.disk:
-            self.smart_data = data
-            self.smart_disk_path = self.disk
-            self.smart_overall = overall
-            self.apply_disk_smart_color()
         overall_text = {
             "good": "GESAMTBEWERTUNG: IN ORDNUNG",
             "warn": "GESAMTBEWERTUNG: AUFFÄLLIGKEITEN",
@@ -1774,7 +1750,9 @@ class WipeAutoApp(Gtk.Application):
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_hexpand(True)
-        scroll.set_vexpand(True)
+        scroll.set_vexpand(False)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_height(650)
         scroll.set_child(grid)
         outer.append(scroll)
 
@@ -1783,10 +1761,92 @@ class WipeAutoApp(Gtk.Application):
         footer.add_css_class("smart-legend")
         outer.append(footer)
 
-        window.set_child(outer)
+        return outer
+
+    def refresh_smart_window(self, *_):
+        if self.smart_window is None or not self.disk:
+            return False
+
+        disk = self.disk
+        button = self.smart_refresh_button
+        if button is not None:
+            button.set_sensitive(False)
+
+        threading.Thread(
+            target=self._refresh_smart_window_worker,
+            args=(disk,),
+            daemon=True,
+            name="uwuntu-smart-refresh",
+        ).start()
+        return False
+
+    def _refresh_smart_window_worker(self, disk):
+        data = smart_collect(disk)
+        GLib.idle_add(self._finish_smart_window_refresh, disk, data)
+
+    def _finish_smart_window_refresh(self, disk, data):
+        button = self.smart_refresh_button
+        if button is not None:
+            button.set_sensitive(True)
+
+        if self.smart_window is None or self.disk != disk:
+            return False
+
+        self._cache_smart_window_data(disk, data)
+        self.smart_window.set_child(
+            self._build_smart_window_content(data, disk)
+        )
+        self.smart_window.set_default_size(790, -1)
+        self.smart_window.queue_resize()
+        log(f"SMART-Werte neu eingelesen: {disk}")
+        return False
+
+    def show_smart_window(self, *_):
+        if self.smart_window is not None:
+            try:
+                self.smart_window.present()
+                return False
+            except Exception:
+                self.smart_window = None
+                self.smart_refresh_button = None
+
+        disk = self.disk
+        if self.smart_disk_path == disk and self.smart_data is not None:
+            data = self.smart_data
+        else:
+            data = smart_collect(disk)
+            self._cache_smart_window_data(disk, data)
+
+        window = Gtk.ApplicationWindow(application=self)
+        window.set_title("SSD / SMART-WERTE")
+        window.set_default_size(790, -1)
+        window.set_resizable(True)
+        window.connect("close-request", self.close_smart_window)
+
+        header_bar = Gtk.HeaderBar()
+        header_bar.set_show_title_buttons(True)
+
+        title_label = Gtk.Label(label="SSD / SMART-WERTE")
+        title_label.add_css_class("title")
+        header_bar.set_title_widget(title_label)
+
+        refresh_button = Gtk.Button(label="REFRESH")
+        refresh_button.add_css_class("action")
+        refresh_button.add_css_class("header-refresh")
+        refresh_button.set_focusable(False)
+        refresh_button.connect("clicked", self.refresh_smart_window)
+        header_bar.pack_end(refresh_button)
+        window.set_titlebar(header_bar)
+
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self.on_smart_key)
+        window.add_controller(key_controller)
+
+        window.set_child(self._build_smart_window_content(data, disk))
         self.smart_window = window
+        self.smart_refresh_button = refresh_button
         self._present_smart_centered(window)
-        log(f"SMART-Fenster geöffnet: {self.disk or '--'}")
+        log(f"SMART-Fenster geöffnet: {disk or '--'}")
         return False
 
     def clear_action_area(self):
