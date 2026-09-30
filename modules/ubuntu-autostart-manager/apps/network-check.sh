@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.62"
+VERSION = "2.63"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -563,7 +563,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.38"
+WIPE_VERSION = "3.39"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -919,6 +919,8 @@ def wipe_disk_details(disk):
 
 SMART_TEMP_WARN_C = 60.0
 SMART_TEMP_BAD_C = 70.0
+SMART_SENSOR_TEMP_WARN_C = 70.0
+SMART_SENSOR_TEMP_BAD_C = 80.0
 SMART_WEAR_WARN_PERCENT = 80
 SMART_WEAR_BAD_PERCENT = 100
 SMART_UNSAFE_SHUTDOWN_WARN = 50
@@ -992,6 +994,15 @@ def smart_temp_state(temp):
     if temp >= SMART_TEMP_BAD_C:
         return "bad"
     if temp >= SMART_TEMP_WARN_C:
+        return "warn"
+    return "good"
+
+def smart_sensor_temp_state(temp):
+    if temp is None:
+        return "warn"
+    if temp >= SMART_SENSOR_TEMP_BAD_C:
+        return "bad"
+    if temp >= SMART_SENSOR_TEMP_WARN_C:
         return "warn"
     return "good"
 
@@ -1164,8 +1175,8 @@ def smart_collect(disk):
                 if temp is None:
                     continue
                 add(f"Temperatursensor {index}", f"{temp:.0f} °C",
-                    "Zusätzlicher interner Temperatursensor der SSD.",
-                    smart_temp_state(temp))
+                    "Zusätzlicher interner Temperatursensor: unter 70 °C grün, ab 70 °C orange, ab 80 °C rot.",
+                    smart_sensor_temp_state(temp))
 
         for key, label in (
             ("thermal_management_t1_trans_count", "Thermische Regelung Stufe 1 – Ereignisse"),
@@ -2415,14 +2426,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.62 + Wipe Auto v3.38 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.63 + Wipe Auto v3.39 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.62 + Wipe Auto v3.38 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.63 + Wipe Auto v3.39 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
