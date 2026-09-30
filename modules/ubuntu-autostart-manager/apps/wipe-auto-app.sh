@@ -68,7 +68,7 @@ uwuntu_set_dock_autohide >/dev/null 2>&1 || true
 # Wipe Auto - GTK4
 # ============================================================
 
-for cmd in upower lsblk wipefs partprobe; do
+for cmd in upower lsblk wipefs partprobe smartctl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "FEHLER: $cmd fehlt."
         exit 10
@@ -87,12 +87,13 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gtk, GLib, Gdk, Pango
 import os
 import re
+import json
 import subprocess
 import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.33"
+VERSION = "3.34"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -493,6 +494,332 @@ def disk_details(disk):
     model = parts[1].strip() if len(parts) > 1 else "--"
     return {"size": size, "model": model}
 
+
+SMART_TEMP_WARN_C = 60.0
+SMART_TEMP_BAD_C = 70.0
+SMART_WEAR_WARN_PERCENT = 80
+SMART_WEAR_BAD_PERCENT = 100
+
+def smart_number(value, default=0):
+    if isinstance(value, dict):
+        for key in ("value", "hours", "minutes"):
+            if key in value:
+                value = value[key]
+                break
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def smart_temperature_c(value):
+    try:
+        temp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if temp > 170:
+        temp -= 273.15
+    return temp
+
+def smart_format_count(value):
+    return f"{smart_number(value):,}".replace(",", ".")
+
+def smart_format_tb(data_units):
+    value = smart_number(data_units)
+    return f"{value * 512000 / 1_000_000_000_000:.2f} TB".replace(".", ",")
+
+def smart_format_minutes(value):
+    minutes = smart_number(value)
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes / 60.0:.1f} h".replace(".", ",")
+
+def smart_temp_state(temp):
+    if temp is None:
+        return "warn"
+    if temp >= SMART_TEMP_BAD_C:
+        return "bad"
+    if temp >= SMART_TEMP_WARN_C:
+        return "warn"
+    return "good"
+
+def smart_collect(disk):
+    rows = []
+    if not disk:
+        return {
+            "model": "Kein Datenträger",
+            "serial": "--",
+            "firmware": "--",
+            "rows": [(
+                "SMART-Auslesung",
+                "NICHT MÖGLICH",
+                "Es wurde kein eindeutiger interner Datenträger erkannt.",
+                "warn",
+            )],
+        }
+
+    commands = [
+        ["sudo", "-n", "smartctl", "-a", "-j", disk],
+        ["smartctl", "-a", "-j", disk],
+    ]
+    data = None
+    last_error = ""
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=12,
+                env=ENV_C,
+                check=False,
+            )
+            if proc.stdout.strip():
+                try:
+                    candidate = json.loads(proc.stdout)
+                except Exception:
+                    candidate = None
+                if isinstance(candidate, dict) and candidate:
+                    data = candidate
+                    break
+            last_error = (proc.stderr or "").strip()
+        except Exception as exc:
+            last_error = str(exc)
+
+    if not data:
+        text = "SMART-Daten konnten nicht gelesen werden."
+        if last_error:
+            text += " " + last_error.splitlines()[-1][:120]
+        return {
+            "model": Path(disk).name,
+            "serial": "--",
+            "firmware": "--",
+            "rows": [("SMART-Auslesung", "NICHT VERFÜGBAR", text, "warn")],
+        }
+
+    def add(label, value, explanation, state="good"):
+        rows.append((label, str(value), explanation, state))
+
+    smart_passed = (data.get("smart_status") or {}).get("passed")
+    if smart_passed is True:
+        add("SMART-Gesamtzustand", "BESTANDEN",
+            "Der Datenträger meldet aktuell keinen SMART-Gesamtfehler.", "good")
+    elif smart_passed is False:
+        add("SMART-Gesamtzustand", "FEHLER",
+            "Der Datenträger meldet einen SMART-Gesamtfehler.", "bad")
+    else:
+        add("SMART-Gesamtzustand", "UNBEKANNT",
+            "Der Gesamtstatus wurde vom Laufwerk nicht bereitgestellt.", "warn")
+
+    nvme = data.get("nvme_smart_health_information_log")
+    if isinstance(nvme, dict):
+        critical = smart_number(nvme.get("critical_warning"))
+        add("Kritische NVMe-Warnung", critical,
+            "0 bedeutet: keine aktuelle kritische NVMe-Warnung.",
+            "good" if critical == 0 else "bad")
+
+        if "endurance_group_critical_warning_summary" in nvme:
+            endurance_warn = smart_number(
+                nvme.get("endurance_group_critical_warning_summary")
+            )
+            add("Kritische Endurance-Warnung", endurance_warn,
+                "0 bedeutet: keine kritische Warnung der Speichergruppe.",
+                "good" if endurance_warn == 0 else "bad")
+
+        temp = smart_temperature_c(nvme.get("temperature"))
+        if temp is not None:
+            add("Temperatur", f"{temp:.0f} °C",
+                "Unter 60 °C grün, ab 60 °C orange, ab 70 °C rot.",
+                smart_temp_state(temp))
+
+        spare = smart_number(nvme.get("available_spare"), -1)
+        threshold = smart_number(nvme.get("available_spare_threshold"), -1)
+        if spare >= 0:
+            state = "good"
+            if threshold >= 0 and spare <= threshold:
+                state = "bad"
+            elif threshold >= 0 and spare <= threshold + 10:
+                state = "warn"
+            add("Verfügbare Reserve", f"{spare} %",
+                "Reserveblöcke des Flash-Speichers; mehr ist besser.", state)
+        if threshold >= 0:
+            add("Reserve-Warnschwelle", f"{threshold} %",
+                "Ab dieser Restreserve warnt der Hersteller.", "good")
+
+        used = smart_number(nvme.get("percentage_used"), -1)
+        if used >= 0:
+            state = (
+                "bad" if used >= SMART_WEAR_BAD_PERCENT
+                else "warn" if used >= SMART_WEAR_WARN_PERCENT
+                else "good"
+            )
+            add("Verschleiß / Lebensdauer verbraucht", f"{used} %",
+                "Hersteller-Schätzwert der bereits verbrauchten SSD-Lebensdauer.",
+                state)
+
+        if "data_units_read" in nvme:
+            add("Gelesene Daten", smart_format_tb(nvme.get("data_units_read")),
+                "Gesamte vom Host gelesene Datenmenge.", "good")
+        if "data_units_written" in nvme:
+            add("Geschriebene Daten", smart_format_tb(nvme.get("data_units_written")),
+                "Gesamte vom Host geschriebene Datenmenge.", "good")
+        if "host_reads" in nvme:
+            add("Lesevorgänge des Hosts", smart_format_count(nvme.get("host_reads")),
+                "Anzahl der vom Betriebssystem angeforderten Leseoperationen.", "good")
+        if "host_writes" in nvme:
+            add("Schreibvorgänge des Hosts", smart_format_count(nvme.get("host_writes")),
+                "Anzahl der vom Betriebssystem angeforderten Schreiboperationen.", "good")
+        if "controller_busy_time" in nvme:
+            add("Controller aktiv", smart_format_minutes(nvme.get("controller_busy_time")),
+                "Gesamtzeit, in der der SSD-Controller beschäftigt war.", "good")
+        if "power_cycles" in nvme:
+            add("Einschaltvorgänge", smart_format_count(nvme.get("power_cycles")),
+                "Wie oft der Datenträger eingeschaltet wurde.", "good")
+        if "power_on_hours" in nvme:
+            add("Betriebsstunden", f"{smart_format_count(nvme.get('power_on_hours'))} h",
+                "Gesamte eingeschaltete Betriebszeit.", "good")
+
+        unsafe = smart_number(nvme.get("unsafe_shutdowns"))
+        add("Unsichere Abschaltungen", smart_format_count(unsafe),
+            "Stromverlust oder hartes Ausschalten ohne sauberes Herunterfahren.",
+            "good" if unsafe == 0 else "warn")
+
+        media_errors = smart_number(nvme.get("media_errors"))
+        add("Medienfehler", smart_format_count(media_errors),
+            "Nicht korrigierbare Fehler des Flash-Speichers.",
+            "good" if media_errors == 0 else "bad")
+
+        error_entries = smart_number(nvme.get("num_err_log_entries"))
+        add("Fehlerprotokoll-Einträge", smart_format_count(error_entries),
+            "NVMe-Fehlerprotokoll; einzelne historische Einträge sind nicht automatisch ein Defekt.",
+            "good" if error_entries == 0 else "warn")
+
+        warning_time = smart_number(nvme.get("warning_temp_time"))
+        add("Zeit über Warn-Temperatur", smart_format_minutes(warning_time),
+            "Historische Zeit oberhalb der Warn-Temperatur.",
+            "good" if warning_time == 0 else "warn")
+        critical_time = smart_number(nvme.get("critical_comp_time"))
+        add("Zeit über kritischer Temperatur", smart_format_minutes(critical_time),
+            "Historische Zeit im kritischen Temperaturbereich.",
+            "good" if critical_time == 0 else "warn")
+
+        sensors = nvme.get("temperature_sensors") or []
+        if isinstance(sensors, list):
+            for index, raw_temp in enumerate(sensors, 1):
+                temp = smart_temperature_c(raw_temp)
+                if temp is None:
+                    continue
+                add(f"Temperatursensor {index}", f"{temp:.0f} °C",
+                    "Zusätzlicher interner Temperatursensor der SSD.",
+                    smart_temp_state(temp))
+
+        for key, label in (
+            ("thermal_management_t1_trans_count", "Thermische Regelung Stufe 1 – Ereignisse"),
+            ("thermal_management_t2_trans_count", "Thermische Regelung Stufe 2 – Ereignisse"),
+        ):
+            if key in nvme:
+                value = smart_number(nvme.get(key))
+                add(label, smart_format_count(value),
+                    "Thermische Drosselung; 0 bedeutet, dass sie bisher nicht nötig war.",
+                    "good" if value == 0 else "warn")
+        for key, label in (
+            ("thermal_management_t1_total_time", "Thermische Regelung Stufe 1 – Zeit"),
+            ("thermal_management_t2_total_time", "Thermische Regelung Stufe 2 – Zeit"),
+        ):
+            if key in nvme:
+                value = smart_number(nvme.get(key))
+                add(label, smart_format_minutes(value),
+                    "Gesamtdauer der thermischen Drosselung.",
+                    "good" if value == 0 else "warn")
+
+    ata_temp = (data.get("temperature") or {}).get("current")
+    if not isinstance(nvme, dict) and ata_temp is not None:
+        temp = smart_temperature_c(ata_temp)
+        if temp is not None:
+            add("Temperatur", f"{temp:.0f} °C",
+                "Unter 60 °C grün, ab 60 °C orange, ab 70 °C rot.",
+                smart_temp_state(temp))
+
+    if not isinstance(nvme, dict):
+        hours = (data.get("power_on_time") or {}).get("hours")
+        if hours is not None:
+            add("Betriebsstunden", f"{smart_format_count(hours)} h",
+                "Gesamte eingeschaltete Betriebszeit.", "good")
+        cycles = data.get("power_cycle_count")
+        if cycles is not None:
+            add("Einschaltvorgänge", smart_format_count(cycles),
+                "Wie oft der Datenträger eingeschaltet wurde.", "good")
+
+        ata_log_count = (
+            ((data.get("ata_smart_error_log") or {}).get("summary") or {}).get("count")
+        )
+        if ata_log_count is not None:
+            count = smart_number(ata_log_count)
+            add("SMART-Fehlerprotokoll", smart_format_count(count),
+                "Historische ATA-SMART-Fehlerprotokolleinträge.",
+                "good" if count == 0 else "warn")
+
+        translations = {
+            "Reallocated_Sector_Ct": "Neu zugewiesene Sektoren",
+            "Reported_Uncorrect": "Gemeldete nicht korrigierbare Fehler",
+            "Current_Pending_Sector": "Schwebende Sektoren",
+            "Offline_Uncorrectable": "Nicht korrigierbare Sektoren",
+            "UDMA_CRC_Error_Count": "Übertragungsfehler (CRC)",
+            "Power_On_Hours": "Betriebsstunden (SMART-Attribut)",
+            "Power_Cycle_Count": "Einschaltvorgänge (SMART-Attribut)",
+            "Temperature_Celsius": "Temperatur (SMART-Attribut)",
+            "Airflow_Temperature_Cel": "Luft-/SSD-Temperatur (SMART-Attribut)",
+            "Wear_Leveling_Count": "Wear-Leveling / Verschleiß",
+            "Media_Wearout_Indicator": "Medien-Verschleißindikator",
+            "Percent_Lifetime_Remain": "Verbleibende Lebensdauer",
+        }
+        critical_ids = {5, 187, 197, 198}
+        warning_ids = {188, 199}
+        table = ((data.get("ata_smart_attributes") or {}).get("table") or [])
+        for attr in table:
+            if not isinstance(attr, dict):
+                continue
+            attr_id = smart_number(attr.get("id"), -1)
+            name = str(attr.get("name") or f"Attribut {attr_id}")
+            label = translations.get(name, f"SMART {attr_id} · {name}")
+            raw = attr.get("raw") or {}
+            raw_value = smart_number(raw.get("value"), 0)
+            raw_text = str(raw.get("string") or raw_value)
+            norm = attr.get("value")
+            thresh = attr.get("thresh")
+            when_failed = str(attr.get("when_failed") or "").strip()
+            state = "good"
+            if when_failed and when_failed not in {"-", "Never"}:
+                state = "bad"
+            elif attr_id in critical_ids and raw_value > 0:
+                state = "bad"
+            elif attr_id in warning_ids and raw_value > 0:
+                state = "warn"
+            try:
+                if (
+                    norm is not None and thresh is not None
+                    and int(thresh) > 0 and int(norm) <= int(thresh)
+                ):
+                    state = "bad"
+            except Exception:
+                pass
+            detail = f"Rohwert {raw_text}"
+            if norm is not None:
+                detail += f" · Normwert {norm}"
+            if thresh is not None:
+                detail += f" · Grenze {thresh}"
+            add(label, raw_text, detail, state)
+
+    return {
+        "model": str(data.get("model_name") or data.get("model_family") or Path(disk).name),
+        "serial": str(data.get("serial_number") or "--"),
+        "firmware": str(data.get("firmware_version") or "--"),
+        "rows": rows or [(
+            "SMART-Auslesung", "KEINE WERTE",
+            "Das Laufwerk lieferte keine auswertbaren SMART-Werte.", "warn"
+        )],
+    }
+
 def disk_is_clean(disk):
     # 1) Keine bekannten Signaturen mehr auf dem Hauptgerät.
     # Das Lesen der Signaturen auf einem Blockgerät benötigt ebenfalls
@@ -532,6 +859,7 @@ class WipeAutoApp(Gtk.Application):
         self.disk_info = None
         self.confirmed_disk = None
         self.confirmed_identity = None
+        self.smart_window = None
 
         # Letzte erkannte Größe + Modellbezeichnung der SSD.
         # Diese Information bleibt nach dem Wipe sichtbar.
@@ -682,6 +1010,16 @@ class WipeAutoApp(Gtk.Application):
         self.disk_value.set_xalign(0)
         self.disk_value.add_css_class("disk-result")
         self.disk_value.add_css_class("neutral")
+        self.disk_value.set_tooltip_text("SSD-/SMART-Werte anzeigen (S)")
+        smart_click = Gtk.GestureClick.new()
+        smart_click.set_button(1)
+        smart_click.connect(
+            "released",
+            lambda _gesture, n_press, _x, _y: (
+                self.show_smart_window() if n_press == 1 else None
+            ),
+        )
+        self.disk_value.add_controller(smart_click)
         self.disk_card.append(self.disk_value)
         self.disk_note = Gtk.Label(label="")
         self.disk_note.set_xalign(0)
@@ -812,6 +1150,43 @@ class WipeAutoApp(Gtk.Application):
         .metric-value {
             font-size: 17px;
             font-weight: 800;
+        }
+
+        .smart-title {
+            font-size: 17px;
+            font-weight: 800;
+        }
+        .smart-subtitle {
+            color: #9d9da7;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .smart-summary {
+            font-size: 13px;
+            font-weight: 800;
+        }
+        .smart-legend {
+            color: #9d9da7;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .smart-card {
+            background: #191c22;
+            border: 1px solid #303641;
+            border-radius: 8px;
+            padding: 8px;
+        }
+        .smart-header {
+            color: #9d9da7;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        .smart-label, .smart-value, .smart-help {
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .smart-help {
+            font-weight: 600;
         }
         .disk-result {
             background: #111318;
@@ -1107,6 +1482,202 @@ class WipeAutoApp(Gtk.Application):
             self.set_class(self.disk_value, "warn")
             self.disk_note.set_text("Bereit zum Löschen.")
             self.wipe_button.set_sensitive(True)
+
+    def close_smart_window(self, *_):
+        window = self.smart_window
+        self.smart_window = None
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+        return True
+
+    def on_smart_key(self, _controller, keyval, _keycode, state):
+        name = Gdk.keyval_name(keyval) or ""
+        if name == "Escape" or (
+            state & Gdk.ModifierType.CONTROL_MASK and name.lower() == "w"
+        ):
+            self.close_smart_window()
+            return True
+        return False
+
+    @staticmethod
+    def _restore_center_new_windows(previous):
+        try:
+            subprocess.run(
+                ["gsettings", "set", "org.gnome.mutter", "center-new-windows", previous],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+                check=False,
+            )
+        except Exception:
+            pass
+        return False
+
+    def _bind_smart_window(self, window):
+        try:
+            if window.get_visible():
+                window.set_transient_for(self.window)
+        except Exception:
+            pass
+        return False
+
+    def _present_smart_centered(self, window):
+        previous = None
+        try:
+            current = subprocess.check_output(
+                ["gsettings", "get", "org.gnome.mutter", "center-new-windows"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5,
+            ).strip().lower()
+            if current in {"true", "false"}:
+                previous = current
+                if current != "true":
+                    subprocess.run(
+                        ["gsettings", "set", "org.gnome.mutter", "center-new-windows", "true"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=1.5,
+                        check=False,
+                    )
+        except Exception:
+            previous = None
+        window.present()
+        if previous == "false":
+            GLib.timeout_add(500, self._restore_center_new_windows, previous)
+        GLib.timeout_add(650, self._bind_smart_window, window)
+
+    def show_smart_window(self, *_):
+        if self.smart_window is not None:
+            try:
+                self.smart_window.present()
+                return False
+            except Exception:
+                self.smart_window = None
+
+        data = smart_collect(self.disk)
+        window = Gtk.ApplicationWindow(application=self)
+        window.set_title("SSD / SMART-Werte")
+        window.set_default_size(790, 620)
+        window.set_resizable(True)
+        window.connect("close-request", self.close_smart_window)
+
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self.on_smart_key)
+        window.add_controller(key_controller)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_margin_top(12)
+        outer.set_margin_bottom(12)
+        outer.set_margin_start(14)
+        outer.set_margin_end(14)
+
+        title = Gtk.Label(label="SSD / SMART-WERTE")
+        title.set_xalign(0)
+        title.add_css_class("smart-title")
+        outer.append(title)
+
+        model = Gtk.Label(label=f"{data['model']}  •  {self.disk or '--'}")
+        model.set_xalign(0)
+        model.set_wrap(True)
+        model.add_css_class("smart-subtitle")
+        outer.append(model)
+
+        meta = Gtk.Label(
+            label=f"Seriennummer: {data['serial']}  •  Firmware: {data['firmware']}"
+        )
+        meta.set_xalign(0)
+        meta.set_wrap(True)
+        meta.add_css_class("smart-subtitle")
+        outer.append(meta)
+
+        states = [row[3] for row in data["rows"]]
+        overall = "bad" if "bad" in states else "warn" if "warn" in states else "good"
+        overall_text = {
+            "good": "GESAMTBEWERTUNG: IN ORDNUNG",
+            "warn": "GESAMTBEWERTUNG: AUFFÄLLIGKEITEN",
+            "bad": "GESAMTBEWERTUNG: FEHLER / PRÜFEN",
+        }[overall]
+        summary = Gtk.Label(label=overall_text)
+        summary.set_xalign(0)
+        summary.add_css_class("smart-summary")
+        summary.add_css_class(overall)
+        outer.append(summary)
+
+        legend = Gtk.Label(
+            label="GRÜN = in Ordnung   •   ORANGE = auffällig / beobachten   •   ROT = Fehler / kritisch"
+        )
+        legend.set_xalign(0)
+        legend.set_wrap(True)
+        legend.add_css_class("smart-legend")
+        outer.append(legend)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(5)
+        grid.set_column_spacing(12)
+        grid.set_hexpand(True)
+        grid.add_css_class("smart-card")
+
+        for col, text_value in enumerate(("WERT", "MESSWERT", "EINORDNUNG")):
+            header = Gtk.Label(label=text_value)
+            header.set_xalign(0)
+            header.add_css_class("smart-header")
+            grid.attach(header, col, 0, 1, 1)
+
+        for row_index, (label_text, value_text, help_text, status) in enumerate(
+            data["rows"], 1
+        ):
+            label = Gtk.Label(label=label_text)
+            label.set_xalign(0)
+            label.set_valign(Gtk.Align.START)
+            label.set_wrap(True)
+            label.set_max_width_chars(30)
+            label.add_css_class("smart-label")
+            label.add_css_class(status)
+
+            value = Gtk.Label(label=value_text)
+            value.set_xalign(0)
+            value.set_valign(Gtk.Align.START)
+            value.set_wrap(True)
+            value.set_max_width_chars(18)
+            value.add_css_class("smart-value")
+            value.add_css_class(status)
+
+            help_label = Gtk.Label(label=help_text)
+            help_label.set_xalign(0)
+            help_label.set_valign(Gtk.Align.START)
+            help_label.set_hexpand(True)
+            help_label.set_wrap(True)
+            help_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            help_label.set_max_width_chars(46)
+            help_label.add_css_class("smart-help")
+            help_label.add_css_class(status)
+
+            grid.attach(label, 0, row_index, 1, 1)
+            grid.attach(value, 1, row_index, 1, 1)
+            grid.attach(help_label, 2, row_index, 1, 1)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+        scroll.set_child(grid)
+        outer.append(scroll)
+
+        footer = Gtk.Label(label="Schließen mit ESC oder STRG+W")
+        footer.set_xalign(0)
+        footer.add_css_class("smart-legend")
+        outer.append(footer)
+
+        window.set_child(outer)
+        self.smart_window = window
+        self._present_smart_centered(window)
+        log(f"SMART-Fenster geöffnet: {self.disk or '--'}")
+        return False
+
     def clear_action_area(self):
         child = self.action_area.get_first_child()
         while child:
@@ -1316,6 +1887,13 @@ class WipeAutoApp(Gtk.Application):
 
     def on_key_pressed(self, controller, keyval, keycode, state):
         name = Gdk.keyval_name(keyval) or ""
+        if (
+            name.lower() == "s"
+            and not (state & Gdk.ModifierType.CONTROL_MASK)
+        ):
+            self.show_smart_window()
+            return True
+
         if state & Gdk.ModifierType.CONTROL_MASK:
             if name.lower() == "w":
                 self.quit()
