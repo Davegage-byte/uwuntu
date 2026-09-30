@@ -72,7 +72,7 @@ STAGED_RUNTIME_MANIFEST=""
 # Komponentenstaende ausschliesslich daraus.
 VERSION_NC="2.62"
 VERSION_WA="3.38"
-VERSION_HC="4.5.146"
+VERSION_HC="4.5.147"
 VERSION_CA="1.20"
 VERSION_AU="1.21"
 
