@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.65"
+VERSION = "2.66"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -321,9 +321,55 @@ def get_devices():
         })
 
     for typ in result:
-        result[typ].sort(key=lambda d: (not d["connected"], d["iface"]))
+        result[typ].sort(
+            key=lambda d: (
+                0 if d["connected"]
+                else 1 if d["state"].startswith("connecting")
+                else 2,
+                d["iface"],
+            )
+        )
 
     return result
+
+
+def device_connection_status(state):
+    """NetworkManager-Zustand kompakt und sichtbar für die Karte übersetzen."""
+    normalized = (state or "").strip().lower()
+
+    if normalized.startswith("connecting"):
+        return (
+            "WIRD VERBUNDEN",
+            "live",
+            "Adapter erkannt – Verbindung wird gerade aufgebaut.",
+        )
+
+    if normalized == "deactivating":
+        return (
+            "WIRD GETRENNT",
+            "live",
+            "Verbindung wird gerade getrennt.",
+        )
+
+    if normalized == "failed":
+        return (
+            "FEHLER",
+            "bad",
+            "Verbindungsaufbau fehlgeschlagen.",
+        )
+
+    if normalized in ("unavailable", "unmanaged"):
+        return (
+            "NICHT VERFÜGBAR",
+            "warn",
+            "Adapter vorhanden, aktuell aber nicht verfügbar.",
+        )
+
+    return (
+        "NICHT VERBUNDEN",
+        "warn",
+        "Adapter vorhanden, aktuell aber nicht verbunden.",
+    )
 
 
 def get_default_iface():
@@ -2487,14 +2533,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.65 + Wipe Auto v3.41 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.66 + Wipe Auto v3.41 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.65 + Wipe Auto v3.41 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.66 + Wipe Auto v3.41 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2781,7 +2827,6 @@ class NetworkCheckApp(Gtk.Application):
 
         .bad {
             color: #ff4c4c;
-            background: #111318;
         }
 
         .warn {
@@ -3101,10 +3146,11 @@ class NetworkCheckApp(Gtk.Application):
 
         if not dev["connected"]:
             if kind not in self.testing_kinds:
-                card.set_state("NICHT VERBUNDEN", "warn")
-                card.note_label.set_text(
-                    "Adapter vorhanden, aktuell aber nicht verbunden."
+                state_text, state_class, state_note = device_connection_status(
+                    dev.get("state")
                 )
+                card.set_state(state_text, state_class)
+                card.note_label.set_text(state_note)
             return
         # Sichtbaren LINK-Wert nur für die Verbindung aktualisieren,
         # die gerade wirklich getestet wird.
