@@ -49,7 +49,7 @@ RUNTIME_MANIFEST_PATH="$RUNTIME_MANIFEST_DIR/runtime-manifest.json"
 
 # Interne Buildnummer für den manuellen GitHub-Updater.
 # Verhindert, dass U versehentlich eine ältere GitHub-Fassung installiert.
-MANAGER_BUILD=2026100101
+MANAGER_BUILD=2026091402
 AUTO_MODE=0
 
 # Die Laufzeitprogramme werden als eigenstaendige Repository-Module gepflegt.
@@ -70,7 +70,7 @@ STAGED_RUNTIME_MANIFEST=""
 # Robuste Bootstrap-Werte fuer Installationen ohne Manifest. Sobald ein
 # gueltiges lokales oder gestagtes Manifest vorliegt, kommen sichtbare
 # Komponentenstaende ausschliesslich daraus.
-VERSION_NC="2.66"
+VERSION_NC="2.65"
 VERSION_WA="3.41"
 VERSION_HC="4.5.148"
 VERSION_CA="1.20"
