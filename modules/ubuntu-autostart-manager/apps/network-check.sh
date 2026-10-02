@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.66"
+VERSION = "2.67"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -609,7 +609,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.41"
+WIPE_VERSION = "3.42"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -969,7 +969,7 @@ SMART_SENSOR_TEMP_WARN_C = 70.0
 SMART_SENSOR_TEMP_BAD_C = 80.0
 SMART_WEAR_WARN_PERCENT = 80
 SMART_WEAR_BAD_PERCENT = 100
-SMART_UNSAFE_SHUTDOWN_WARN = 50
+SMART_UNSAFE_SHUTDOWN_WARN = 100
 KEYBOARD_TEST_STATE_FILE = (
     Path.home() / ".local/state/uwuntu/keyboard_test_active"
 )
@@ -1192,7 +1192,7 @@ def smart_collect(disk):
 
         unsafe = smart_number(nvme.get("unsafe_shutdowns"))
         add("Unsichere Abschaltungen", smart_format_count(unsafe),
-            "Stromverlust oder hartes Ausschalten ohne sauberes Herunterfahren. Unter 50 unauffällig.",
+            "Stromverlust oder hartes Ausschalten ohne sauberes Herunterfahren. Unter 100 unauffällig.",
             "good" if unsafe < SMART_UNSAFE_SHUTDOWN_WARN else "warn")
 
         media_errors = smart_number(nvme.get("media_errors"))
@@ -2533,14 +2533,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.66 + Wipe Auto v3.41 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.67 + Wipe Auto v3.42 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.66 + Wipe Auto v3.41 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.67 + Wipe Auto v3.42 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
