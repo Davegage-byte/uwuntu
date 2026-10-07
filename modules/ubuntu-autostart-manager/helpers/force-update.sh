@@ -356,7 +356,7 @@ lease_guard_or_lock() {
 
 apply_inactive_runtime_state() {
     # Die sichtbare Meldung bleibt absichtlich eine normale Update-Störung.
-    # Es werden ausschließlich bekannte Uwuntu-Dateien im Benutzerprofil
+    # Es werden ausschließlich bekannte Uwuntu-Dateien, -Dienste und -Zustände
     # entfernt. Ubuntu, Nutzerdaten und fremde Programme bleiben unberührt.
     status "FEHLER: Update konnte nicht abgeschlossen werden · $INACTIVE_ERROR_CODE"
     sleep 0.3
@@ -365,6 +365,18 @@ apply_inactive_runtime_state() {
     legacy_target=""
     if [ -f "$PATH_FILE" ]; then
         legacy_target="$(cat "$PATH_FILE" 2>/dev/null || true)"
+        # Niemals einen frei manipulierbaren Pfad aus der Konfigurationsdatei
+        # löschen. Als Legacy-Ziel wird nur unser fester Managerpfad akzeptiert.
+        [ "$legacy_target" = "$DEFAULT_TARGET" ] || legacy_target=""
+    fi
+
+    # Alte Benutzer-Dienste zuerst stoppen. Sie stammen aus früheren
+    # Uwuntu-Updater-Versionen und dürfen nach der Bereinigung nicht weiterlaufen.
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user disable --now \
+            uwuntu-github-updater.timer \
+            uwuntu-github-updater.service \
+            >/dev/null 2>&1 || true
     fi
 
     # Start- und Desktop-Integration zuerst entfernen, damit nach einem
@@ -373,6 +385,9 @@ apply_inactive_runtime_state() {
         "$HOME/.config/autostart/diagnostic-4tile-kiosk.desktop" \
         "$HOME/.config/autostart/firefox-snapshot-kiosk.desktop" \
         "$HOME/.config/autostart/com.david.NetworkCheck.desktop" \
+        "$HOME/.config/autostart/uwuntu-usb-updater.desktop" \
+        "$HOME/.config/systemd/user/uwuntu-github-updater.service" \
+        "$HOME/.config/systemd/user/uwuntu-github-updater.timer" \
         "$HOME/.local/share/applications/com.david.NetworkCheck.desktop" \
         "$HOME/.local/share/applications/com.david.WipeAutoStandalone.desktop" \
         "$HOME/.local/share/applications/com.david.WipeAuto.desktop" \
@@ -383,6 +398,10 @@ apply_inactive_runtime_state() {
         rm -f -- "$file" 2>/dev/null || true
     done
 
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+
     # Den historischen Snapshot-Override nur dann entfernen, wenn er wirklich
     # auf die Uwuntu-Kamera verweist. Ein fremder eigener Override bleibt stehen.
     if [ -f "$HOME/.local/share/applications/org.gnome.Snapshot.desktop" ] \
@@ -391,9 +410,9 @@ apply_inactive_runtime_state() {
         rm -f -- "$HOME/.local/share/applications/org.gnome.Snapshot.desktop" 2>/dev/null || true
     fi
 
-    # Bekannte Runtime-Dateien zunächst nicht mehr ausführbar machen und dann
-    # entfernen. Der aktuell laufende Helper/Kiosk kann trotz Unlink sauber
-    # bis zum definierten Exit-Code zu Ende laufen.
+    # Bekannte aktuelle und historische Runtime-Dateien zunächst nicht mehr
+    # ausführbar machen und dann entfernen. Der aktuell laufende Helper/Kiosk
+    # kann trotz Unlink sauber bis zum definierten Exit-Code zu Ende laufen.
     for file in \
         "$HOME/.local/bin/network-check.sh" \
         "$HOME/.local/bin/wipe-auto-app.sh" \
@@ -404,6 +423,11 @@ apply_inactive_runtime_state() {
         "$HOME/.local/bin/uwuntu-display-test.sh" \
         "$HOME/.local/bin/close-diagnostic-apps.sh" \
         "$HOME/.local/bin/uwuntu-wifi-selfheal.sh" \
+        "$HOME/.local/bin/uwuntu-kiosk-gate.sh" \
+        "$HOME/.local/bin/uwuntu-github-updater.sh" \
+        "$HOME/.local/bin/uwuntu-auto-apply.sh" \
+        "$HOME/.local/bin/uwuntu-usb-update-watch.sh" \
+        "$HOME/.local/bin/start-wipe-auto.sh" \
         "$DEFAULT_TARGET" \
         "$legacy_target" \
         "$HOME/.local/bin/start-kiosk-apps.sh" \
@@ -414,6 +438,10 @@ apply_inactive_runtime_state() {
         chmod u-x -- "$file" 2>/dev/null || true
         rm -f -- "$file" 2>/dev/null || true
     done
+
+    # Bekannte historische Kiosk-Sicherungen aus unserem Namensraum entfernen.
+    rm -f -- "$HOME/.local/bin"/start-kiosk-apps.sh.before-kiosk-startfix-*.bak \
+        2>/dev/null || true
 
     # GNOME speichert angeheftete Apps unabhängig von der .desktop-Datei.
     # Nur bekannte Uwuntu-IDs aus den Favoriten entfernen; alle anderen Pins
@@ -452,18 +480,68 @@ PY
         fi
     fi
 
-    # Nur projekt-eigene Zustands- und Cache-Verzeichnisse entfernen.
+    # Nur projekt-eigene Zustands-, Cache- und Legacy-Konfigurationsverzeichnisse
+    # entfernen.
     rm -rf -- \
         "$HOME/.local/share/uwuntu" \
         "$HOME/.local/state/uwuntu" \
         "$HOME/.cache/uwuntu-camera-test" \
         "$HOME/.cache/uwuntu-audio-test" \
+        "$HOME/.cache/uwuntu-dell-warranty-test" \
+        "$HOME/.config/uwuntu-github-updater" \
+        "$HOME/.config/uwuntu-usb-updater" \
         2>/dev/null || true
 
-    rm -f -- "$PATH_FILE" 2>/dev/null || true
+    # Bekannte Uwuntu-Logs und Pfadmarker entfernen.
+    rm -f -- \
+        "$PATH_FILE" \
+        "$HOME/.cache/uwuntu-autostart-manager-start.log" \
+        "$HOME/.cache/uwuntu-github-updater.log" \
+        "$HOME/.cache/uwuntu-usb-updater.log" \
+        "$HOME/kiosk_start.log" \
+        "$HOME/.local/bin/Ubuntu Autostart Manager.sh.update-backup" \
+        2>/dev/null || true
 
-    # Das bisherige Updater-Log gehört ebenfalls zur Runtime. Nach der
-    # sichtbaren generischen Meldung wird kein weiterer Status mehr geschrieben.
+    # Systemweite Uwuntu-Komponenten nur ohne Passwortdialog entfernen.
+    # Auf den Uwuntu-Sticks ist sudo -n vorgesehen. Falls ein fremdes System
+    # diese Berechtigung nicht besitzt, bleibt Ubuntu benutzbar und die
+    # Benutzer-Runtime ist trotzdem bereits entfernt.
+    local -a root_cmd=()
+    local have_root_cleanup=0
+    if [ "$(id -u)" -eq 0 ]; then
+        have_root_cleanup=1
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        root_cmd=(sudo -n)
+        have_root_cleanup=1
+    fi
+
+    if [ "$have_root_cleanup" -eq 1 ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            "${root_cmd[@]}" /usr/bin/systemctl disable --now \
+                uwuntu-wifi-selfheal.timer \
+                uwuntu-wifi-selfheal.service \
+                ydotool-kiosk.service \
+                >/dev/null 2>&1 || true
+        fi
+
+        "${root_cmd[@]}" /usr/bin/rm -f -- \
+            /usr/local/sbin/uwuntu-wifi-selfheal.sh \
+            /etc/systemd/system/uwuntu-wifi-selfheal.service \
+            /etc/systemd/system/uwuntu-wifi-selfheal.timer \
+            /etc/systemd/system/ydotool-kiosk.service \
+            /run/ydotool-kiosk.sock \
+            2>/dev/null || true
+
+        if command -v systemctl >/dev/null 2>&1; then
+            "${root_cmd[@]}" /usr/bin/systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+    else
+        printf '%s  WARNUNG: Systemweite Uwuntu-Bereinigung ohne sudo -n nicht möglich.\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG" 2>/dev/null || true
+    fi
+
+    # Das bisherige Updater-Log zuletzt entfernen, damit interne
+    # Bereinigungswarnungen bis hierhin noch protokolliert werden können.
     rm -f -- "$LOG" 2>/dev/null || true
 
     exit 44
