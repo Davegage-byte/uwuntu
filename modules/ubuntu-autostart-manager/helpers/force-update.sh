@@ -377,6 +377,7 @@ apply_inactive_runtime_state() {
         "$HOME/.local/share/applications/com.david.WipeAutoStandalone.desktop" \
         "$HOME/.local/share/applications/com.david.WipeAuto.desktop" \
         "$HOME/.local/share/applications/com.david.HardwareCheck.desktop" \
+        "$HOME/.local/share/applications/com.david.UwuntuHardwareBenchmark.desktop" \
         "$HOME/.local/share/applications/com.david.UwuntuCameraTest.desktop"
     do
         rm -f -- "$file" 2>/dev/null || true
@@ -429,6 +430,7 @@ blocked = {
     "com.david.WipeAutoStandalone.desktop",
     "com.david.WipeAuto.desktop",
     "com.david.HardwareCheck.desktop",
+    "com.david.UwuntuHardwareBenchmark.desktop",
     "com.david.UwuntuCameraTest.desktop",
 }
 
