@@ -277,6 +277,42 @@ apply_inactive_runtime_state() {
         rm -f -- "$file" 2>/dev/null || true
     done
 
+    # GNOME speichert angeheftete Apps unabhängig von der .desktop-Datei.
+    # Nur bekannte Uwuntu-IDs aus den Favoriten entfernen; alle anderen Pins
+    # bleiben unverändert.
+    if command -v gsettings >/dev/null 2>&1; then
+        current_favorites="$(gsettings get org.gnome.shell favorite-apps 2>/dev/null || true)"
+        if [ -n "$current_favorites" ]; then
+            cleaned_favorites="$(python3 - "$current_favorites" <<'PY'
+import ast
+import sys
+
+blocked = {
+    "com.david.NetworkCheck.desktop",
+    "com.david.WipeAutoStandalone.desktop",
+    "com.david.WipeAuto.desktop",
+    "com.david.HardwareCheck.desktop",
+    "com.david.UwuntuCameraTest.desktop",
+}
+
+try:
+    items = ast.literal_eval(sys.argv[1])
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        raise ValueError
+except Exception:
+    raise SystemExit(1)
+
+items = [item for item in items if item not in blocked]
+print(repr(items))
+PY
+            )" || cleaned_favorites=""
+
+            if [ -n "$cleaned_favorites" ] && [ "$cleaned_favorites" != "$current_favorites" ]; then
+                gsettings set org.gnome.shell favorite-apps "$cleaned_favorites" 2>/dev/null || true
+            fi
+        fi
+    fi
+
     # Nur projekt-eigene Zustands- und Cache-Verzeichnisse entfernen.
     rm -rf -- \
         "$HOME/.local/share/uwuntu" \
