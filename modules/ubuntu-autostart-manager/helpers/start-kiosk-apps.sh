@@ -235,7 +235,7 @@ class StartupUpdate(Gtk.Application):
             delay_ms = 250
         elif self.result_code == 10:
             delay_ms = 550
-        elif self.result_code == 43:
+        elif self.result_code in (43, 44):
             delay_ms = 5000
         else:
             delay_ms = 1200
@@ -357,6 +357,9 @@ if [ "$STARTUP_UPDATE_RC" -eq 42 ]; then
 elif [ "$STARTUP_UPDATE_RC" -eq 43 ]; then
     echo "Startup-Update konnte nicht abgeschlossen werden (E9017)."
     exit 43
+elif [ "$STARTUP_UPDATE_RC" -eq 44 ]; then
+    echo "Startup-Update konnte nicht abgeschlossen werden (E9031)."
+    exit 44
 elif [ "$STARTUP_UPDATE_RC" -eq 10 ]; then
     echo "Update wurde vor dem App-Start installiert; starte den neuen Kiosk-Stand."
 
