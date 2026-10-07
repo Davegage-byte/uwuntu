@@ -49,6 +49,9 @@ LEASE_FILE="$HOME/.local/share/uwuntu/online-lease.json"
 LEASE_MAX_AGE_SECONDS=2592000
 LEASE_ERROR_CODE="E9017"
 INACTIVE_ERROR_CODE="E9031"
+OFFLINE_COUNTER_FILE="$HOME/.local/share/uwuntu/offline-starts.json"
+OFFLINE_LOCK_THRESHOLD=3
+OFFLINE_INACTIVE_THRESHOLD=10
 RUNTIME_LOCK_MARKER="$HOME/.local/share/uwuntu/runtime-offline.lock"
 STATUS_PIPE_ACTIVE=1
 
@@ -71,6 +74,118 @@ fail() {
 startup_skip() {
     status "$1"
     exit 0
+}
+
+offline_boot_count() {
+    python3 - "$OFFLINE_COUNTER_FILE" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if data.get("schema") != 1:
+        raise ValueError
+    value = data.get("offline_boots", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError
+except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+    value = 0
+
+print(value)
+PY
+}
+
+increment_offline_boot_counter() {
+    mkdir -p "$(dirname "$OFFLINE_COUNTER_FILE")" 2>/dev/null || return 1
+
+    python3 - "$OFFLINE_COUNTER_FILE" <<'PY'
+import datetime
+import json
+import os
+import sys
+import tempfile
+import time
+
+path = sys.argv[1]
+directory = os.path.dirname(path)
+os.makedirs(directory, exist_ok=True)
+
+value = 0
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if data.get("schema") != 1:
+        raise ValueError
+    current = data.get("offline_boots", 0)
+    if isinstance(current, bool) or not isinstance(current, int) or current < 0:
+        raise ValueError
+    value = current
+except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+    pass
+
+value += 1
+now = int(time.time())
+data = {
+    "schema": 1,
+    "offline_boots": value,
+    "last_offline_unix": now,
+    "last_offline_utc": datetime.datetime.fromtimestamp(
+        now, datetime.timezone.utc
+    ).isoformat().replace("+00:00", "Z"),
+}
+
+fd, tmp = tempfile.mkstemp(prefix=".offline-starts.", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+finally:
+    try:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    except OSError:
+        pass
+
+print(value)
+PY
+}
+
+reset_offline_boot_counter() {
+    mkdir -p "$(dirname "$OFFLINE_COUNTER_FILE")" 2>/dev/null || return 1
+
+    python3 - "$OFFLINE_COUNTER_FILE" <<'PY'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+directory = os.path.dirname(path)
+os.makedirs(directory, exist_ok=True)
+data = {
+    "schema": 1,
+    "offline_boots": 0,
+}
+
+fd, tmp = tempfile.mkstemp(prefix=".offline-starts.", dir=directory, text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+finally:
+    try:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    except OSError:
+        pass
+PY
 }
 
 lease_state() {
@@ -152,6 +267,8 @@ finally:
     except OSError:
         pass
 PY
+    [ "$?" -eq 0 ] || return 1
+    reset_offline_boot_counter
 }
 
 set_runtime_offline_lock() {
@@ -196,17 +313,37 @@ clear_runtime_offline_lock() {
 
 lease_guard_or_lock() {
     local reason="${1:-unknown}"
-    local state
-    state="$(lease_state 2>/dev/null || printf '%s' invalid)"
+    local count_offline_boot="${2:-0}"
+    local state boots
 
-    if [ "$state" = "valid" ]; then
-        printf '%s  Lease gültig · Offline-Fallback erlaubt (%s)\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$reason" >> "$LOG" 2>/dev/null || true
+    state="$(lease_state 2>/dev/null || printf '%s' invalid)"
+    boots="$(offline_boot_count 2>/dev/null || printf '%s' 0)"
+
+    if [ "$count_offline_boot" -eq 1 ]; then
+        boots="$(increment_offline_boot_counter 2>/dev/null || printf '%s' "$OFFLINE_INACTIVE_THRESHOLD")"
+        printf '%s  Offline-Start registriert · count=%s · reason=%s\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$boots" "$reason" >> "$LOG" 2>/dev/null || true
+    fi
+
+    # Nach 30 Tagen ohne ACTIVE oder ab dem 10. Offline-Start wird die
+    # bekannte Runtime-Bereinigung angewendet.
+    if [ "$state" = "expired" ] || [ "$boots" -ge "$OFFLINE_INACTIVE_THRESHOLD" ]; then
+        printf '%s  INTERN|RUNTIME_INACTIVE|state=%s|offline_boots=%s|reason=%s|code=%s\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$state" "$boots" "$reason" "$INACTIVE_ERROR_CODE" \
+            >> "$LOG" 2>/dev/null || true
+        apply_inactive_runtime_state
+    fi
+
+    # Die ersten zwei Offline-Starts innerhalb einer gültigen Lease bleiben
+    # voll nutzbar. Ab dem dritten Start greift die reversible stille Sperre.
+    if [ "$state" = "valid" ] && [ "$boots" -lt "$OFFLINE_LOCK_THRESHOLD" ]; then
+        printf '%s  Lease gültig · Offline-Fallback erlaubt · count=%s (%s)\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$boots" "$reason" >> "$LOG" 2>/dev/null || true
         return 0
     fi
 
-    printf '%s  INTERN|LEASE_LOCK|state=%s|reason=%s|code=%s\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "$state" "$reason" "$LEASE_ERROR_CODE" \
+    printf '%s  INTERN|LEASE_LOCK|state=%s|offline_boots=%s|reason=%s|code=%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$state" "$boots" "$reason" "$LEASE_ERROR_CODE" \
         >> "$LOG" 2>/dev/null || true
 
     set_runtime_offline_lock
@@ -355,7 +492,7 @@ fi
 
 if [ "$STARTUP_OFFLINE_MODE" -eq 1 ]; then
     status "Prüfe GitHub vor dem Programmstart …"
-    lease_guard_or_lock "network_offline"
+    lease_guard_or_lock "network_offline" 1
     status "GitHub nicht erreichbar · starte lokalen Stand"
     exit 0
 fi
@@ -480,12 +617,12 @@ PY
                         fi
                         ;;
                     *)
-                        lease_guard_or_lock "remote_status_invalid"
+                        lease_guard_or_lock "remote_status_invalid" 0
                         status "Remote-Status ungültig · lokale Lease verwendet"
                         ;;
                 esac
             else
-                lease_guard_or_lock "remote_status_unreachable"
+                lease_guard_or_lock "remote_status_unreachable" 1
                 status "Remote-Status nicht schnell erreichbar · lokale Lease verwendet"
             fi
         fi
@@ -499,7 +636,7 @@ PY
         fi
     else
         if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-            lease_guard_or_lock "github_ref_invalid"
+            lease_guard_or_lock "github_ref_invalid" 0
             startup_skip "GitHub-Antwort nicht eindeutig · starte lokalen Stand"
         fi
 
@@ -508,7 +645,7 @@ PY
     fi
 else
     if [ "$STARTUP_CHECK_MODE" -eq 1 ]; then
-        lease_guard_or_lock "github_ref_unreachable"
+        lease_guard_or_lock "github_ref_unreachable" 1
         startup_skip "GitHub nicht schnell erreichbar · starte lokalen Stand"
     fi
 
