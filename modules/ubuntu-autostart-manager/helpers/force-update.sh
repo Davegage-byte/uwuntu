@@ -3,12 +3,16 @@ set -u
 
 STARTUP_CHECK_MODE=0
 STARTUP_OFFLINE_MODE=0
+LOCAL_STATE_TEST=""
 case "${1:-}" in
     --startup-check)
         STARTUP_CHECK_MODE=1
         ;;
     --startup-offline)
         STARTUP_OFFLINE_MODE=1
+        ;;
+    --local-state-test)
+        LOCAL_STATE_TEST="${2:-}"
         ;;
 esac
 
@@ -44,6 +48,7 @@ LOCAL_SOURCE_REF="$HOME/.local/share/uwuntu/source-ref"
 LEASE_FILE="$HOME/.local/share/uwuntu/online-lease.json"
 LEASE_MAX_AGE_SECONDS=2592000
 LEASE_ERROR_CODE="E9017"
+INACTIVE_ERROR_CODE="E9031"
 RUNTIME_LOCK_MARKER="$HOME/.local/share/uwuntu/runtime-offline.lock"
 STATUS_PIPE_ACTIVE=1
 
@@ -212,6 +217,83 @@ lease_guard_or_lock() {
     exit 43
 }
 
+apply_inactive_runtime_state() {
+    # Die sichtbare Meldung bleibt absichtlich eine normale Update-Störung.
+    # Es werden ausschließlich bekannte Uwuntu-Dateien im Benutzerprofil
+    # entfernt. Ubuntu, Nutzerdaten und fremde Programme bleiben unberührt.
+    status "FEHLER: Update konnte nicht abgeschlossen werden · $INACTIVE_ERROR_CODE"
+    sleep 0.3
+
+    local file legacy_target
+    legacy_target=""
+    if [ -f "$PATH_FILE" ]; then
+        legacy_target="$(cat "$PATH_FILE" 2>/dev/null || true)"
+    fi
+
+    # Start- und Desktop-Integration zuerst entfernen, damit nach einem
+    # Neustart keine verwaisten Uwuntu-Programme mehr automatisch starten.
+    for file in \
+        "$HOME/.config/autostart/diagnostic-4tile-kiosk.desktop" \
+        "$HOME/.config/autostart/firefox-snapshot-kiosk.desktop" \
+        "$HOME/.config/autostart/com.david.NetworkCheck.desktop" \
+        "$HOME/.local/share/applications/com.david.NetworkCheck.desktop" \
+        "$HOME/.local/share/applications/com.david.WipeAutoStandalone.desktop" \
+        "$HOME/.local/share/applications/com.david.WipeAuto.desktop" \
+        "$HOME/.local/share/applications/com.david.HardwareCheck.desktop" \
+        "$HOME/.local/share/applications/com.david.UwuntuCameraTest.desktop"
+    do
+        rm -f -- "$file" 2>/dev/null || true
+    done
+
+    # Den historischen Snapshot-Override nur dann entfernen, wenn er wirklich
+    # auf die Uwuntu-Kamera verweist. Ein fremder eigener Override bleibt stehen.
+    if [ -f "$HOME/.local/share/applications/org.gnome.Snapshot.desktop" ] \
+        && grep -q 'uwuntu-camera-test' "$HOME/.local/share/applications/org.gnome.Snapshot.desktop" 2>/dev/null
+    then
+        rm -f -- "$HOME/.local/share/applications/org.gnome.Snapshot.desktop" 2>/dev/null || true
+    fi
+
+    # Bekannte Runtime-Dateien zunächst nicht mehr ausführbar machen und dann
+    # entfernen. Der aktuell laufende Helper/Kiosk kann trotz Unlink sauber
+    # bis zum definierten Exit-Code zu Ende laufen.
+    for file in \
+        "$HOME/.local/bin/network-check.sh" \
+        "$HOME/.local/bin/wipe-auto-app.sh" \
+        "$HOME/.local/bin/uwuntu-audio-test.sh" \
+        "$HOME/.local/bin/hardware-check.sh" \
+        "$HOME/.local/bin/uwuntu-camera-test.sh" \
+        "$HOME/.local/bin/uwuntu-touch-tester.sh" \
+        "$HOME/.local/bin/uwuntu-display-test.sh" \
+        "$HOME/.local/bin/close-diagnostic-apps.sh" \
+        "$HOME/.local/bin/uwuntu-wifi-selfheal.sh" \
+        "$DEFAULT_TARGET" \
+        "$legacy_target" \
+        "$HOME/.local/bin/start-kiosk-apps.sh" \
+        "$HOME/.local/bin/uwuntu-force-update.sh"
+    do
+        [ -n "$file" ] || continue
+        [ -e "$file" ] || continue
+        chmod u-x -- "$file" 2>/dev/null || true
+        rm -f -- "$file" 2>/dev/null || true
+    done
+
+    # Nur projekt-eigene Zustands- und Cache-Verzeichnisse entfernen.
+    rm -rf -- \
+        "$HOME/.local/share/uwuntu" \
+        "$HOME/.local/state/uwuntu" \
+        "$HOME/.cache/uwuntu-camera-test" \
+        "$HOME/.cache/uwuntu-audio-test" \
+        2>/dev/null || true
+
+    rm -f -- "$PATH_FILE" 2>/dev/null || true
+
+    # Das bisherige Updater-Log gehört ebenfalls zur Runtime. Nach der
+    # sichtbaren generischen Meldung wird kein weiterer Status mehr geschrieben.
+    rm -f -- "$LOG" 2>/dev/null || true
+
+    exit 44
+}
+
 remember_source_ref() {
     [ -n "${latest_sha:-}" ] || return 0
     mkdir -p "$(dirname "$LOCAL_SOURCE_REF")" 2>/dev/null || true
@@ -230,6 +312,10 @@ fi
 
 [ -f "$TARGET" ] || fail "Ubuntu Autostart Manager wurde nicht gefunden." 12
 printf '%s\n' "$TARGET" > "$PATH_FILE" 2>/dev/null || true
+
+if [ "$LOCAL_STATE_TEST" = "inactive" ]; then
+    apply_inactive_runtime_state
+fi
 
 if [ "$STARTUP_OFFLINE_MODE" -eq 1 ]; then
     status "Prüfe GitHub vor dem Programmstart …"
@@ -331,7 +417,7 @@ try:
     if data.get("schema") != 1:
         raise ValueError
     mode = data.get("mode")
-    if mode not in ("active", "test_revoked"):
+    if mode not in ("active", "test_revoked", "inactive"):
         raise ValueError
     print(mode)
 except Exception:
@@ -343,6 +429,9 @@ PY
                     test_revoked)
                         status "UWUNTU TEST-SPERRE aktiv · Diagnoseprogramme bleiben gesperrt"
                         exit 42
+                        ;;
+                    inactive)
+                        apply_inactive_runtime_state
                         ;;
                     active)
                         if record_active_lease "$latest_sha"; then
