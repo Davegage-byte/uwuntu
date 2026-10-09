@@ -1273,6 +1273,7 @@ class WipeAutoApp(Gtk.Application):
         }
         .smart-row-alert.bad {
             color: #ff4c4c;
+            background: transparent; /* .bad-Standardhintergrund nur hier aufheben */
         }
         .disk-info {
             font-size: 16px;
