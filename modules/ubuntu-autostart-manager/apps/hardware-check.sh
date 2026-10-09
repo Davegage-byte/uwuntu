@@ -4015,7 +4015,7 @@ class App(Gtk.Application):
                 f"{shown_load} %",
             )
 
-        # CPU TAKT
+        # CPU TAKT: Ist, gemeldeter Basistakt und relative Abweichung.
         cpu_mhz = read_cpu_average_frequency_mhz()
         if cpu_mhz is None:
             self.set_sensor_status_ui(
@@ -4025,18 +4025,24 @@ class App(Gtk.Application):
             )
         else:
             if cpu_mhz >= 1000.0:
-                value = (
-                    f"{cpu_mhz / 1000.0:.2f}"
-                    .replace(".", ",")
-                )
-                value_text = f"{value} GHz"
+                value_text = f"{cpu_mhz / 1000.0:.2f}".replace(".", ",") + " GHz"
             else:
                 value_text = f"{cpu_mhz:.0f} MHz"
 
+            nominal_mhz = read_cpu_nominal_frequency_mhz()
+            color = "blue"
+            if nominal_mhz is not None and nominal_mhz > 0:
+                difference_percent = (cpu_mhz / nominal_mhz - 1.0) * 100.0
+                # Die Farbe basiert auf dem Rohwert, nicht auf gerundeten GHz.
+                if cpu_mhz < nominal_mhz:
+                    color = "orange"
+                nominal_text = f"{nominal_mhz / 1000.0:.2f}".replace(".", ",")
+                deviation = f"{difference_percent:+.0f}".replace("-", "−")
+                value_text += f" (Basis {nominal_text} · {deviation} %)"
+
             self.set_sensor_status_ui(
                 "cpu_clock",
-                ("orange" if (read_cpu_nominal_frequency_mhz() is not None and
-                              cpu_mhz < read_cpu_nominal_frequency_mhz()) else "blue"),
+                color,
                 value_text,
             )
 
