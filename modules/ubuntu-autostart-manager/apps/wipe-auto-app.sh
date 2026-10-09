@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.45"
+VERSION = "3.46"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -412,11 +412,12 @@ def battery_info():
     rc, out, _ = run_text(["upower", "-e"])
     if rc != 0:
         return None, None, None, None
-    bat = None
-    for line in out.splitlines():
-        if "BAT" in line:
-            bat = line.strip()
-            break
+    # UPower-Geräte nach Akku-Typ erkennen (auch Fujitsu battery_CMB1).
+    bat = next(
+        (line.strip() for line in out.splitlines()
+         if "/battery_" in line.strip().lower()),
+        None,
+    )
 
     if not bat:
         return None, None, None, None
