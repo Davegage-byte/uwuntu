@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.68"
+VERSION = "2.69"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -609,7 +609,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.43"
+WIPE_VERSION = "3.44"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -1460,11 +1460,11 @@ class WipeCompactPanel:
         )
         self.disk_value.add_controller(smart_click)
         disk_action_row.append(self.disk_value)
-        self.disk_info = Gtk.Label(label="ⓘ")
-        self.disk_info.set_valign(Gtk.Align.CENTER)
-        self.disk_info.set_halign(Gtk.Align.END)
-        self.disk_info.set_tooltip_text("SSD-/SMART-Werte anzeigen (S)")
-        self.disk_info.add_css_class("disk-info")
+        self.disk_info_indicator = Gtk.Label(label="ⓘ")
+        self.disk_info_indicator.set_valign(Gtk.Align.CENTER)
+        self.disk_info_indicator.set_halign(Gtk.Align.END)
+        self.disk_info_indicator.set_tooltip_text("SSD-/SMART-Werte anzeigen (S)")
+        self.disk_info_indicator.add_css_class("disk-info")
         info_click = Gtk.GestureClick.new()
         info_click.set_button(1)
         info_click.connect(
@@ -1473,8 +1473,8 @@ class WipeCompactPanel:
                 self.show_smart_window() if n_press == 1 else None
             ),
         )
-        self.disk_info.add_controller(info_click)
-        disk_action_row.append(self.disk_info)
+        self.disk_info_indicator.add_controller(info_click)
+        disk_action_row.append(self.disk_info_indicator)
 
         self.action_area = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
@@ -1533,7 +1533,7 @@ class WipeCompactPanel:
         else:
             klass = "neutral"
         self.set_class(self.disk_value, klass)
-        self.set_class(self.disk_info, klass)
+        self.set_class(self.disk_info_indicator, klass)
 
     @staticmethod
     def smart_overall_from_data(data):
@@ -2554,14 +2554,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.68 + Wipe Auto v3.43 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.69 + Wipe Auto v3.44 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.68 + Wipe Auto v3.43 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.69 + Wipe Auto v3.44 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
