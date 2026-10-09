@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.70"
+VERSION = "2.71"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -609,7 +609,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.45"
+WIPE_VERSION = "3.46"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -882,7 +882,13 @@ def wipe_battery_info():
     rc, out, _ = wipe_run(["upower", "-e"])
     if rc != 0:
         return None, None, None, None, None
-    bat = next((line.strip() for line in out.splitlines() if "BAT" in line), None)
+    # UPower benennt Fujitsu-Akkus z.B. battery_CMB1 statt battery_BAT0.
+    # Nach dem Gerätetyp filtern, nicht nach dem herstellerspezifischen Namen.
+    bat = next(
+        (line.strip() for line in out.splitlines()
+         if "/battery_" in line.strip().lower()),
+        None,
+    )
     if not bat:
         return None, None, None, None, None
     rc, info, _ = wipe_run(["upower", "-i", bat])
@@ -2554,14 +2560,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.70 + Wipe Auto v3.45 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.71 + Wipe Auto v3.46 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.70 + Wipe Auto v3.45 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.71 + Wipe Auto v3.46 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
