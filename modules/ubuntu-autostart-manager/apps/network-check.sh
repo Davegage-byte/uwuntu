@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.69"
+VERSION = "2.70"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -609,7 +609,7 @@ class ConnectionCard:
 # ============================================================
 # Wipe Auto – kompakt im gemeinsamen Network/Wipe-Fenster
 # ============================================================
-WIPE_VERSION = "3.44"
+WIPE_VERSION = "3.45"
 BATTERY_BAD_BELOW = 75.0
 
 def wipe_run(args, timeout=8, sudo=False):
@@ -2554,14 +2554,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.69 + Wipe Auto v3.44 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.70 + Wipe Auto v3.45 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.69 + Wipe Auto v3.44 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.70 + Wipe Auto v3.45 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2939,11 +2939,9 @@ class NetworkCheckApp(Gtk.Application):
         }
         .smart-row-alert.warn {
             color: #f5a623;
-            background: rgba(245, 166, 35, 0.13);
         }
         .smart-row-alert.bad {
             color: #ff4c4c;
-            background: rgba(255, 76, 76, 0.14);
         }
         .disk-info {
             font-size: 16px;
