@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.42"
+VERSION = "3.43"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
