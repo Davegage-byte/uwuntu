@@ -115,6 +115,22 @@ if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
 fi
 
+# Restore stale keyboard settings after a crashed Keyboard Test.
+python3 - <<'KEYBOARD_RECOVERY'
+import json,pathlib,subprocess
+p=pathlib.Path.home()/".local/state/uwuntu/keyboard_bindings_backup.json"
+if p.exists():
+    try:
+        ok=True
+        for schema,key,old in json.loads(p.read_text()).get("bindings",[]):
+            r=subprocess.run(["gsettings","get",schema,key],capture_output=True,text=True,timeout=3)
+            if r.returncode: ok=False
+            elif r.stdout.strip() in ("[]","''") and old not in ("[]","''"):
+                x=subprocess.run(["gsettings","set",schema,key,old],capture_output=True,timeout=3)
+                if x.returncode: ok=False
+        if ok: p.unlink(missing_ok=True)
+    except Exception as e: print("Uwuntu keyboard recovery:",e)
+KEYBOARD_RECOVERY
 TMP_PY="$(mktemp /tmp/hardware-check.XXXXXX.py)"
 trap 'rm -f "$TMP_PY"' EXIT
 cat > "$TMP_PY" <<'PY'
@@ -1479,6 +1495,25 @@ def read_cpu_average_frequency_mhz():
         return None
 
     return sum(values) / len(values)
+
+
+def read_cpu_nominal_frequency_mhz():
+    """CPU-Basistakt aus Firmware/sysfs oder Modellbezeichnung."""
+    for p in Path("/sys/devices/system/cpu").glob("cpu[0-9]*/cpufreq/base_frequency"):
+        try:
+            mhz = float(p.read_text().strip()) / 1000.0
+            if 100 <= mhz <= 10000:
+                return mhz
+        except (ValueError, OSError):
+            pass
+    try:
+        info = Path("/proc/cpuinfo").read_text(errors="ignore")
+        m = re.search(r"^model name\s*:\s*.*?@\s*(\d+(?:\.\d+)?)\s*GHz", info, re.M | re.I)
+        if m:
+            return float(m.group(1)) * 1000.0
+    except OSError:
+        pass
+    return None
 
 
 def short_gpu_renderer_name(renderer):
@@ -3173,6 +3208,7 @@ class App(Gtk.Application):
         self.desktop_shortcut_bindings_original = []
         self.desktop_shortcut_block_active = False
         self.desktop_shortcut_restore_helper = None
+        self.keyboard_journal_path = Path.home() / ".local/state/uwuntu/keyboard_bindings_backup.json"
 
         # Tastatur-Test wird nur durch drei schnelle ESC-Tastendrücke beendet.
         # So bleibt ESC weiterhin als normale Prüftaste testbar.
@@ -3999,7 +4035,8 @@ class App(Gtk.Application):
 
             self.set_sensor_status_ui(
                 "cpu_clock",
-                "blue",
+                ("orange" if (read_cpu_nominal_frequency_mhz() is not None and
+                              cpu_mhz < read_cpu_nominal_frequency_mhz()) else "blue"),
                 value_text,
             )
 
@@ -8286,6 +8323,9 @@ except Exception:
                 color = green
             elif index == 1:
                 color = accent
+            elif index == 3 and clock_mhz is not None:
+                nominal = read_cpu_nominal_frequency_mhz()
+                color = orange if nominal is not None and clock_mhz < nominal else blue
             else:
                 color = blue
 
@@ -10379,6 +10419,50 @@ except Exception:
             ],
         ]
 
+    def save_keyboard_shortcuts_before_test(self):
+        """Persist original GNOME bindings BEFORE temporarily clearing them."""
+        path = self.keyboard_journal_path
+        if path.exists():
+            log("Keyboard backup still present; skip destructive shortcut changes")
+            return False
+        saved = []
+        try:
+            p = subprocess.run(["gsettings", "get", "org.gnome.mutter", "overlay-key"],
+                               capture_output=True, text=True, timeout=3, check=True)
+            saved.append(["org.gnome.mutter", "overlay-key", p.stdout.strip()])
+            for schema in ("org.gnome.shell.keybindings",
+                           "org.gnome.desktop.wm.keybindings",
+                           "org.gnome.mutter.keybindings",
+                           "org.gnome.settings-daemon.plugins.media-keys",
+                           "org.gnome.shell.extensions.tiling-assistant"):
+                p = subprocess.run(["gsettings", "list-recursively", schema],
+                                   capture_output=True, text=True, timeout=3)
+                if p.returncode:
+                    continue
+                for line in p.stdout.splitlines():
+                    parts = line.strip().split(None, 2)
+                    if len(parts) == 3 and self.should_block_keyboard_test_binding(parts[2]):
+                        saved.append([schema, parts[1], parts[2]])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(".tmp")
+            temp.write_text(json.dumps({"bindings": saved}), encoding="utf-8")
+            temp.replace(path)
+            return True
+        except Exception as exc:
+            log(f"Keyboard journal failed: {exc}")
+            return False
+
+    def start_keyboard_shortcut_guards(self):
+        if not self.save_keyboard_shortcuts_before_test():
+            return
+        if self.stack.get_visible_child_name() == "keyboard":
+            self.block_super_for_keyboard_test()
+            self.block_desktop_shortcuts_for_keyboard_test()
+        if self.stack.get_visible_child_name() != "keyboard":
+            self.restore_keyboard_shortcuts_with_retries(force=True)
+            if not self.super_block_active and not self.desktop_shortcut_block_active:
+                self.keyboard_journal_path.unlink(missing_ok=True)
+
     def block_super_for_keyboard_test(self):
         """Einzelne SUPER-Taste während des Tastatur-Tests blockieren.
 
@@ -11003,6 +11087,8 @@ except Exception:
                 self.super_block_active
                 or self.desktop_shortcut_block_active
             ):
+                if self.stack.get_visible_child_name() != "keyboard":
+                    self.keyboard_journal_path.unlink(missing_ok=True)
                 return True
             if attempt < len(pauses):
                 time.sleep(pauses[attempt])
@@ -11151,11 +11237,7 @@ except Exception:
         # Einzelne Super-Taste sowie die normalen Desktop-Keybindings werden
         # unabhängig vom GTK-Thread deaktiviert. Dadurch bleibt K schnell.
         threading.Thread(
-            target=self.block_super_for_keyboard_test,
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=self.block_desktop_shortcuts_for_keyboard_test,
+            target=self.start_keyboard_shortcut_guards,
             daemon=True,
         ).start()
 
