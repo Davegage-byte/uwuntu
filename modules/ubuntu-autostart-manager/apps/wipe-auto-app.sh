@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.43"
+VERSION = "3.44"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -1069,11 +1069,11 @@ class WipeAutoApp(Gtk.Application):
         disk_info_row.set_hexpand(True)
         self.disk_value.set_hexpand(True)
         disk_info_row.append(self.disk_value)
-        self.disk_info = Gtk.Label(label="ⓘ")
-        self.disk_info.set_valign(Gtk.Align.CENTER)
-        self.disk_info.set_halign(Gtk.Align.END)
-        self.disk_info.set_tooltip_text("SSD-/SMART-Werte anzeigen (S)")
-        self.disk_info.add_css_class("disk-info")
+        self.disk_info_indicator = Gtk.Label(label="ⓘ")
+        self.disk_info_indicator.set_valign(Gtk.Align.CENTER)
+        self.disk_info_indicator.set_halign(Gtk.Align.END)
+        self.disk_info_indicator.set_tooltip_text("SSD-/SMART-Werte anzeigen (S)")
+        self.disk_info_indicator.add_css_class("disk-info")
         info_click = Gtk.GestureClick.new()
         info_click.set_button(1)
         info_click.connect(
@@ -1082,8 +1082,8 @@ class WipeAutoApp(Gtk.Application):
                 self.show_smart_window() if n_press == 1 else None
             ),
         )
-        self.disk_info.add_controller(info_click)
-        disk_info_row.append(self.disk_info)
+        self.disk_info_indicator.add_controller(info_click)
+        disk_info_row.append(self.disk_info_indicator)
         self.disk_card.append(disk_info_row)
         self.disk_note = Gtk.Label(label="")
         self.disk_note.set_xalign(0)
@@ -1403,7 +1403,7 @@ class WipeAutoApp(Gtk.Application):
         else:
             klass = "neutral"
         self.set_class(self.disk_value, klass)
-        self.set_class(self.disk_info, klass)
+        self.set_class(self.disk_info_indicator, klass)
 
     @staticmethod
     def smart_overall_from_data(data):
