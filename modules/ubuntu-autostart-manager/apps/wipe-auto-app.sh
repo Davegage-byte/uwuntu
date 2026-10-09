@@ -1065,7 +1065,26 @@ class WipeAutoApp(Gtk.Application):
             ),
         )
         self.disk_value.add_controller(smart_click)
-        self.disk_card.append(self.disk_value)
+        disk_info_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        disk_info_row.set_hexpand(True)
+        self.disk_value.set_hexpand(True)
+        disk_info_row.append(self.disk_value)
+        self.disk_info = Gtk.Label(label="ⓘ")
+        self.disk_info.set_valign(Gtk.Align.CENTER)
+        self.disk_info.set_halign(Gtk.Align.END)
+        self.disk_info.set_tooltip_text("SSD-/SMART-Werte anzeigen (S)")
+        self.disk_info.add_css_class("disk-info")
+        info_click = Gtk.GestureClick.new()
+        info_click.set_button(1)
+        info_click.connect(
+            "released",
+            lambda _gesture, n_press, _x, _y: (
+                self.show_smart_window() if n_press == 1 else None
+            ),
+        )
+        self.disk_info.add_controller(info_click)
+        disk_info_row.append(self.disk_info)
+        self.disk_card.append(disk_info_row)
         self.disk_note = Gtk.Label(label="")
         self.disk_note.set_xalign(0)
         self.disk_note.set_wrap(False)
@@ -1249,6 +1268,19 @@ class WipeAutoApp(Gtk.Application):
         .smart-help {
             font-weight: 600;
         }
+        .smart-row-alert.warn {
+            color: #f5a623;
+            background: rgba(245, 166, 35, 0.13);
+        }
+        .smart-row-alert.bad {
+            color: #ff4c4c;
+            background: rgba(255, 76, 76, 0.14);
+        }
+        .disk-info {
+            font-size: 16px;
+            font-weight: 800;
+            padding: 4px 6px;
+        }
         .disk-result {
             background: #111318;
             border-radius: 8px;
@@ -1371,6 +1403,7 @@ class WipeAutoApp(Gtk.Application):
         else:
             klass = "neutral"
         self.set_class(self.disk_value, klass)
+        self.set_class(self.disk_info, klass)
 
     @staticmethod
     def smart_overall_from_data(data):
@@ -1752,6 +1785,11 @@ class WipeAutoApp(Gtk.Application):
             help_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             help_label.set_max_width_chars(46)
             help_label.add_css_class("smart-help")
+
+            if status in ("warn", "bad"):
+                for cell in (label, value, help_label):
+                    cell.add_css_class("smart-row-alert")
+                    cell.add_css_class(status)
 
             grid.attach(label, 0, row_index, 1, 1)
             grid.attach(value, 1, row_index, 1, 1)
