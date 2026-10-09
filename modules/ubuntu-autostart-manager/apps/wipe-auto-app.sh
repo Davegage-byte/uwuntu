@@ -93,7 +93,7 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-VERSION = "3.44"
+VERSION = "3.45"
 BATTERY_BAD_BELOW = 75.0
 LOG = Path.home() / "wipe_auto.log"
 
@@ -1270,11 +1270,9 @@ class WipeAutoApp(Gtk.Application):
         }
         .smart-row-alert.warn {
             color: #f5a623;
-            background: rgba(245, 166, 35, 0.13);
         }
         .smart-row-alert.bad {
             color: #ff4c4c;
-            background: rgba(255, 76, 76, 0.14);
         }
         .disk-info {
             font-size: 16px;
