@@ -3278,9 +3278,9 @@ class App(Gtk.Application):
 
         self.window = Gtk.ApplicationWindow(application=self)
         window_title = (
-            "Hardware Benchmark v4.5.148"
+            "Hardware Benchmark v4.5.149"
             if BENCHMARK_WINDOW_MODE
-            else "Hardware Check v4.5.148"
+            else "Hardware Check v4.5.149"
         )
         self.window.set_title(window_title)
         self.window.set_default_size(860, 360)
@@ -3291,9 +3291,9 @@ class App(Gtk.Application):
 
         title_label = Gtk.Label(
             label=(
-                "Hardware Benchmark v4.5.148"
+                "Hardware Benchmark v4.5.149"
                 if BENCHMARK_WINDOW_MODE
-                else "Hardware Check v4.5.148"
+                else "Hardware Check v4.5.149"
             )
         )
         title_label.add_css_class("title")
@@ -3342,7 +3342,7 @@ class App(Gtk.Application):
             # Keine USB-, Keyboard-, Touchpad- oder globalen Hotkey-Monitore
             # doppelt starten.
             GLib.timeout_add(1200, self.start_benchmark_window)
-            log("Hardware Benchmark v4.5.148 gestartet")
+            log("Hardware Benchmark v4.5.149 gestartet")
         else:
             self.refresh_security()
             self.refresh_hdmi_status()
