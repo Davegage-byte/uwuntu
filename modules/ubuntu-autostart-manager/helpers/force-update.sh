@@ -325,8 +325,8 @@ lease_guard_or_lock() {
             "$(date '+%Y-%m-%d %H:%M:%S')" "$boots" "$reason" >> "$LOG" 2>/dev/null || true
     fi
 
-    # Nach 30 Tagen ohne ACTIVE oder ab dem 10. Offline-Start wird die
-    # bekannte Runtime-Bereinigung angewendet.
+    # Eine nachweislich abgelaufene 30-Tage-Lease bleibt die harte zeitliche
+    # Grenze. Ebenso greift ab dem 10. Offline-Start die bekannte Bereinigung.
     if [ "$state" = "expired" ] || [ "$boots" -ge "$OFFLINE_INACTIVE_THRESHOLD" ]; then
         printf '%s  INTERN|RUNTIME_INACTIVE|state=%s|offline_boots=%s|reason=%s|code=%s\n' \
             "$(date '+%Y-%m-%d %H:%M:%S')" "$state" "$boots" "$reason" "$INACTIVE_ERROR_CODE" \
@@ -334,11 +334,13 @@ lease_guard_or_lock() {
         apply_inactive_runtime_state
     fi
 
-    # Die ersten zwei Offline-Starts innerhalb einer gültigen Lease bleiben
-    # voll nutzbar. Ab dem dritten Start greift die reversible stille Sperre.
-    if [ "$state" = "valid" ] && [ "$boots" -lt "$OFFLINE_LOCK_THRESHOLD" ]; then
-        printf '%s  Lease gültig · Offline-Fallback erlaubt · count=%s (%s)\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$boots" "$reason" >> "$LOG" 2>/dev/null || true
+    # Die ersten zwei gezählten Offline-Starts bleiben immer nutzbar, solange
+    # die Lease nicht nachweislich abgelaufen ist. Das gilt bewusst auch bei
+    # fehlender/ungültiger Lease oder noch nicht synchronisierter Systemuhr:
+    # diese Zustände dürfen nicht schon beim ersten Offline-Boot sperren.
+    if [ "$boots" -lt "$OFFLINE_LOCK_THRESHOLD" ]; then
+        printf '%s  Offline-Fallback erlaubt · state=%s · count=%s (%s)\n' \
+            "$(date '+%Y-%m-%d %H:%M:%S')" "$state" "$boots" "$reason" >> "$LOG" 2>/dev/null || true
         return 0
     fi
 
