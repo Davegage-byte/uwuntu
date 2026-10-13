@@ -17,25 +17,41 @@ FORCE_UPDATE_SCRIPT="$HOME/.local/bin/uwuntu-force-update.sh"
 KIOSK_SELF="$HOME/.local/bin/start-kiosk-apps.sh"
 
 startup_network_may_reach_github() {
-    # Bei eindeutig fehlender/limitierter Konnektivität nicht erst Curl-
-    # Timeouts abwarten. "unknown" wird trotzdem kurz probiert, weil die
-    # NetworkManager-Konnektivitätsprüfung deaktiviert sein kann.
+    # Direkt nach dem GNOME-Login ist NetworkManager oft noch einige Sekunden
+    # bei "none", "limited", "portal" oder "unknown", obwohl WLAN/LAN gleich
+    # danach vollständig online ist. Solche normalen Boot-Rennen dürfen nicht
+    # als Offline-Start gezählt werden.
     if ! command -v nmcli >/dev/null 2>&1; then
         return 0
     fi
 
-    local connectivity
-    connectivity="$(
-        nmcli -t -f CONNECTIVITY general 2>/dev/null \
-            | head -n 1 \
-            | tr '[:upper:]' '[:lower:]'
-    )"
+    local connectivity=""
+    local deadline=$((SECONDS + 12))
+
+    while :; do
+        connectivity="$(
+            nmcli -t -f CONNECTIVITY general 2>/dev/null \
+                | head -n 1 \
+                | tr '[:upper:]' '[:lower:]'
+        )"
+
+        case "$connectivity" in
+            full)
+                return 0
+                ;;
+        esac
+
+        [ "$SECONDS" -ge "$deadline" ] && break
+        sleep 1
+    done
 
     case "$connectivity" in
         none|portal|limited)
             return 1
             ;;
         *)
+            # Bei "unknown" oder leerer Antwort GitHub selbst kurz probieren.
+            # Der commitgenaue Startup-Check entscheidet dann zuverlässig.
             return 0
             ;;
     esac
