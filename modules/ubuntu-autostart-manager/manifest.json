@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "runtime_build": 2026101301,
+  "runtime_build": 2026102001,
   "components": {
-    "network_check": "2.71",
+    "network_check": "2.72",
     "wipe_auto": "3.46",
     "hardware_check": "4.5.149",
     "camera_test": "1.24",

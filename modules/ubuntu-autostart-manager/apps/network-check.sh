@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.71"
+VERSION = "2.72"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -2195,6 +2195,358 @@ AUDIO_UI_STATE_FILE = (
     / "uwuntu_audio_engine_ui.json"
 )
 
+# ============================================================
+# Systeminformationen – gleiche Werte wie im Hardware Check
+# ============================================================
+def read_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception:
+        return ""
+
+def natural_key(value):
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", str(value))
+    ]
+
+def clean_dmi_value(value):
+    value = (value or "").strip()
+    if not value:
+        return "--"
+
+    placeholders = {
+        "none",
+        "not specified",
+        "not applicable",
+        "to be filled by o.e.m.",
+        "default string",
+        "system serial number",
+    }
+    if value.lower() in placeholders:
+        return "--"
+    return value
+
+def read_first_value(*paths):
+    for path in paths:
+        value = clean_dmi_value(read_text(path))
+        if value != "--":
+            return value
+    return "--"
+
+def detect_cpu_name():
+    try:
+        text = Path("/proc/cpuinfo").read_text(
+            encoding="utf-8", errors="ignore"
+        )
+        for line in text.splitlines():
+            if line.lower().startswith("model name") and ":" in line:
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    return re.sub(r"\s+", " ", value)
+    except Exception:
+        pass
+
+    try:
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        out = subprocess.check_output(
+            ["lscpu"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            env=env,
+        )
+        for line in out.splitlines():
+            if line.startswith("Model name:"):
+                value = line.split(":", 1)[1].strip()
+                if value:
+                    return re.sub(r"\s+", " ", value)
+    except Exception:
+        pass
+
+    return "--"
+
+def detect_ram_size():
+    try:
+        text = Path("/proc/meminfo").read_text(
+            encoding="utf-8", errors="ignore"
+        )
+        m = re.search(r"^MemTotal:\s+(\d+)\s+kB$", text, re.M)
+        if m:
+            gib = int(m.group(1)) * 1024 / (1024 ** 3)
+            return f"{gib:.1f} GB"
+    except Exception:
+        pass
+    return "--"
+
+def detect_ssd_info():
+    try:
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"
+        out = subprocess.check_output(
+            [
+                "lsblk", "-bdn",
+                "-o", "NAME,SIZE,MODEL,ROTA,TYPE,RM",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            env=env,
+        )
+    except Exception:
+        return "--"
+
+    candidates = []
+    for raw in out.splitlines():
+        parts = raw.split()
+        if len(parts) < 5:
+            continue
+
+        name = parts[0]
+        try:
+            size = int(parts[1])
+        except Exception:
+            continue
+
+        # Die letzten drei Spalten sind sicher ROTA, TYPE und RM.
+        try:
+            rota = int(parts[-3])
+            dev_type = parts[-2]
+            removable = int(parts[-1])
+        except Exception:
+            continue
+
+        model = " ".join(parts[2:-3]).strip() or "Unbekanntes Modell"
+
+        if dev_type != "disk" or removable != 0 or rota != 0:
+            continue
+
+        size_gb = size / 1_000_000_000.0
+        display = f"{size_gb:.0f} GB · {model}"
+        priority = 0 if name == "nvme0n1" else 1
+        candidates.append((priority, natural_key(name), display))
+
+    if not candidates:
+        return "--"
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+def detect_system_serial():
+    # Bewährte zentrale Seriennummer-Erkennung.
+    #
+    # Uwuntu bevorzugt jetzt bewusst dmidecode, weil diese Methode sowohl
+    # beim getesteten Dell-Service-Tag als auch beim Lenovo-Testgerät die
+    # tatsächlich benötigte System-Seriennummer liefert. Insbesondere Lenovo
+    # kann in product_serial zusätzlich MTM-/Typinformationen enthalten.
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "dmidecode", "-s", "system-serial-number"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        value = clean_dmi_value(result.stdout or "")
+        if value != "--":
+            return value
+    except Exception:
+        pass
+
+    # Sysfs bleibt ausschließlich als Fallback erhalten, falls dmidecode auf
+    # einem Gerät ausnahmsweise nicht verfügbar oder nicht lesbar ist.
+    candidates = [
+        Path("/sys/class/dmi/id/product_serial"),
+        Path("/sys/devices/virtual/dmi/id/product_serial"),
+        Path("/sys/class/dmi/id/chassis_serial"),
+        Path("/sys/class/dmi/id/board_serial"),
+    ]
+
+    for path in candidates:
+        value = clean_dmi_value(read_text(path))
+        if value != "--":
+            return value
+
+    return "--"
+
+def system_information():
+    dmi = Path("/sys/class/dmi/id")
+    return [
+        ("Hersteller", read_first_value(dmi / "sys_vendor", dmi / "board_vendor")),
+        ("Modell", read_first_value(dmi / "product_name", dmi / "board_name")),
+        ("Seriennummer", detect_system_serial()),
+        ("CPU", detect_cpu_name()),
+        ("RAM", detect_ram_size()),
+        ("SSD", detect_ssd_info()),
+    ]
+
+def warranty_support_target(serial):
+    """Garantie-/Supportziel für Dell und Lenovo bestimmen.
+
+    Die Seriennummer wurde vor diesem Aufruf bereits zentral ausgelesen und
+    über die vorhandene Clipboard-Funktion kopiert. Diese Funktion entscheidet
+    danach nur noch anhand des Herstellers, welche bestehende Garantie-URL
+    geöffnet wird.
+    """
+    dmi = Path("/sys/class/dmi/id")
+    manufacturer = read_first_value(
+        dmi / "sys_vendor",
+        dmi / "board_vendor",
+    )
+
+    if manufacturer == "--" or serial == "--":
+        return None
+
+    vendor = manufacturer.lower()
+
+    if "dell" in vendor:
+        # Bestehende Dell-Service-Tag-Logik unverändert.
+        if not re.fullmatch(r"[A-Za-z0-9]{5,20}", serial):
+            return None
+
+        url = (
+            "https://www.dell.com/support/product-details/de-de/servicetag/"
+            + serial
+            + "/overview"
+        )
+        return "Dell", manufacturer, serial, url
+
+    if "lenovo" in vendor:
+        if not re.fullmatch(r"[A-Za-z0-9-]{4,32}", serial):
+            return None
+
+        # Getesteter Lenovo-Direktlink. Lenovo löst die Seriennummer selbst
+        # auf; MTM und Produktname werden dafür nicht benötigt.
+        url = (
+            "https://pcsupport.lenovo.com/de/de/products/"
+            + serial
+            + "/warranty"
+        )
+        return "Lenovo", manufacturer, serial, url
+
+    # Andere Hersteller: bewusst kein Browser-Ziel.
+    return None
+
+class CompactSystemInfoPanel:
+    FIELDS = ("Hersteller", "Modell", "Seriennummer", "CPU", "RAM", "SSD")
+
+    def __init__(self):
+        self.generation = 0
+        self.serial = "--"
+        self.support_target = None
+        self.value_widgets = {}
+
+        self.root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.root.set_hexpand(True)
+        self.root.set_vexpand(False)
+        self.root.add_css_class("card")
+
+        heading = Gtk.Label(label="SYSTEMINFORMATIONEN")
+        heading.set_xalign(0)
+        heading.add_css_class("card-title")
+        self.root.append(heading)
+
+        grid = Gtk.Grid()
+        grid.set_row_spacing(3)
+        grid.set_column_spacing(10)
+        grid.set_hexpand(True)
+        self.root.append(grid)
+
+        for row, name in enumerate(self.FIELDS):
+            key = Gtk.Label(label=name)
+            key.set_xalign(0)
+            key.set_valign(Gtk.Align.START)
+            key.set_width_chars(12)
+            key.add_css_class("system-info-key")
+            grid.attach(key, 0, row, 1, 1)
+
+            value = Gtk.Label(label="…")
+            value.set_xalign(0)
+            value.set_valign(Gtk.Align.START)
+            value.set_hexpand(True)
+            value.set_wrap(True)
+            value.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            value.set_max_width_chars(45)
+            value.set_selectable(False)
+            value.add_css_class("system-info-value")
+            self.value_widgets[name] = value
+
+            if name == "Seriennummer":
+                self.serial_stack = Gtk.Stack()
+                self.serial_stack.set_hexpand(True)
+                self.serial_stack.add_named(value, "text")
+                self.serial_button = Gtk.Button()
+                self.serial_button.set_halign(Gtk.Align.START)
+                self.serial_button.set_focusable(False)
+                self.serial_button.add_css_class("system-info-serial-link")
+                self.serial_button.set_tooltip_text(
+                    "Seriennummer kopieren und Garantie/Support öffnen"
+                )
+                self.serial_button.connect("clicked", self.on_serial_clicked)
+                self.serial_stack.add_named(self.serial_button, "link")
+                self.serial_stack.set_visible_child_name("text")
+                grid.attach(self.serial_stack, 1, row, 1, 1)
+            else:
+                grid.attach(value, 1, row, 1, 1)
+
+        # DMI/lsblk nicht auf dem GTK-Thread auslesen. Der Audiotest und
+        # die Netzwerktests müssen auch bei langsamem dmidecode sofort starten.
+        self.refresh()
+
+    def refresh(self):
+        self.generation += 1
+        generation = self.generation
+        threading.Thread(
+            target=self._load_values,
+            args=(generation,),
+            daemon=True,
+        ).start()
+
+    def _load_values(self, generation):
+        try:
+            info = dict(system_information())
+        except Exception as exc:
+            log(f"Systeminformationen konnten nicht gelesen werden: {exc!r}")
+            info = {}
+        GLib.idle_add(self._apply_values, generation, info)
+
+    def _apply_values(self, generation, info):
+        if generation != self.generation:
+            return False
+
+        for name, widget in self.value_widgets.items():
+            widget.set_text(str(info.get(name) or "--"))
+
+        self.serial = str(info.get("Seriennummer") or "--")
+        self.support_target = warranty_support_target(self.serial)
+        if self.support_target is not None:
+            self.serial_button.set_label(self.serial)
+            self.serial_stack.set_visible_child_name("link")
+        else:
+            self.serial_stack.set_visible_child_name("text")
+        return False
+
+    def on_serial_clicked(self, _button):
+        if self.serial == "--":
+            return
+        try:
+            display = Gdk.Display.get_default()
+            if display is not None:
+                display.get_clipboard().set(self.serial)
+        except Exception:
+            pass
+
+        if self.support_target is not None:
+            try:
+                Gio.AppInfo.launch_default_for_uri(
+                    self.support_target[3], None
+                )
+            except Exception as exc:
+                log(f"Garantie-/Supportseite konnte nicht geöffnet werden: {exc!r}")
+
+
 class CompactAudioPanel:
     def __init__(self):
         self.waveform = []
@@ -2229,7 +2581,7 @@ class CompactAudioPanel:
         audio_row.set_vexpand(False)
 
         self.wave = Gtk.DrawingArea()
-        self.wave.set_content_width(210)
+        self.wave.set_content_width(145)
         self.wave.set_content_height(88)
         self.wave.set_hexpand(True)
         self.wave.set_vexpand(False)
@@ -2560,14 +2912,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.71 + Wipe Auto v3.46 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.72 + Wipe Auto v3.46 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.71 + Wipe Auto v3.46 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.72 + Wipe Auto v3.46 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
@@ -2641,10 +2993,21 @@ class NetworkCheckApp(Gtk.Application):
         self.wipe_panel.root.set_vexpand(False)
         content.append(self.wipe_panel.root)
 
-        # Audio bleibt dauerhaft sichtbar: Überschrift oben, darunter
-        # Waveform ab ganz links und die vier Testbuttons.
+        # Audio und Systeminformationen teilen die untere Zeile 50:50.
+        # Hardware-Check-Infofenster und Audio-Mess-Engine bleiben unverändert.
+        bottom_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=3,
+        )
+        bottom_row.set_hexpand(True)
+        bottom_row.set_vexpand(False)
+        bottom_row.set_homogeneous(True)
+
         self.audio_panel = CompactAudioPanel()
-        content.append(self.audio_panel.root)
+        bottom_row.append(self.audio_panel.root)
+        self.system_info_panel = CompactSystemInfoPanel()
+        bottom_row.append(self.system_info_panel.root)
+        content.append(bottom_row)
 
         shell.append(content)
 
@@ -2738,11 +3101,32 @@ class NetworkCheckApp(Gtk.Application):
 
         button.audio-mini {
             min-height: 34px;
-            min-width: 82px;
-            padding: 2px 7px;
+            min-width: 70px;
+            padding: 2px 4px;
             border-radius: 7px;
             font-size: 10px;
             font-weight: 800;
+        }
+        .system-info-key {
+            color: #9d9da7;
+            font-size: 10px;
+            font-weight: 700;
+        }
+        .system-info-value {
+            color: #f4f4f5;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        button.system-info-serial-link {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+            padding: 0;
+            min-height: 0;
+            color: #5aa2ff;
+            font-size: 11px;
+            font-weight: 700;
+            text-decoration: underline;
         }
         button.audio-mini.audio-orange {
             background: #232329;
@@ -3295,6 +3679,7 @@ class NetworkCheckApp(Gtk.Application):
 
         self.wipe_panel.restore_wipe_button()
         self.wipe_panel.refresh()
+        self.system_info_panel.refresh()
         GLib.idle_add(self.wipe_panel.focus_wipe_button)
 
         self.on_test_clicked(button)
