@@ -169,7 +169,7 @@ import queue
 import math
 from datetime import datetime
 from pathlib import Path
-VERSION = "2.72"
+VERSION = "2.73"
 # ============================================================
 # EINSTELLUNGEN
 # Diese Grenzwerte sind für den ersten Praxistest bewusst
@@ -2430,7 +2430,7 @@ def warranty_support_target(serial):
     return None
 
 class CompactSystemInfoPanel:
-    FIELDS = ("Hersteller", "Modell", "Seriennummer", "CPU", "RAM", "SSD")
+    FIELDS = ("Gerät", "Seriennummer", "CPU", "RAM", "SSD")
 
     def __init__(self):
         self.generation = 0
@@ -2471,6 +2471,11 @@ class CompactSystemInfoPanel:
             value.set_max_width_chars(45)
             value.set_selectable(False)
             value.add_css_class("system-info-value")
+            # Hersteller und Modell sind ein einziger, sicher einzeiliger
+            # Eintrag. Bei langen Bezeichnungen zeigt der Tooltip alles.
+            if name == "Gerät":
+                value.set_wrap(False)
+                value.set_ellipsize(Pango.EllipsizeMode.END)
             self.value_widgets[name] = value
 
             if name == "Seriennummer":
@@ -2517,7 +2522,18 @@ class CompactSystemInfoPanel:
             return False
 
         for name, widget in self.value_widgets.items():
-            widget.set_text(str(info.get(name) or "--"))
+            if name == "Gerät":
+                parts = (
+                    str(info.get(key) or "").strip()
+                    for key in ("Hersteller", "Modell")
+                )
+                device = " ".join(
+                    part for part in parts if part and part != "--"
+                ) or "--"
+                widget.set_text(device)
+                widget.set_tooltip_text(device)
+            else:
+                widget.set_text(str(info.get(name) or "--"))
 
         self.serial = str(info.get("Seriennummer") or "--")
         self.support_target = warranty_support_target(self.serial)
@@ -2912,14 +2928,14 @@ class NetworkCheckApp(Gtk.Application):
         self.install_css()
 
         self.window = Gtk.ApplicationWindow(application=self)
-        self.window.set_title("Network Check v2.72 + Wipe Auto v3.46 + Audio Test v1.29")
+        self.window.set_title("Network Check v2.73 + Wipe Auto v3.46 + Audio Test v1.29")
         self.window.set_default_size(960, 520)
 
         # Einheitliche Titelleiste: Name mittig, gemeinsamer REFRESH rechts.
         self.header_bar = Gtk.HeaderBar()
         self.header_bar.set_show_title_buttons(True)
 
-        title_label = Gtk.Label(label="Network Check v2.72 + Wipe Auto v3.46 + Audio Test v1.29")
+        title_label = Gtk.Label(label="Network Check v2.73 + Wipe Auto v3.46 + Audio Test v1.29")
         title_label.add_css_class("title")
         self.header_bar.set_title_widget(title_label)
 
